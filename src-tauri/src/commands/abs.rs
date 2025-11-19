@@ -7,38 +7,38 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Serialize)]
-struct ConnectionTest {
+pub struct ConnectionTest {
     success: bool,
     message: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct PushItem {
+pub struct PushItem {
     path: String,
     metadata: scanner::BookMetadata,
 }
 
 #[derive(Debug, Deserialize)]
-struct PushRequest {
+pub struct PushRequest {
     items: Vec<PushItem>,
 }
 
 #[derive(Debug, Serialize)]
-struct PushFailure {
+pub struct PushFailure {
     path: String,
     reason: String,
     status: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
-struct PushResult {
+pub struct PushResult {
     updated: usize,
     unmatched: Vec<String>,
     failed: Vec<PushFailure>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct AbsLibraryItem {
+pub struct AbsLibraryItem {
     id: String,
     path: String,
     #[serde(default)]
@@ -46,7 +46,7 @@ struct AbsLibraryItem {
 }
 
 #[derive(Debug, Deserialize)]
-struct AbsItemsResponse {
+pub struct AbsItemsResponse {
     results: Vec<AbsLibraryItem>,
     #[serde(default)]
     total: Option<usize>,
@@ -55,12 +55,12 @@ struct AbsItemsResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct UpdateMediaResponse {
+pub struct UpdateMediaResponse {
     updated: bool,
 }
 
 #[derive(Debug)]
-struct PushError {
+pub struct PushError {
     reason: String,
     status: Option<u16>,
 }

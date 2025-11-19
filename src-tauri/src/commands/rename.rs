@@ -5,7 +5,7 @@ use crate::{file_rename, scanner};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-struct RenamePreview {
+pub struct RenamePreview {
     old_path: String,
     new_path: String,
     changed: bool,

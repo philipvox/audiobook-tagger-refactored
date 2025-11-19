@@ -1,11 +1,12 @@
-use std::path::Path;
 use anyhow::Result;
+use lofty::prelude::*;
 use lofty::probe::Probe;
-use lofty::file::{TaggedFileExt, AudioFile};
-use lofty::tag::{Accessor, Tag, ItemKey, ItemValue, TagItem};
-use serde::{Serialize, Deserialize};
-use tokio::sync::Semaphore;
+use lofty::tag::{Accessor, ItemKey, Tag, TagItem, ItemValue};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WriteResult {
@@ -19,6 +20,18 @@ pub struct WriteError {
     pub file_id: String,
     pub path: String,
     pub error: String,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct WriteRequest {
+    pub file_ids: Vec<String>,
+    pub files: HashMap<String, FileData>,
+    pub backup: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FileData {
+    pub path: String,
+    pub changes: HashMap<String, crate::scanner::MetadataChange>,
 }
 
 pub async fn write_files_parallel(

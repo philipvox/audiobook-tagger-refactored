@@ -1,0 +1,56 @@
+// src-tauri/src/scanner/mod.rs
+pub mod types;
+pub mod collector;
+pub mod processor;
+pub mod metadata;
+
+pub use types::*;
+use crate::config::Config;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+pub async fn scan_directories(
+    paths: &[String],
+    cancel_flag: Option<Arc<AtomicBool>>
+) -> Result<ScanResult, Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔍 Starting scan of {} paths", paths.len());
+    
+    if let Some(ref flag) = cancel_flag {
+        if flag.load(Ordering::SeqCst) {
+            println!("Scan cancelled before start");
+            return Ok(ScanResult {
+                groups: vec![],
+                total_files: 0,
+                total_groups: 0,
+            });
+        }
+    }
+    
+    let config = Config::load()?;
+    
+    let groups = collector::collect_and_group_files(paths, cancel_flag.clone()).await?;
+    
+    if groups.is_empty() {
+        println!("No audiobook files found");
+        return Ok(ScanResult {
+            groups: vec![],
+            total_files: 0,
+            total_groups: 0,
+        });
+    }
+    
+    let total_files: usize = groups.iter().map(|g| g.files.len()).sum();
+    println!("📚 Found {} books with {} total files", groups.len(), total_files);
+    
+    let processed_groups = processor::process_all_groups(
+        groups,
+        &config,
+        cancel_flag.clone()
+    ).await?;
+    
+    Ok(ScanResult {
+        total_groups: processed_groups.len(),
+        total_files,
+        groups: processed_groups,
+    })
+}

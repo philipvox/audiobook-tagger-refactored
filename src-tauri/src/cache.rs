@@ -1,47 +1,31 @@
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+// src-tauri/src/cache.rs - Complete replacement
+use once_cell::sync::Lazy;
+use sled::Db;
+use std::sync::Mutex;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedMetadata {
-    // Store the FINAL merged metadata to skip GPT merge on cache hit
-    pub final_metadata: crate::scanner::BookMetadata,
-    pub timestamp: u64,
+static CACHE_DB: Lazy<Mutex<Db>> = Lazy::new(|| {
+    let cache_path = dirs::home_dir()
+        .unwrap()
+        .join("Library/Application Support/Audiobook Tagger/cache");
+    
+    Mutex::new(sled::open(cache_path).expect("Failed to open cache database"))
+});
+
+pub fn get<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
+    let cache = CACHE_DB.lock().unwrap();
+    let bytes = cache.get(key.as_bytes()).ok()??;
+    bincode::deserialize(&bytes).ok()
 }
 
-#[derive(Clone)]
-pub struct MetadataCache {
-    db: sled::Db,
+pub fn set<T: serde::Serialize>(key: &str, value: &T) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cache = CACHE_DB.lock().unwrap();
+    let bytes = bincode::serialize(value)?;
+    cache.insert(key.as_bytes(), bytes)?;
+    Ok(())
 }
 
-impl MetadataCache {
-    pub fn new() -> Result<Self> {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("audiobook-tagger");
-        std::fs::create_dir_all(&cache_dir)?;
-        
-        let db = sled::open(cache_dir.join("metadata_cache"))?;
-        Ok(Self { db })
-    }
-    
-    pub fn get(&self, title: &str, author: &str) -> Option<CachedMetadata> {
-        let key = format!("{}:{}", title.to_lowercase(), author.to_lowercase());
-        let value = self.db.get(key).ok()??;
-        bincode::deserialize(&value).ok()
-    }
-    
-    pub fn set(&self, title: &str, author: &str, metadata: CachedMetadata) -> Result<()> {
-        let key = format!("{}:{}", title.to_lowercase(), author.to_lowercase());
-        let value = bincode::serialize(&metadata)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        self.db.insert(key, value)?;
-        self.db.flush()?;
-        Ok(())
-    }
-    
-    pub fn clear(&self) -> Result<()> {
-        self.db.clear()?;
-        Ok(())
-    }
+pub fn clear() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cache = CACHE_DB.lock().unwrap();
+    cache.clear()?;
+    Ok(())
 }

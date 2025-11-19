@@ -10,10 +10,10 @@ pub mod maintenance;
 pub mod audible;
 
 // Re-export all commands for easy access
-pub use config::*;
-pub use scan::*;
-pub use tags::*;
-pub use rename::*;
-pub use abs::*;
-pub use maintenance::*;
-pub use audible::*;
+// pub use config::*;
+// pub use scan::*;
+// pub use tags::*;
+// pub use rename::*;
+// pub use abs::*;
+// pub use maintenance::*;
+// pub use audible::*;

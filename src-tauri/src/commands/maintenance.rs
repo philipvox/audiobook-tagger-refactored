@@ -1,10 +1,8 @@
-// commands/maintenance.rs
-// Cache management and genre normalization commands
-
-use crate::{cache, config, genres};
-use serde::{Deserialize, Serialize};
+// src-tauri/src/commands/maintenance.rs - Complete file
+use crate::{config, genres};
+use serde::Deserialize;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 #[derive(Debug, Deserialize)]
 struct LibraryFilterData {
@@ -34,10 +32,7 @@ struct LibraryItemsResponse {
 
 #[tauri::command]
 pub async fn clear_cache() -> Result<String, String> {
-    cache::MetadataCache::new()
-        .map_err(|e| e.to_string())?
-        .clear()
-        .map_err(|e| e.to_string())?;
+    crate::cache::clear().map_err(|e| e.to_string())?;
     Ok("Cache cleared successfully".to_string())
 }
 
