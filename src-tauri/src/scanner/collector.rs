@@ -116,6 +116,9 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                     publisher: None,
                     year: None,
                     isbn: None,
+                    cover_data: None,      // ADD THIS
+                    cover_mime: None,       // ADD THIS
+                    cover_url: None,        // ADD THIS
                 },
                 files: audio_files,
                 total_changes: 0,

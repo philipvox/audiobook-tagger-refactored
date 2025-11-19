@@ -334,7 +334,7 @@ export function ScannerPage() {
     });
   };
 
-
+  
 
   return (
     <div className="h-full flex flex-col relative">
@@ -379,9 +379,9 @@ export function ScannerPage() {
           group={selectedGroup}
           onEdit={handleEditMetadata}
         />
-      </div>
+       </div>
 
-      {/* Progress bars - now inside the flex container */}
+      {/* Progress bars */}
       {scanning && scanProgress.total > 0 && (
         <ProgressBar
           type="scan"

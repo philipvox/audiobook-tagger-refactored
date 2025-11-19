@@ -6,7 +6,6 @@ export function useTagOperations() {
   const { config, groups, updateFileStatuses, setWriteProgress } = useApp();
   const [writing, setWriting] = useState(false);
   const [pushing, setPushing] = useState(false);
-
   const writeSelectedTags = useCallback(async (selectedFiles) => {
     try {
       setWriting(true);
@@ -37,12 +36,13 @@ export function useTagOperations() {
       });
       updateFileStatuses(newStatuses);
       
-      setWriting(false);
       return result;
     } catch (error) {
       console.error('Write failed:', error);
-      setWriting(false);
       throw error;
+    } finally {
+      setWriting(false);
+      setWriteProgress({ current: 0, total: 0 }); // Reset here
     }
   }, [config, groups, updateFileStatuses, setWriteProgress]);
 
