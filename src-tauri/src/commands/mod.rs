@@ -8,6 +8,7 @@ pub mod rename;
 pub mod abs;
 pub mod maintenance;
 pub mod audible;
+pub mod covers;
 
 // Re-export all commands for easy access
 // pub use config::*;

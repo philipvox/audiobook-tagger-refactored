@@ -27,7 +27,6 @@ pub enum GroupType {
     Chapters,
     MultiPart,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookMetadata {
     pub title: String,
@@ -50,6 +49,13 @@ pub struct BookMetadata {
     pub year: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isbn: Option<String>,
+    // Cover art fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_data: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_mime: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

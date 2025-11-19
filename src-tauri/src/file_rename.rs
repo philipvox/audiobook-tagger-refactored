@@ -162,7 +162,7 @@ pub async fn rename_book_group(
     
     for (idx, file_path) in files.iter().enumerate() {
         let old_path = Path::new(file_path);
-        let extension = old_path
+        let _extension = old_path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("m4b");

@@ -10,19 +10,20 @@ mod audible;
 mod audible_auth;
 mod genres;
 mod genre_cache;
-mod processor;
+// mod processor;
 mod file_rename;
 mod tag_inspector;
 mod commands;
+mod cover_art;  // ADD THIS
 
-use tauri::Manager;
+// use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
-            #[cfg(debug_assertions)]
-            app.get_webview_window("main").unwrap().open_devtools();
+        .setup(|_app| {
+            // #[cfg(debug_assertions)]
+            // _app.get_webview_window("main").unwrap().open_devtools();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -45,6 +46,8 @@ fn main() {
             commands::maintenance::clear_all_genres,
             commands::audible::login_to_audible,
             commands::audible::check_audible_installed,
+            commands::covers::set_cover_from_file,
+            commands::covers::fetch_better_cover,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

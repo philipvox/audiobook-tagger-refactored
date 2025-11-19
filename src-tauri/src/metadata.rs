@@ -79,7 +79,20 @@ pub async fn fetch_from_google_books(
         println!("             ❌ API error: {}", response.status());
         return Ok(None);
     }
-    
+    // In the fetch_from_google_books function, after getting image_links:
+    if let Some(image_links) = &book.volume_info.image_links {
+        // Try to get largest available - prefer extraLarge or large
+        metadata.cover_url = image_links.get("extraLarge")
+            .or_else(|| image_links.get("large"))
+            .or_else(|| image_links.get("medium"))
+            .or_else(|| image_links.get("thumbnail"))
+            .map(|url| {
+                // Force HTTPS and request zoom=3 for larger image
+                url.replace("http://", "https://")
+                    .replace("zoom=1", "zoom=3")
+                    .replace("&edge=curl", "")
+            });
+    }
     let books: GoogleBooksResponse = response.json().await?;
     
     if let Some(book) = books.items.first() {

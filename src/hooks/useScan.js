@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useApp } from '../context/AppContext';
@@ -13,6 +13,8 @@ export function useScan() {
     startTime: null,
     filesPerSecond: 0
   });
+  
+  const progressIntervalRef = useRef(null);
 
   const calculateETA = useCallback(() => {
     if (!scanProgress.startTime || scanProgress.current === 0) return 'Calculating...';
@@ -28,6 +30,12 @@ export function useScan() {
   }, [scanProgress]);
 
   const handleScan = useCallback(async () => {
+    // Clear any existing interval first
+    if (progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+    }
+    
     try {
       const selected = await open({
         directory: true,
@@ -37,40 +45,48 @@ export function useScan() {
       if (!selected) return;
       
       const paths = Array.isArray(selected) ? selected : [selected];
-      setScanning(true);
       
+      // Reset state
+      setScanning(true);
+      const startTime = Date.now();
       setScanProgress({
         current: 0,
         total: 0,
         currentFile: '',
-        startTime: Date.now(),
+        startTime,
         filesPerSecond: 0
       });
       
-      const progressInterval = setInterval(async () => {
+      // Start polling with ref
+      progressIntervalRef.current = setInterval(async () => {
         try {
           const progress = await invoke('get_scan_progress');
-          const elapsed = (Date.now() - scanProgress.startTime) / 1000;
-          const rate = progress.current > 0 ? progress.current / elapsed : 0;
+          const now = Date.now();
+          const elapsed = (now - startTime) / 1000;
+          const rate = progress.current > 0 && elapsed > 0 ? progress.current / elapsed : 0;
           
-          setScanProgress(prev => ({
-            ...prev,
+          setScanProgress({
             current: progress.current,
             total: progress.total,
             currentFile: progress.current_file || '',
+            startTime,
             filesPerSecond: rate
-          }));
+          });
         } catch (error) {
-          // Progress endpoint might not exist yet
+          // Ignore
         }
       }, 500);
       
       try {
         const result = await invoke('scan_library', { paths });
         
-        clearInterval(progressInterval);
+        // Stop polling immediately after scan completes
+        if (progressIntervalRef.current) {
+          clearInterval(progressIntervalRef.current);
+          progressIntervalRef.current = null;
+        }
         
-        // Deduplicate and merge with existing groups
+        // Process results
         setGroups(prevGroups => {
           const existingFilePaths = new Map();
           prevGroups.forEach(group => {
@@ -85,10 +101,8 @@ export function useScan() {
           result.groups.forEach(newGroup => {
             const newGroupFilePaths = newGroup.files.map(f => f.path);
             
-            let isDuplicate = false;
             newGroupFilePaths.forEach(path => {
               if (existingFilePaths.has(path)) {
-                isDuplicate = true;
                 groupIdsToReplace.add(existingFilePaths.get(path));
               }
             });
@@ -101,51 +115,77 @@ export function useScan() {
         });
         
       } finally {
-        clearInterval(progressInterval);
+        // Ensure interval is cleared
+        if (progressIntervalRef.current) {
+          clearInterval(progressIntervalRef.current);
+          progressIntervalRef.current = null;
+        }
+        
         setScanning(false);
-        setScanProgress({
-          current: 0,
-          total: 0,
-          currentFile: '',
-          startTime: null,
-          filesPerSecond: 0
-        });
+        
+        // Reset progress after a small delay to let UI update
+        setTimeout(() => {
+          setScanProgress({
+            current: 0,
+            total: 0,
+            currentFile: '',
+            startTime: null,
+            filesPerSecond: 0
+          });
+        }, 500);
       }
     } catch (error) {
       console.error('Scan failed:', error);
+      
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+        progressIntervalRef.current = null;
+      }
+      
       setScanning(false);
-      throw error;
+      setScanProgress({
+        current: 0,
+        total: 0,
+        currentFile: '',
+        startTime: null,
+        filesPerSecond: 0
+      });
     }
-  }, [setGroups, scanProgress.startTime]);
+  }, [setGroups]);
 
   const handleRescan = useCallback(async (selectedFiles, groups) => {
+    // Clear any existing interval first
+    if (progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+    }
+    
     try {
       setScanning(true);
+      const startTime = Date.now();
       
       setScanProgress({
         current: 0,
         total: 0,
         currentFile: '',
-        startTime: Date.now(),
+        startTime,
         filesPerSecond: 0
       });
       
-      const progressInterval = setInterval(async () => {
+      progressIntervalRef.current = setInterval(async () => {
         try {
           const progress = await invoke('get_scan_progress');
+          const now = Date.now();
+          const elapsed = (now - startTime) / 1000;
+          const rate = progress.current > 0 && elapsed > 0 ? progress.current / elapsed : 0;
           
-          if (progress.total > 0) {
-            const elapsed = (Date.now() - scanProgress.startTime) / 1000;
-            const rate = progress.current > 0 ? progress.current / elapsed : 0;
-            
-            setScanProgress(prev => ({
-              ...prev,
-              current: progress.current,
-              total: progress.total,
-              currentFile: progress.current_file || '',
-              filesPerSecond: rate
-            }));
-          }
+          setScanProgress({
+            current: progress.current,
+            total: progress.total,
+            currentFile: progress.current_file || '',
+            startTime,
+            filesPerSecond: rate
+          });
         } catch (error) {
           // Ignore
         }
@@ -164,8 +204,6 @@ export function useScan() {
         });
 
         if (groupsToRescan.length === 0) {
-          clearInterval(progressInterval);
-          setScanning(false);
           return;
         }
 
@@ -205,26 +243,45 @@ export function useScan() {
         return { success: true, count: allNewGroups.length };
         
       } finally {
-        clearInterval(progressInterval);
+        if (progressIntervalRef.current) {
+          clearInterval(progressIntervalRef.current);
+          progressIntervalRef.current = null;
+        }
+        
         setScanning(false);
-        setScanProgress({
-          current: 0,
-          total: 0,
-          currentFile: '',
-          startTime: null,
-          filesPerSecond: 0
-        });
+        
+        setTimeout(() => {
+          setScanProgress({
+            current: 0,
+            total: 0,
+            currentFile: '',
+            startTime: null,
+            filesPerSecond: 0
+          });
+        }, 500);
       }
     } catch (error) {
       console.error('Rescan failed:', error);
+      
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+        progressIntervalRef.current = null;
+      }
+      
       setScanning(false);
       throw error;
     }
-  }, [setGroups, scanProgress.startTime]);
+  }, [setGroups]);
 
   const cancelScan = useCallback(async () => {
     try {
       await invoke('cancel_scan');
+      
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+        progressIntervalRef.current = null;
+      }
+      
       setScanning(false);
       setScanProgress({
         current: 0,

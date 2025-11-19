@@ -86,7 +86,7 @@ pub async fn write_file_tags(
         std::fs::copy(path, &backup_path)?;
     }
     
-    let mut tagged_file = match Probe::open(path) {
+    let tagged_file = match Probe::open(path) {
         Ok(probe) => probe,
         Err(e) => anyhow::bail!("Cannot open file (may be corrupted): {}", e),
     };
