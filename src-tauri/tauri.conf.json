@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "productName": "Audiobook Tagger",
+  "version": "1.0.0",
+  "identifier": "com.audiobook.tagger",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Audiobook Tagger",
+        "width": 1400,
+        "height": 900,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": [
+        {
+          "identifier": "main-capability",
+          "description": "Main app permissions",
+          "windows": [
+            "main"
+          ],
+          "permissions": [
+            "core:default",
+            "dialog:allow-open",
+            "dialog:allow-save",
+            "dialog:allow-message",
+            "dialog:allow-ask",
+            "dialog:allow-confirm"
+          ]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "entitlements": "entitlements.plist",
+      "exceptionDomain": null
+    }
+  }
+}
