@@ -334,8 +334,11 @@ export function ScannerPage() {
     });
   };
 
+
+
   return (
-    <div className="h-full flex bg-gray-50">
+    <div className="h-full flex flex-col relative">
+      {/* Action bars at the top */}
       <ActionBar
         selectedFiles={selectedFiles}
         groups={groups}
@@ -350,31 +353,35 @@ export function ScannerPage() {
         scanning={scanning}
       />
 
-      <BookList
-        groups={groups}
-        selectedFiles={selectedFiles}
-        selectedGroup={selectedGroup}
-        expandedGroups={expandedGroups}
-        fileStatuses={fileStatuses}
-        onGroupClick={setSelectedGroup}
-        onToggleGroup={(groupId) => {
-          const newExpanded = new Set(expandedGroups);
-          newExpanded.has(groupId) ? newExpanded.delete(groupId) : newExpanded.add(groupId);
-          setExpandedGroups(newExpanded);
-        }}
-        onSelectGroup={selectAllInGroup}
-        onSelectFile={handleGroupClick}
-        onScan={handleScan}
-        scanning={scanning}
-        onSelectAll={() => selectAll(groups)}
-        onClearSelection={clearSelection}
-      />
+      {/* Main content area with book list and metadata panel */}
+      <div className="flex-1 flex overflow-hidden bg-gray-50">
+        <BookList
+          groups={groups}
+          selectedFiles={selectedFiles}
+          selectedGroup={selectedGroup}
+          expandedGroups={expandedGroups}
+          fileStatuses={fileStatuses}
+          onGroupClick={setSelectedGroup}
+          onToggleGroup={(groupId) => {
+            const newExpanded = new Set(expandedGroups);
+            newExpanded.has(groupId) ? newExpanded.delete(groupId) : newExpanded.add(groupId);
+            setExpandedGroups(newExpanded);
+          }}
+          onSelectGroup={selectAllInGroup}
+          onSelectFile={handleGroupClick}
+          onScan={handleScan}
+          scanning={scanning}
+          onSelectAll={() => selectAll(groups)}
+          onClearSelection={clearSelection}
+        />
 
-      <MetadataPanel
-        group={selectedGroup}
-        onEdit={handleEditMetadata}
-      />
+        <MetadataPanel
+          group={selectedGroup}
+          onEdit={handleEditMetadata}
+        />
+      </div>
 
+      {/* Progress bars - now inside the flex container */}
       {scanning && scanProgress.total > 0 && (
         <ProgressBar
           type="scan"
@@ -391,6 +398,7 @@ export function ScannerPage() {
         />
       )}
 
+      {/* Modals */}
       {showEditModal && editingGroup && (
         <EditMetadataModal
           isOpen={showEditModal}
