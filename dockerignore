@@ -1,0 +1,81 @@
+# Docker Ignore File
+# Excludes unnecessary files from Docker build context
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Dependencies (will be installed in container)
+node_modules/
+target/
+src-tauri/target/
+dist/
+dist-ssr/
+
+# Build outputs
+*.app
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+src-tauri/target/release/bundle/
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+*.secret
+config.json
+
+# OS files
+.DS_Store
+Thumbs.db
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Backup files
+*.backup
+*.backup.*
+*.bak
+*.old
+
+# Cache
+.cache/
+.eslintcache
+genre_cache.json
+metadata_cache.json
+
+# User data
+user_data/
+libraries/
+
+# Documentation (not needed in build)
+docs/
+*.md
+!README.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Docker itself
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Tests (uncomment if you don't want to run tests in Docker)
+# tests/
+# **/test/
+# **/*.test.js
+# **/*.spec.js
+
+# Audio files (if any for testing)
+*.m4a
+*.m4b
+*.mp3
+*.flac

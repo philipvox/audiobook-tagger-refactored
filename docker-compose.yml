@@ -1,0 +1,46 @@
+# Docker Compose for Audiobook Tagger Development
+version: '3.8'
+
+services:
+  # Development environment
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: audiobook-tagger-dev
+    volumes:
+      # Mount source code (read/write)
+      - .:/workspace
+      # Mount cargo cache (speeds up builds)
+      - cargo-cache:/usr/local/cargo/registry
+      # Mount cargo git cache
+      - cargo-git-cache:/usr/local/cargo/git
+      # Mount node_modules as named volume (faster on macOS/Windows)
+      - node_modules:/workspace/node_modules
+    working_dir: /workspace
+    command: /bin/bash
+    stdin_open: true
+    tty: true
+    environment:
+      - RUST_BACKTRACE=1
+      - CARGO_TARGET_DIR=/workspace/target
+
+  # Build environment (for CI/CD)
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: audiobook-tagger-build
+    volumes:
+      - .:/workspace
+      - cargo-cache:/usr/local/cargo/registry
+      - cargo-git-cache:/usr/local/cargo/git
+    working_dir: /workspace
+    command: npm run tauri build
+    environment:
+      - RUST_BACKTRACE=1
+
+volumes:
+  cargo-cache:
+  cargo-git-cache:
+  node_modules:

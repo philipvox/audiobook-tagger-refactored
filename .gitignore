@@ -1,0 +1,28 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Node
+node_modules/
+dist/
+.DS_Store
+*.log
+
+# Tauri
+src-tauri/target/
+
+# Build artifacts
+*.dmg
+*.app
+
+# Environment
+.env
+.env.local
+
+# macOS
+.DS_Store
+._*
+
+# Config (contains secrets)
+config.json
