@@ -1,4 +1,6 @@
-import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book } from 'lucide-react';
 
 export function BookList({ 
   groups, 
@@ -15,6 +17,54 @@ export function BookList({
   onSelectAll,
   onClearSelection
 }) {
+  const [coverCache, setCoverCache] = useState({});
+
+  // Load covers for visible groups
+useEffect(() => {
+  const loadCovers = async () => {
+    const newCache = { ...coverCache }; // Preserve existing covers
+    
+    for (const group of groups) {
+      // Skip if already loaded
+      if (newCache[group.id]) continue;
+      
+      try {
+        const cover = await invoke('get_cover_for_group', { groupId: group.id });
+        if (cover && cover.data) {
+          try {
+            const blob = new Blob([new Uint8Array(cover.data)], { type: cover.mime_type || 'image/jpeg' });
+            const url = URL.createObjectURL(blob);
+            newCache[group.id] = url;
+          } catch (blobError) {
+            console.error('Failed to create blob for group:', group.id, blobError);
+          }
+        } else {
+          console.log('No cover data for group:', group.id);
+        }
+      } catch (error) {
+        console.error('Failed to load cover for group:', group.id, error);
+      }
+    }
+    
+    setCoverCache(newCache);
+  };
+
+  if (groups.length > 0) {
+    loadCovers();
+  }
+
+  return () => {
+    // Cleanup blob URLs
+    Object.values(coverCache).forEach(url => {
+      try {
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    });
+  };
+}, [groups]);
+
   const getFileStatusIcon = (fileId) => {
     const status = fileStatuses[fileId];
     if (status === 'success') return <span className="text-green-600 font-bold">✓</span>;
@@ -78,116 +128,172 @@ export function BookList({
 
       {/* Book Groups List */}
       <div className="flex-1 overflow-y-auto">
-        {groups.map((group, index) => (
-          <div 
-            key={group.id} 
-            className={`border-b border-gray-100 hover:bg-gray-50 transition-colors cursor-pointer ${
-              selectedGroup?.id === group.id ? 'bg-blue-50 border-r-4 border-blue-500' : ''
-            }`}
-            onClick={(e) => {
-              onSelectFile(group, index, e.shiftKey);
-            }}
-          >
-            <div className="p-4">
-              <div className="flex items-start gap-3">
-                {/* Checkbox */}
-                <input
-                  type="checkbox"
-                  checked={group.files.every(f => selectedFiles.has(f.id))}
-                  onChange={(e) => {
-                    e.stopPropagation();
-                    onSelectGroup(group, e.target.checked);
-                  }}
-                  className="mt-1 w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                />
-
-                {/* Book Info */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between mb-2">
-                    <h4 className="font-medium text-gray-900 text-sm leading-tight truncate pr-2">
-                      {group.metadata.title}
-                    </h4>
-                    <div className="flex items-center gap-1 flex-shrink-0">
-                      {group.total_changes > 0 && (
-                        <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded-full font-medium">
-                          {group.total_changes}
-                        </span>
-                      )}
-                      {group.files.some(f => fileStatuses[f.id] === 'success') && (
-                        <CheckCircle className="w-4 h-4 text-green-600" />
-                      )}
-                    </div>
-                  </div>
-                  
-                  <p className="text-sm text-gray-600 mb-2 leading-relaxed">
-                    by {group.metadata.author}
-                  </p>
-                  
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3 text-xs text-gray-500">
-                      <span>{group.files.length} file{group.files.length === 1 ? '' : 's'}</span>
-                      <span className="capitalize">{group.group_type}</span>
-                    </div>
-                    
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onToggleGroup(group.id);
-                      }}
-                      className="p-1 hover:bg-gray-200 rounded transition-colors"
-                    >
-                      {expandedGroups.has(group.id) ? (
-                        <ChevronDown className="w-4 h-4 text-gray-500" />
-                      ) : (
-                        <ChevronRight className="w-4 h-4 text-gray-500" />
-                      )}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-            
-            {/* Expanded Files */}
-            {expandedGroups.has(group.id) && (
-              <div className="bg-gray-50 border-t border-gray-200">
-                {group.files.map((file) => (
-                  <div
-                    key={file.id}
-                    className="px-4 py-3 hover:bg-gray-100 transition-colors border-b border-gray-200 last:border-b-0"
-                  >
-                    <div className="flex items-center gap-3 pl-7">
-                      <input
-                        type="checkbox"
-                        checked={selectedFiles.has(file.id)}
-                        onChange={(e) => {
-                          e.stopPropagation();
-                          // Toggle individual file
+        {groups.map((group, index) => {
+          const isSelected = selectedGroup?.id === group.id;
+          const metadata = group.metadata;
+          
+          return (
+            <div 
+              key={group.id} 
+              className={`border-b border-gray-100 transition-colors cursor-pointer ${
+                isSelected 
+                  ? 'bg-blue-50 border-l-4 border-l-blue-600' 
+                  : 'hover:bg-gray-50 border-l-4 border-l-transparent'
+              }`}
+              onClick={(e) => {
+                onSelectFile(group, index, e.shiftKey);
+              }}
+            >
+              <div className="p-4">
+                <div className="flex items-start gap-3">
+                  {/* Thumbnail - Book aspect ratio (2:3) */}
+                  <div className="flex-shrink-0 w-16 h-24 bg-gradient-to-br from-gray-100 to-gray-200 rounded shadow-sm overflow-hidden relative">
+                    {coverCache[group.id] ? (
+                      <img 
+                        src={coverCache[group.id]} 
+                        alt={metadata.title}
+                        className="w-full h-full object-cover"
+                        onError={(e) => {
+                          console.error('Image failed to load:', coverCache[group.id]);
+                          e.target.style.display = 'none';
                         }}
-                        className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
                       />
-                      
-                      <div className="flex items-center gap-2">
-                        {getFileStatusIcon(file.id)}
-                        <FileAudio className="w-4 h-4 text-gray-400" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <Book className="w-6 h-6 text-gray-400" />
                       </div>
-                      
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm text-gray-900 truncate">
-                          {file.filename}
-                        </div>
-                        {Object.keys(file.changes).length > 0 && (
-                          <div className="text-xs text-amber-600 mt-0.5">
-                            {Object.keys(file.changes).length} pending changes
-                          </div>
+                    )}
+                  </div>
+
+                  {/* Book Info */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-start justify-between mb-1">
+                      <h4 className={`font-medium text-sm leading-tight line-clamp-2 pr-2 ${
+                        isSelected ? 'text-blue-900' : 'text-gray-900'
+                      }`}>
+                        {metadata.title}
+                      </h4>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        {group.total_changes > 0 && (
+                          <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded-full font-medium">
+                            {group.total_changes}
+                          </span>
+                        )}
+                        {group.files.some(f => fileStatuses[f.id] === 'success') && (
+                          <CheckCircle className="w-4 h-4 text-green-600" />
                         )}
                       </div>
                     </div>
+                    
+                    <p className={`text-xs mb-2 ${
+                      isSelected ? 'text-blue-700' : 'text-gray-600'
+                    }`}>
+                      by {metadata.author}
+                    </p>
+
+                    {/* Series info with number */}
+                    {metadata.series && (
+                      <div className="flex items-center gap-1 mb-1.5">
+                        <span className="text-[11px] font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded truncate max-w-[160px] flex items-center gap-1">
+                          {metadata.series}
+                          {metadata.sequence && (
+                            <span className="font-bold">#{metadata.sequence}</span>
+                          )}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Genres - abbreviated */}
+                    {metadata.genres && metadata.genres.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mb-1.5">
+                        {metadata.genres.slice(0, 2).map((genre, idx) => (
+                          <span 
+                            key={idx}
+                            className="text-[10px] px-1.5 py-0.5 bg-gray-900 text-white rounded-full"
+                          >
+                            {genre}
+                          </span>
+                        ))}
+                        {metadata.genres.length > 2 && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-gray-300 text-gray-700 rounded-full">
+                            +{metadata.genres.length - 2}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Description - abbreviated */}
+                    {metadata.description && (
+                      <p className="text-[11px] text-gray-600 line-clamp-1 leading-tight mb-1.5">
+                        {metadata.description}
+                      </p>
+                    )}
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3 text-xs text-gray-500">
+                        <span>{group.files.length} files</span>
+                        <span className="capitalize">{group.group_type}</span>
+                      </div>
+                      
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onToggleGroup(group.id);
+                        }}
+                        className="p-1 hover:bg-gray-200 rounded transition-colors"
+                      >
+                        {expandedGroups.has(group.id) ? (
+                          <ChevronDown className="w-4 h-4 text-gray-500" />
+                        ) : (
+                          <ChevronRight className="w-4 h-4 text-gray-500" />
+                        )}
+                      </button>
+                    </div>
                   </div>
-                ))}
+                </div>
               </div>
-            )}
-          </div>
-        ))}
+              
+              {/* Expanded Files */}
+              {expandedGroups.has(group.id) && (
+                <div className="bg-gray-50 border-t border-gray-200">
+                  {group.files.map((file) => (
+                    <div
+                      key={file.id}
+                      className="px-4 py-3 hover:bg-gray-100 transition-colors border-b border-gray-200 last:border-b-0"
+                    >
+                      <div className="flex items-center gap-3 pl-7">
+                        <input
+                          type="checkbox"
+                          checked={selectedFiles.has(file.id)}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                          }}
+                          className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                        />
+                        
+                        <div className="flex items-center gap-2">
+                          {getFileStatusIcon(file.id)}
+                          <FileAudio className="w-4 h-4 text-gray-400" />
+                        </div>
+                        
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm text-gray-900 truncate">
+                            {file.filename}
+                          </div>
+                          {Object.keys(file.changes).length > 0 && (
+                            <div className="text-xs text-amber-600 mt-0.5">
+                              {Object.keys(file.changes).length} pending changes
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

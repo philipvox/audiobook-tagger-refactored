@@ -15,6 +15,7 @@ pub struct BookMetadata {
     pub description: Option<String>,
     pub isbn: Option<String>,
     pub language: Option<String>,
+    pub cover_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +45,8 @@ struct VolumeInfo {
     industry_identifiers: Vec<IndustryId>,
     categories: Option<Vec<String>>,
     language: Option<String>,
+    #[serde(rename = "imageLinks")]
+    image_links: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,20 +82,7 @@ pub async fn fetch_from_google_books(
         println!("             ❌ API error: {}", response.status());
         return Ok(None);
     }
-    // In the fetch_from_google_books function, after getting image_links:
-    if let Some(image_links) = &book.volume_info.image_links {
-        // Try to get largest available - prefer extraLarge or large
-        metadata.cover_url = image_links.get("extraLarge")
-            .or_else(|| image_links.get("large"))
-            .or_else(|| image_links.get("medium"))
-            .or_else(|| image_links.get("thumbnail"))
-            .map(|url| {
-                // Force HTTPS and request zoom=3 for larger image
-                url.replace("http://", "https://")
-                    .replace("zoom=1", "zoom=3")
-                    .replace("&edge=curl", "")
-            });
-    }
+    
     let books: GoogleBooksResponse = response.json().await?;
     
     if let Some(book) = books.items.first() {
@@ -112,6 +102,17 @@ pub async fn fetch_from_google_books(
             .find(|id| id.id_type == "ISBN_13" || id.id_type == "ISBN_10")
             .map(|id| id.identifier.clone());
         
+        let cover_url = if let Some(image_links) = &vi.image_links {
+            image_links.get("extraLarge")
+                .or_else(|| image_links.get("large"))
+                .or_else(|| image_links.get("medium"))
+                .or_else(|| image_links.get("small"))
+                .or_else(|| image_links.get("thumbnail"))
+                .cloned()
+        } else {
+            None
+        };
+        
         let metadata = BookMetadata {
             title: vi.title.clone(),
             subtitle: vi.subtitle.clone(),
@@ -125,6 +126,7 @@ pub async fn fetch_from_google_books(
             description: vi.description.clone(),
             isbn,
             language: vi.language.clone(),
+            cover_url,
         };
         
         Ok(Some(metadata))

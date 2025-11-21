@@ -7,7 +7,7 @@ use tokio::sync::Semaphore;
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
 use lofty::file::TaggedFileExt;
-
+// ADD THIS FUNCTION HERE - AT THE TOP!
 pub async fn process_all_groups(
     groups: Vec<BookGroup>,
     config: &Config,
@@ -19,10 +19,6 @@ pub async fn process_all_groups(
     
     let total = groups.len();
     println!("⚙️  Processing {} groups with {} workers", total, max_workers);
-    
-    // Don't reset here - it's already set in scan_directories
-    // crate::progress::reset_progress();  ❌ Remove this
-    // crate::progress::set_total(total);   ❌ Remove this - already set
     
     let processed_count = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
@@ -45,7 +41,6 @@ pub async fn process_all_groups(
             let _permit = sem.acquire().await.unwrap();
             let result = process_book_group(group, &config_clone, cancel_clone).await;
             
-            // Update progress
             let current = count_clone.fetch_add(1, Ordering::SeqCst) + 1;
             crate::progress::update_progress(current, total, &group_name);
             
@@ -64,11 +59,9 @@ pub async fn process_all_groups(
         }
     }
     
-    // Don't reset here - let scan_directories do it
-    // crate::progress::reset_progress();  ❌ Remove this
-    
     Ok(results)
 }
+
 async fn process_book_group(
     mut group: BookGroup,
     config: &Config,
@@ -106,7 +99,7 @@ async fn process_book_group(
             tags: file_tags.clone(),
         };
         
-        // Extract with GPT (with Option<&str> for API key)
+        // Extract with GPT
         let (extracted_title, extracted_author) = extract_book_info_with_gpt(
             &raw_file,
             &group.group_name,
@@ -115,43 +108,58 @@ async fn process_book_group(
         
         println!("   📝 Extracted: '{}' by '{}'", extracted_title, extracted_author);
         
-        // Fetch Google Books
-        let google_data = if let Some(ref api_key) = config.google_books_api_key {
+        // FALLBACK CHAIN: Try Google Books → Audible → GPT
+        let mut google_data = None;
+        let mut audible_data = None;
+        
+        // Try Google Books first
+        if let Some(ref api_key) = config.google_books_api_key {
             println!("   🔍 Fetching Google Books data...");
             match fetch_google_books_data(&extracted_title, &extracted_author, api_key).await {
                 Ok(data) => {
                     if data.is_some() {
                         println!("   ✅ Google Books data found");
+                        google_data = data;
                     } else {
                         println!("   ⚠️  No Google Books data");
                     }
-                    data
                 }
                 Err(e) => {
                     println!("   ⚠️  Google Books error: {}", e);
-                    None
+                    // Google failed, try Audible
+                    println!("   🎧 Trying Audible as fallback...");
+                    audible_data = fetch_audible_metadata(&extracted_title, &extracted_author).await;
                 }
             }
         } else {
-            println!("   ⚠️  No Google Books API key configured");
-            None
-        };
+            // No Google API key, try Audible
+            println!("   🎧 No Google Books API key, trying Audible...");
+            audible_data = fetch_audible_metadata(&extracted_title, &extracted_author).await;
+        }
         
-        // Fetch Audible (if configured)
-        let audible_data: Option<AudibleMetadata> = None;
-        // TODO: Implement Audible fetching if needed
+        // If we still don't have data, try GPT enrichment as last resort
+        let needs_gpt_enrichment = google_data.is_none() && audible_data.is_none();
         
         // Fetch cover art using dedicated module
         println!("   🖼️  Fetching cover art...");
         let cover_art = match crate::cover_art::fetch_and_download_cover(
             &extracted_title,
             &extracted_author,
-            None, // TODO: Pass ASIN if available from Audible
+            audible_data.as_ref().and_then(|d| d.asin.clone()).as_deref(),
             config.google_books_api_key.as_deref(),
         ).await {
             Ok(cover) => {
                 if cover.data.is_some() {
                     println!("   ✅ Cover art downloaded");
+                    
+                    // Cache the cover separately for the cover viewer
+                    if let Some(ref data) = cover.data {
+                        let cover_cache_key = format!("cover_{}", group.id);
+                        let mime_type = cover.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
+                        if let Err(e) = cache::set(&cover_cache_key, &(data.clone(), mime_type)) {
+                            println!("   ⚠️  Failed to cache cover: {}", e);
+                        }
+                    }
                 } else if cover.url.is_some() {
                     println!("   ⚠️  Cover URL found but download failed");
                 } else {
@@ -167,15 +175,26 @@ async fn process_book_group(
         
         // Merge all metadata with GPT
         println!("   🤖 Merging metadata with GPT...");
-        let mut final_metadata = merge_all_with_gpt(
-            &group.group_name,
-            &extracted_title,
-            &extracted_author,
-            &file_tags,
-            google_data,
-            audible_data,
-            config.openai_api_key.as_deref()
-        ).await;
+        let mut final_metadata = if needs_gpt_enrichment {
+            // Use GPT to enrich with missing data
+            enrich_with_gpt(
+                &group.group_name,
+                &extracted_title,
+                &extracted_author,
+                &file_tags,
+                config.openai_api_key.as_deref()
+            ).await
+        } else {
+            merge_all_with_gpt(
+                &group.group_name,
+                &extracted_title,
+                &extracted_author,
+                &file_tags,
+                google_data,
+                audible_data,
+                config.openai_api_key.as_deref()
+            ).await
+        };
         
         // Add cover art to metadata
         if let Some(cover) = cover_art {
@@ -188,7 +207,7 @@ async fn process_book_group(
         
         group.metadata = final_metadata;
         
-        // Cache the result (including cover art)
+        // Cache the result
         if let Err(e) = cache::set(&cache_key, &group.metadata) {
             println!("   ⚠️  Failed to cache metadata: {}", e);
         } else {
@@ -202,6 +221,101 @@ async fn process_book_group(
     println!("   📊 {} total changes detected", group.total_changes);
     
     Ok(group)
+}
+async fn fetch_audible_metadata(
+    title: &str,
+    author: &str,
+) -> Option<AudibleMetadata> {
+    println!("   🎧 Searching Audible CLI...");
+    
+    // Build search query
+    let search_query = format!("{} {}", title, author);
+    
+    // Call audible CLI
+    let output = tokio::process::Command::new("audible")
+        .args(&["search", "-t", &search_query, "--output-format", "json"])
+        .output()
+        .await;
+    
+    match output {
+        Ok(result) if result.status.success() => {
+            let json_str = String::from_utf8_lossy(&result.stdout);
+            
+            #[derive(serde::Deserialize)]
+            struct AudibleResponse {
+                products: Vec<AudibleProduct>,
+            }
+            
+            #[derive(serde::Deserialize)]
+            struct AudibleProduct {
+                asin: String,
+                title: String,
+                authors: Option<Vec<AudibleAuthor>>,
+                narrators: Option<Vec<AudibleNarrator>>,
+                series: Option<Vec<AudibleSeriesInfo>>,
+                publisher_name: Option<String>,
+                release_date: Option<String>,
+                merchandising_summary: Option<String>,
+            }
+            
+            #[derive(serde::Deserialize)]
+            struct AudibleAuthor {
+                name: String,
+            }
+            
+            #[derive(serde::Deserialize)]
+            struct AudibleNarrator {
+                name: String,
+            }
+            
+            #[derive(serde::Deserialize)]
+            struct AudibleSeriesInfo {
+                title: String,
+                sequence: Option<String>,
+            }
+            
+            match serde_json::from_str::<AudibleResponse>(&json_str) {
+                Ok(response) => {
+                    if let Some(product) = response.products.first() {
+                        println!("   ✅ Audible data found: {}", product.title);
+                        
+                        return Some(AudibleMetadata {
+                            asin: Some(product.asin.clone()),
+                            title: Some(product.title.clone()),
+                            authors: product.authors.as_ref()
+                                .map(|a| a.iter().map(|author| author.name.clone()).collect())
+                                .unwrap_or_default(),
+                            narrators: product.narrators.as_ref()
+                                .map(|n| n.iter().map(|narrator| narrator.name.clone()).collect())
+                                .unwrap_or_default(),
+                            series: product.series.as_ref()
+                                .map(|s| s.iter().map(|series| AudibleSeries {
+                                    name: series.title.clone(),
+                                    position: series.sequence.clone(),
+                                }).collect())
+                                .unwrap_or_default(),
+                            publisher: product.publisher_name.clone(),
+                            release_date: product.release_date.clone(),
+                            description: product.merchandising_summary.clone(),
+                        });
+                    } else {
+                        println!("   ⚠️  No Audible results");
+                    }
+                }
+                Err(e) => {
+                    println!("   ⚠️  Failed to parse Audible response: {}", e);
+                }
+            }
+        }
+        Ok(_) => {
+            println!("   ⚠️  Audible CLI returned error");
+        }
+        Err(e) => {
+            println!("   ⚠️  Audible CLI not available: {}", e);
+        }
+    }
+    
+    None
 }
 #[derive(Clone)]
 struct FileTags {
@@ -469,10 +583,191 @@ JSON:"#,
         sample_file.tags.artist.clone().unwrap_or_else(|| String::from("Unknown"))
     )
 }
+pub async fn enrich_with_gpt(
+    folder_name: &str,
+    extracted_title: &str,
+    extracted_author: &str,
+    file_tags: &FileTags,
+    api_key: Option<&str>
+) -> BookMetadata {
+    let api_key = match api_key {
+        Some(key) if !key.is_empty() => key,
+        _ => {
+            // No API key, return basic metadata
+            return BookMetadata {
+                title: extracted_title.to_string(),
+                author: extracted_author.to_string(),
+                subtitle: None,
+                narrator: None,
+                series: extract_series_from_folder(folder_name).0,
+                sequence: extract_series_from_folder(folder_name).1,
+                genres: vec![],
+                publisher: None,
+                year: None,
+                description: None,
+                isbn: None,
+                cover_data: None,
+                cover_mime: None,
+                cover_url: None,
+            };
+        }
+    };
+    
+    println!("   🤖 Using GPT to enrich metadata (no external sources available)...");
+    
+    let prompt = format!(
+r#"You are enriching audiobook metadata when no external databases are available.
 
+FOLDER NAME: {}
+TITLE: {}
+AUTHOR: {}
+COMMENT TAG: {:?}
 
+Based on your knowledge, provide as much metadata as you can for this audiobook:
+
+1. Narrator: Check if the comment field contains narrator info, or use your knowledge
+2. Series: Extract from folder name if present (patterns like Book 01, Book 45, etc.)
+3. Sequence: Extract book number from folder or filename AS A STRING
+4. Genres: Provide 1-3 appropriate genres from this list: {}
+5. Publisher: If you know the typical publisher for this author/series
+6. Year: If you know when this book was published AS A STRING
+7. Description: A brief 2-3 sentence description of the book
+
+IMPORTANT: All values must be strings or null. Numbers like 1 must be written as "1".
+
+Return ONLY valid JSON (use null for missing fields):
+{{
+  "narrator": null,
+  "series": null,
+  "sequence": null,
+  "genres": ["Genre1", "Genre2"],
+  "publisher": null,
+  "year": null,
+  "description": null
+}}
+
+JSON:"#,
+        folder_name,
+        extracted_title,
+        extracted_author,
+        file_tags.comment,
+        crate::genres::APPROVED_GENRES.join(", ")
+    );
+    
+    match call_gpt_api(&prompt, api_key, "gpt-4o-mini", 800).await {
+        Ok(json_str) => {
+            // Parse as generic JSON first to handle type mismatches
+            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(json) => {
+                    println!("   ✅ GPT enrichment successful");
+                    
+                    // Helper to convert Value to Option<String>
+                    let get_string = |v: &serde_json::Value| -> Option<String> {
+                        match v {
+                            serde_json::Value::String(s) => Some(s.clone()),
+                            serde_json::Value::Number(n) => Some(n.to_string()),
+                            serde_json::Value::Null => None,
+                            _ => None,
+                        }
+                    };
+                    
+                    let get_string_array = |v: &serde_json::Value| -> Vec<String> {
+                        match v {
+                            serde_json::Value::Array(arr) => {
+                                arr.iter()
+                                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            }
+                            _ => vec![],
+                        }
+                    };
+                    
+                    BookMetadata {
+                        title: extracted_title.to_string(),
+                        author: extracted_author.to_string(),
+                        subtitle: None,
+                        narrator: json.get("narrator").and_then(get_string),
+                        series: json.get("series").and_then(get_string),
+                        sequence: json.get("sequence").and_then(get_string),
+                        genres: json.get("genres").map(get_string_array).unwrap_or_default(),
+                        publisher: json.get("publisher").and_then(get_string),
+                        year: json.get("year").and_then(get_string),
+                        description: json.get("description").and_then(get_string),
+                        isbn: None,
+                        cover_data: None,
+                        cover_mime: None,
+                        cover_url: None,
+                    }
+                }
+                Err(e) => {
+                    println!("   ⚠️  GPT parse error: {}", e);
+                    BookMetadata {
+                        title: extracted_title.to_string(),
+                        author: extracted_author.to_string(),
+                        subtitle: None,
+                        narrator: None,
+                        series: extract_series_from_folder(folder_name).0,
+                        sequence: extract_series_from_folder(folder_name).1,
+                        genres: vec![],
+                        publisher: None,
+                        year: None,
+                        description: None,
+                        isbn: None,
+                        cover_data: None,
+                        cover_mime: None,
+                        cover_url: None,
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            println!("   ⚠️  GPT enrichment failed: {}", e);
+            BookMetadata {
+                title: extracted_title.to_string(),
+                author: extracted_author.to_string(),
+                subtitle: None,
+                narrator: None,
+                series: extract_series_from_folder(folder_name).0,
+                sequence: extract_series_from_folder(folder_name).1,
+                genres: vec![],
+                publisher: None,
+                year: None,
+                description: None,
+                isbn: None,
+                cover_data: None,
+                cover_mime: None,
+                cover_url: None,
+            }
+        }
+    }
+}
+
+fn extract_series_from_folder(folder_name: &str) -> (Option<String>, Option<String>) {
+    // Try to extract series name and book number from folder
+    if let Some(book_num) = extract_book_number_from_folder(folder_name) {
+        // Try to extract series name (everything before the book number pattern)
+        let patterns = [
+            regex::Regex::new(r"(.+?)\s+(?:Book\s*[#]?)?\d+").ok(),
+            regex::Regex::new(r"(.+?)\s+[#]\d+").ok(),
+            regex::Regex::new(r"\[(.+?)\s+\d+\]").ok(),
+        ];
+        
+        for pattern in patterns.iter().flatten() {
+            if let Some(caps) = pattern.captures(folder_name) {
+                if let Some(series_name) = caps.get(1) {
+                    return (Some(series_name.as_str().trim().to_string()), Some(book_num));
+                }
+            }
+        }
+        
+        return (None, Some(book_num));
+    }
+    
+    (None, None)
+}
 #[derive(serde::Deserialize, Debug)]
 struct AudibleMetadata {
+    asin: Option<String>,  // ADD THIS LINE
     title: Option<String>,
     authors: Vec<String>,
     narrators: Vec<String>,

@@ -46,8 +46,10 @@ fn main() {
             commands::maintenance::clear_all_genres,
             commands::audible::login_to_audible,
             commands::audible::check_audible_installed,
+            commands::covers::get_cover_for_group,
+            commands::covers::search_cover_options,
+            commands::covers::download_cover_from_url,
             commands::covers::set_cover_from_file,
-            commands::covers::fetch_better_cover,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

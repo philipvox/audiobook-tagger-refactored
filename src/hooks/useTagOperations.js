@@ -6,6 +6,7 @@ export function useTagOperations() {
   const { config, groups, updateFileStatuses, setWriteProgress } = useApp();
   const [writing, setWriting] = useState(false);
   const [pushing, setPushing] = useState(false);
+
   const writeSelectedTags = useCallback(async (selectedFiles) => {
     try {
       setWriting(true);
@@ -16,7 +17,8 @@ export function useTagOperations() {
         group.files.forEach(file => {
           filesMap[file.id] = {
             path: file.path,
-            changes: file.changes
+            changes: file.changes,
+            group_id: group.id  // Add group_id here
           };
         });
       });
@@ -36,13 +38,12 @@ export function useTagOperations() {
       });
       updateFileStatuses(newStatuses);
       
+      setWriting(false);
       return result;
     } catch (error) {
       console.error('Write failed:', error);
-      throw error;
-    } finally {
       setWriting(false);
-      setWriteProgress({ current: 0, total: 0 }); // Reset here
+      throw error;
     }
   }, [config, groups, updateFileStatuses, setWriteProgress]);
 
