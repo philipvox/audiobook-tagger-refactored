@@ -17,18 +17,29 @@ export function AppProvider({ children }) {
 
   // Listen for write progress events
   useEffect(() => {
+    let unlistenFn;
+    
     const setupListener = async () => {
-      const unlisten = await listen('write_progress', (event) => {
-        setWriteProgress(event.payload);
-      });
-      return unlisten;
+      try {
+        const unlisten = await listen('write_progress', (event) => {
+          console.log('Write progress event:', event.payload);
+          setWriteProgress(event.payload);
+        });
+        return unlisten;
+      } catch (error) {
+        console.error('Failed to setup write progress listener:', error);
+        return null;
+      }
     };
     
-    let unlistenFn;
-    setupListener().then(fn => { unlistenFn = fn; });
+    setupListener().then(fn => { 
+      unlistenFn = fn; 
+    });
     
     return () => {
-      if (unlistenFn) unlistenFn();
+      if (unlistenFn) {
+        unlistenFn();
+      }
     };
   }, []);
 

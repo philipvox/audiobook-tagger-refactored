@@ -33,13 +33,35 @@ pub async fn collect_and_group_files(
     
     Ok(groups)
 }
-
 fn collect_audio_files_from_path(path: &str) -> Result<Vec<RawFileData>, Box<dyn std::error::Error + Send + Sync>> {
     let mut files = Vec::new();
     
     for entry in WalkDir::new(path)
         .follow_links(true)
         .into_iter()
+        .filter_entry(|e| {
+            // Skip backup directories
+            if e.file_type().is_dir() {
+                if let Some(dir_name) = e.path().file_name().and_then(|n| n.to_str()) {
+                    // Skip directories that look like backups
+                    if dir_name.starts_with("backup_") || 
+                       dir_name == "backups" || 
+                       dir_name == ".backups" {
+                        println!("⏭️  Skipping backup directory: {}", e.path().display());
+                        return false;
+                    }
+                }
+            }
+            
+            // Skip macOS metadata files
+            if let Some(file_name) = e.path().file_name().and_then(|n| n.to_str()) {
+                if file_name.starts_with("._") {
+                    return false;
+                }
+            }
+            
+            true
+        })
         .filter_map(|e| e.ok())
     {
         if !entry.file_type().is_file() {
@@ -47,6 +69,14 @@ fn collect_audio_files_from_path(path: &str) -> Result<Vec<RawFileData>, Box<dyn
         }
         
         let path = entry.path();
+        
+        // Double-check: skip any file starting with ._
+        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+            if file_name.starts_with("._") {
+                continue;
+            }
+        }
+        
         if let Some(ext) = path.extension() {
             if AUDIO_EXTENSIONS.contains(&ext.to_string_lossy().to_lowercase().as_str()) {
                 let parent = path.parent()
@@ -68,7 +98,6 @@ fn collect_audio_files_from_path(path: &str) -> Result<Vec<RawFileData>, Box<dyn
     
     Ok(files)
 }
-
 fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
     let mut groups: HashMap<String, Vec<RawFileData>> = HashMap::new();
     

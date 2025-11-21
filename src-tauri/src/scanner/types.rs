@@ -1,7 +1,6 @@
 // src-tauri/src/scanner/types.rs
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-pub type FieldChange = MetadataChange;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanResult {
@@ -27,6 +26,7 @@ pub enum GroupType {
     Chapters,
     MultiPart,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookMetadata {
     pub title: String,
@@ -72,6 +72,8 @@ pub struct MetadataChange {
     pub old: String,
     pub new: String,
 }
+
+pub type FieldChange = MetadataChange;
 
 #[derive(Debug, Clone)]
 pub struct RawFileData {

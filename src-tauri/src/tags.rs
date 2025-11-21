@@ -21,6 +21,7 @@ pub struct WriteError {
     pub path: String,
     pub error: String,
 }
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WriteRequest {
     pub file_ids: Vec<String>,
@@ -32,6 +33,7 @@ pub struct WriteRequest {
 pub struct FileData {
     pub path: String,
     pub changes: HashMap<String, crate::scanner::MetadataChange>,
+    pub group_id: Option<String>,
 }
 
 pub async fn write_files_parallel(
@@ -49,7 +51,7 @@ pub async fn write_files_parallel(
         
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            write_file_tags(&path_clone, &changes_clone, backup).await
+            write_file_tags(&path_clone, &changes_clone, backup, None).await
         });
         
         handles.push(handle);
@@ -67,6 +69,7 @@ pub async fn write_file_tags(
     file_path: &str,
     changes: &std::collections::HashMap<String, crate::scanner::FieldChange>,
     backup: bool,
+    group_id: Option<&str>,
 ) -> Result<()> {
     let path = Path::new(file_path);
     
@@ -86,11 +89,17 @@ pub async fn write_file_tags(
         std::fs::copy(path, &backup_path)?;
     }
     
+    // Try to get cover art from cache if group_id provided
+    if let Some(gid) = group_id {
+        if let Err(e) = save_cover_to_folder(file_path, gid).await {
+            println!("⚠️  Failed to save cover: {}", e);
+        }
+    }
+    
     let tagged_file = match Probe::open(path) {
         Ok(probe) => probe,
         Err(e) => anyhow::bail!("Cannot open file (may be corrupted): {}", e),
     };
-    
     let mut file_content = match tagged_file.read() {
         Ok(content) => content,
         Err(e) => {
@@ -170,6 +179,29 @@ pub async fn write_file_tags(
     
     file_content.save_to_path(path, lofty::config::WriteOptions::default())
         .map_err(|e| anyhow::anyhow!("Failed to save tags: {}", e))?;
+    
+    Ok(())
+}
+async fn save_cover_to_folder(file_path: &str, group_id: &str) -> Result<()> {
+    let cache_key = format!("cover_{}", group_id);
+    
+    if let Some(cover_tuple) = crate::cache::get::<(Vec<u8>, String)>(&cache_key) {
+        let (cover_data, mime_type) = cover_tuple;
+        
+        let file_path_obj = Path::new(file_path);
+        let folder = file_path_obj.parent().ok_or_else(|| anyhow::anyhow!("No parent folder"))?;
+        
+        let extension = match mime_type.as_str() {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            _ => "jpg",
+        };
+        
+        let cover_path = folder.join(format!("cover.{}", extension));
+        
+        tokio::fs::write(&cover_path, &cover_data).await?;
+        println!("   🎨 Saved cover to: {}", cover_path.display());
+    }
     
     Ok(())
 }
