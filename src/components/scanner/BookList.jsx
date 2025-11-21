@@ -6,6 +6,7 @@ export function BookList({
   groups, 
   selectedFiles,
   selectedGroup,
+  selectedGroupIds, // NEW: for multi-select highlighting
   expandedGroups,
   fileStatuses,
   onGroupClick,
@@ -63,7 +64,7 @@ useEffect(() => {
       }
     });
   };
-}, [groups]);
+}, [groups.length]);
 
   const getFileStatusIcon = (fileId) => {
     const status = fileStatuses[fileId];
@@ -129,7 +130,10 @@ useEffect(() => {
       {/* Book Groups List */}
       <div className="flex-1 overflow-y-auto">
         {groups.map((group, index) => {
-          const isSelected = selectedGroup?.id === group.id;
+          // Check if this group is in multi-select OR is the single selected group
+          const isInMultiSelect = selectedGroupIds?.has(group.id);
+          const isSingleSelected = selectedGroup?.id === group.id;
+          const isSelected = isInMultiSelect || isSingleSelected;
           const metadata = group.metadata;
           
           return (
@@ -141,7 +145,8 @@ useEffect(() => {
                   : 'hover:bg-gray-50 border-l-4 border-l-transparent'
               }`}
               onClick={(e) => {
-                onSelectFile(group, index, e.shiftKey);
+                // Pass the full event object to handle Shift+Click
+                onSelectFile(group, index, e);
               }}
             >
               <div className="p-4">
