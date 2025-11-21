@@ -15,6 +15,7 @@ import { useApp } from '../context/AppContext';
 export function ScannerPage() {
   const { groups, setGroups, fileStatuses, updateFileStatuses, clearFileStatuses, writeProgress } = useApp();
   const [selectedGroup, setSelectedGroup] = useState(null);
+  const [selectedGroupIds, setSelectedGroupIds] = useState(new Set());
   const [expandedGroups, setExpandedGroups] = useState(new Set());
   const [showEditModal, setShowEditModal] = useState(false);
   const [editingGroup, setEditingGroup] = useState(null);
@@ -59,25 +60,76 @@ export function ScannerPage() {
     setConfirmModal(null);
   };
 
-  const handleGroupClick = (group, index, shiftKey) => {
-    if (shiftKey && lastSelectedIndex !== null) {
-      // Shift+click: select range
-      const start = Math.min(lastSelectedIndex, index);
-      const end = Math.max(lastSelectedIndex, index);
-      
-      const newSelected = new Set(selectedFiles);
-      for (let i = start; i <= end; i++) {
-        groups[i].files.forEach(file => {
-          newSelected.add(file.id);
-        });
-      }
-      setSelectedFiles(newSelected);
-      setLastSelectedIndex(index);
-    } else {
-      // Normal click: just select this group for viewing
-      setSelectedGroup(group);
-      setLastSelectedIndex(index);
+  // FIXED: Prevent text selection on Shift+Click and properly handle range selection
+const handleGroupClick = (group, index, event) => {
+  // PREVENT TEXT SELECTION on Shift+Click
+  if (event.shiftKey) {
+    event.preventDefault();
+  }
+
+  setSelectedGroup(group);
+  
+  if (event.shiftKey && lastSelectedIndex !== null) {
+    // Shift-click: select range
+    const start = Math.min(lastSelectedIndex, index);
+    const end = Math.max(lastSelectedIndex, index);
+    
+    const newSelectedFiles = new Set(selectedFiles);
+    const newSelectedGroupIds = new Set(selectedGroupIds);
+    
+    for (let i = start; i <= end; i++) {
+      const g = groups[i];
+      newSelectedGroupIds.add(g.id);
+      g.files.forEach(f => newSelectedFiles.add(f.id));
     }
+    
+    setSelectedFiles(newSelectedFiles);
+    setSelectedGroupIds(newSelectedGroupIds);
+  } else if (!event.shiftKey && !event.metaKey && !event.ctrlKey) {
+    // Normal click without modifier keys: DESELECT others, select only this one
+    const newSelectedFiles = new Set();
+    const newSelectedGroupIds = new Set();
+    
+    newSelectedGroupIds.add(group.id);
+    group.files.forEach(f => newSelectedFiles.add(f.id));
+    
+    setSelectedFiles(newSelectedFiles);
+    setSelectedGroupIds(newSelectedGroupIds);
+  }
+  
+  setLastSelectedIndex(index);
+};
+
+  const handleSelectGroup = (group, checked) => {
+    selectAllInGroup(group, checked);
+    
+    setSelectedGroupIds(prev => {
+      const newSet = new Set(prev);
+      if (checked) {
+        newSet.add(group.id);
+      } else {
+        newSet.delete(group.id);
+      }
+      return newSet;
+    });
+  };
+
+  const handleSelectAll = () => {
+    const allFiles = new Set();
+    const allGroupIds = new Set();
+    
+    groups.forEach(group => {
+      allGroupIds.add(group.id);
+      group.files.forEach(file => allFiles.add(file.id));
+    });
+    
+    setSelectedFiles(allFiles);
+    setSelectedGroupIds(allGroupIds);
+  };
+
+  const handleClearSelection = () => {
+    clearSelection();
+    setSelectedGroupIds(new Set());
   };
 
   const handleEditMetadata = (group) => {
@@ -209,7 +261,7 @@ export function ScannerPage() {
           confirmText: "OK",
           type: "info",
           onConfirm: () => {
-            clearSelection();
+            handleClearSelection();
           }
         });
       }
@@ -259,7 +311,7 @@ export function ScannerPage() {
       onConfirm: async () => {
         try {
           const result = await handleRescan(selectedFiles, groups);
-          clearSelection();
+          handleClearSelection();
           clearFileStatuses();
           
           showConfirm({
@@ -282,59 +334,68 @@ export function ScannerPage() {
     });
   };
 
-  const handlePushClick = () => {
-    const successCount = getSuccessCount(fileStatuses);
-    
-    if (successCount === 0) {
-      showConfirm({
-        title: "No Files Ready",
-        message: "No successfully written files to push. Please write tags first.",
-        confirmText: "OK",
-        type: "info",
-        onConfirm: () => {}
-      });
-      return;
-    }
-
-    showConfirm({
-      title: "Push to AudiobookShelf",
-      message: `Push ${successCount} file(s) to AudiobookShelf server?`,
-      confirmText: `Push ${successCount} Files`,
-      type: "info",
-      onConfirm: async () => {
-        try {
-          const successfulFileIds = Array.from(selectedFiles).filter(id => fileStatuses[id] === 'success');
-          const result = await pushToAudiobookShelf(new Set(successfulFileIds));
-          
-          let message = `Updated ${result.updated || 0} item${result.updated === 1 ? '' : 's'} in AudiobookShelf.`;
-
-          if (result.unmatched && result.unmatched.length > 0) {
-            message += `\n\nUnmatched files: ${result.unmatched.slice(0, 5).join(', ')}${
-              result.unmatched.length > 5 ? '...' : ''
-            }`;
-          }
-
-          showConfirm({
-            title: "Push Complete",
-            message: message,
-            confirmText: "OK",
-            type: result.failed?.length > 0 ? "warning" : "info",
-            onConfirm: () => {}
-          });
-        } catch (error) {
-          showConfirm({
-            title: "Push Failed",
-            message: `Failed to push updates: ${error}`,
-            confirmText: "OK",
-            type: "danger",
-            onConfirm: () => {}
-          });
-        }
-      }
-    });
-  };
-
+const handlePushClick = () => {
+  const successCount = getSuccessCount(fileStatuses);
   
+  if (successCount === 0) {
+    showConfirm({
+      title: "No Files Ready",
+      message: "No successfully written files to push. Please write tags first.",
+      confirmText: "OK",
+      type: "info",
+      onConfirm: () => {}
+    });
+    return;
+  }
+
+  showConfirm({
+    title: "Push to AudiobookShelf",
+    message: `Push ${successCount} file(s) to AudiobookShelf server?\n\nFiles will be processed in batches to avoid memory issues.`,
+    confirmText: `Push ${successCount} Files`,
+    type: "info",
+    onConfirm: async () => {
+      try {
+        const successfulFileIds = Array.from(selectedFiles).filter(id => fileStatuses[id] === 'success');
+        
+        // Show progress during push
+        const result = await pushToAudiobookShelf(
+          new Set(successfulFileIds),
+          (progress) => {
+            console.log(`Progress: ${progress.itemsProcessed}/${progress.totalItems} items (chunk ${progress.current}/${progress.total})`);
+          }
+        );
+        
+        let message = `✅ Successfully updated ${result.updated || 0} item${result.updated === 1 ? '' : 's'} in AudiobookShelf!`;
+
+        if (result.unmatched && result.unmatched.length > 0) {
+          message += `\n\n⚠️ Unmatched files: ${result.unmatched.slice(0, 5).join(', ')}${
+            result.unmatched.length > 5 ? `... (+${result.unmatched.length - 5} more)` : ''
+          }`;
+        }
+
+        if (result.failed && result.failed.length > 0) {
+          message += `\n\n❌ Failed: ${result.failed.length} item${result.failed.length === 1 ? '' : 's'}`;
+        }
+
+        showConfirm({
+          title: "Push Complete",
+          message: message,
+          confirmText: "OK",
+          type: result.failed?.length > 0 ? "warning" : "info",
+          onConfirm: () => {}
+        });
+      } catch (error) {
+        showConfirm({
+          title: "Push Failed",
+          message: `Failed to push updates: ${error.toString()}`,
+          confirmText: "OK",
+          type: "danger",
+          onConfirm: () => {}
+        });
+      }
+    }
+  });
+};
 
   return (
     <div className="h-full flex flex-col relative">
@@ -347,7 +408,7 @@ export function ScannerPage() {
         onWrite={handleWriteClick}
         onRename={handleRenameClick}
         onPush={handlePushClick}
-        onClearSelection={clearSelection}
+        onClearSelection={handleClearSelection}
         writing={writing}
         pushing={pushing}
         scanning={scanning}
@@ -359,6 +420,7 @@ export function ScannerPage() {
           groups={groups}
           selectedFiles={selectedFiles}
           selectedGroup={selectedGroup}
+          selectedGroupIds={selectedGroupIds}
           expandedGroups={expandedGroups}
           fileStatuses={fileStatuses}
           onGroupClick={setSelectedGroup}
@@ -367,19 +429,19 @@ export function ScannerPage() {
             newExpanded.has(groupId) ? newExpanded.delete(groupId) : newExpanded.add(groupId);
             setExpandedGroups(newExpanded);
           }}
-          onSelectGroup={selectAllInGroup}
+          onSelectGroup={handleSelectGroup}
           onSelectFile={handleGroupClick}
           onScan={handleScan}
           scanning={scanning}
-          onSelectAll={() => selectAll(groups)}
-          onClearSelection={clearSelection}
+          onSelectAll={handleSelectAll}
+          onClearSelection={handleClearSelection}
         />
 
         <MetadataPanel
           group={selectedGroup}
           onEdit={handleEditMetadata}
         />
-       </div>
+      </div>
 
       {/* Progress bars */}
       {scanning && scanProgress.total > 0 && (

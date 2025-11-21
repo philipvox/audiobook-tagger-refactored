@@ -84,32 +84,49 @@ export function useTagOperations() {
     }
   }, []);
 
-  const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
-    try {
-      setPushing(true);
-      
-      const items = [];
-      groups.forEach(group => {
-        group.files.forEach(file => {
-          if (selectedFiles.has(file.id)) {
-            items.push({
-              path: file.path,
-              metadata: group.metadata
-            });
-          }
-        });
+ // Helper function at TOP of file
+function chunkArray(array, chunkSize) {
+  const chunks = [];
+  for (let i = 0; i < array.length; i += chunkSize) {
+    chunks.push(array.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
+  console.time('🔍 TOTAL PUSH TIME');
+  
+  try {
+    setPushing(true);
+    
+    const items = [];
+    groups.forEach(group => {
+      group.files.forEach(file => {
+        if (selectedFiles.has(file.id)) {
+          items.push({
+            path: file.path,
+            metadata: group.metadata
+          });
+        }
       });
+    });
 
-      const result = await invoke('push_abs_updates', { request: { items } });
-      setPushing(false);
-      return result;
-    } catch (error) {
-      console.error('Push to AudiobookShelf failed:', error);
-      setPushing(false);
-      throw error;
-    }
-  }, [groups]);
-
+    console.log(`📊 Pushing ${items.length} items to backend...`);
+    
+    // ✅ ONE CALL - Let Rust handle it
+    const result = await invoke('push_abs_updates_bulk', { 
+      request: { items } 
+    });
+    
+    setPushing(false);
+    console.timeEnd('🔍 TOTAL PUSH TIME');
+    
+    return result;
+  } catch (error) {
+    console.error('❌ Push failed:', error);
+    setPushing(false);
+    throw error;
+  }
+}, [groups]);
   return {
     writing,
     pushing,

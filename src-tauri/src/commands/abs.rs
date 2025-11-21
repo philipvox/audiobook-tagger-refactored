@@ -79,34 +79,34 @@ pub async fn test_abs_connection(config: config::Config) -> Result<ConnectionTes
         message: format!("Connected to {}", config.abs_base_url),
     })
 }
-
 #[tauri::command]
 pub async fn push_abs_updates(request: PushRequest) -> Result<PushResult, String> {
     let config = config::load_config().map_err(|e| e.to_string())?;
     let client = reqwest::Client::new();
-    let library_items = fetch_abs_library_items(&client, &config).await?;
     
-    println!("📊 AudiobookShelf has {} items", library_items.len());
+    // ✅ FETCH LIBRARY ITEMS ONLY ONCE (not per item!)
+    println!("📚 Fetching AudiobookShelf library (one time)...");
+    let library_items = fetch_abs_library_items(&client, &config).await?;
+    println!("📊 Loaded {} library items", library_items.len());
     
     let mut unmatched = Vec::new();
     let mut targets = Vec::new();
     let mut seen_ids = HashSet::new();
     
+    // Now process all items against the CACHED library
     for item in &request.items {
         let normalized_path = normalize_path(&item.path);
-        println!("🔍 Looking for: '{}'", normalized_path);
         
         if let Some(library_item) = find_matching_item(&normalized_path, &library_items) {
-            println!("   ✅ Found match: [{}] {}", library_item.id, library_item.path);
             if seen_ids.insert(library_item.id.clone()) {
                 targets.push((library_item.id.clone(), item.clone()));
             }
         } else {
-            println!("   ❌ No match found");
             unmatched.push(item.path.clone());
         }
     }
     
+    // Update all matched items
     let mut failed = Vec::new();
     let mut updated = 0;
     
@@ -123,6 +123,75 @@ pub async fn push_abs_updates(request: PushRequest) -> Result<PushResult, String
             }
         }
     }
+    
+    Ok(PushResult { updated, unmatched, failed })
+}
+#[tauri::command]
+pub async fn push_abs_updates_bulk(request: PushRequest) -> Result<PushResult, String> {
+    let config = config::load_config().map_err(|e| e.to_string())?;
+    let client = reqwest::Client::new();
+    
+    println!("📚 Fetching AudiobookShelf library once...");
+    let start = std::time::Instant::now();
+    let library_items = fetch_abs_library_items(&client, &config).await?;
+    println!("📊 Loaded {} items in {:?}", library_items.len(), start.elapsed());
+    
+    println!("🔍 Processing {} requests...", request.items.len());
+    
+    let mut unmatched = Vec::new();
+    let mut targets = Vec::new();
+    let mut seen_ids = HashSet::new();
+    
+    // Match all items
+    for item in &request.items {
+        let normalized_path = normalize_path(&item.path);
+        
+        if let Some(library_item) = find_matching_item(&normalized_path, &library_items) {
+            if seen_ids.insert(library_item.id.clone()) {
+                targets.push((library_item.id.clone(), item.clone()));
+            }
+        } else {
+            unmatched.push(item.path.clone());
+        }
+    }
+    
+    println!("✅ Matched {}/{} items", targets.len(), request.items.len());
+    
+    // Update in parallel batches of 10
+    let mut failed = Vec::new();
+    let mut updated = 0;
+    
+    use futures::stream::{self, StreamExt};
+    
+    let results: Vec<_> = stream::iter(targets)
+        .map(|(item_id, push_item)| {
+            let client = client.clone();
+            let config = config.clone();
+            async move {
+                update_abs_item(&client, &config, &item_id, &push_item.metadata).await
+                    .map(|success| (success, push_item.path.clone()))
+            }
+        })
+        .buffer_unordered(10) // Process 10 at a time
+        .collect()
+        .await;
+    
+    for result in results {
+        match result {
+            Ok((true, _)) => updated += 1,
+            Ok((false, _)) => {},
+            Err(err) => {
+                failed.push(PushFailure {
+                    path: "".to_string(),
+                    reason: err.reason,
+                    status: err.status,
+                });
+            }
+        }
+    }
+    
+    println!("✅ Push complete: {} updated, {} unmatched, {} failed", 
+        updated, unmatched.len(), failed.len());
     
     Ok(PushResult { updated, unmatched, failed })
 }
