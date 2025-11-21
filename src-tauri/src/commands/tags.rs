@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};  // ✅ Added Ordering here
 use std::sync::Mutex;
 use std::time::{Duration, Instant};  // ✅ Added this
 use tauri::Emitter;
+use lofty::probe::Probe;
+use lofty::tag::Accessor;
+
 #[derive(Debug, Deserialize)]
 pub struct WriteRequest {
     file_ids: Vec<String>,

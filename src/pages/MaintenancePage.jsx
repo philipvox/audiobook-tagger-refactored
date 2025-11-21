@@ -96,30 +96,24 @@ export function MaintenancePage() {
               </button>
 
               <button 
-                onClick={() => showConfirm({
-                  title: "Clear Server Cache",
-                  message: "Remove cached images and metadata. Continue?",
-                  confirmText: "Clear Cache",
-                  type: "warning",
-                  onConfirm: async () => {
-                    try {
-                      await invoke('clear_abs_cache');
-                      alert('✅ Cache cleared!');
-                    } catch (error) {
-                      alert('❌ Failed: ' + error);
-                    }
+                onClick={async () => {
+                  try {
+                    await invoke('clear_abs_library_cache');
+                    alert('✅ Library cache cleared! Next push will fetch fresh data.');
+                  } catch (error) {
+                    alert('❌ Failed to clear cache: ' + error);
                   }
-                })}
-                className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-lg transition-colors group"
+                }}
+                className="w-full flex items-center justify-between px-4 py-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors group"
               >
                 <div className="flex items-center gap-3">
-                  <Wrench className="w-5 h-5 text-gray-600" />
+                  <RefreshCw className="w-5 h-5 text-purple-600" />
                   <div className="text-left">
-                    <div className="font-medium text-gray-900">Clear Server Cache</div>
-                    <div className="text-sm text-gray-600">Remove cached data</div>
+                    <div className="font-medium text-gray-900">Clear Library Cache</div>
+                    <div className="text-sm text-gray-600">Force fresh library fetch on next push</div>
                   </div>
                 </div>
-                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-gray-600 transition-colors" />
+                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-purple-600 transition-colors" />
               </button>
             </div>
           </div>

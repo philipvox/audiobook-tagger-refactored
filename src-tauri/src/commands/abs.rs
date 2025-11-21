@@ -5,6 +5,14 @@ use crate::{config, scanner};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use futures::stream::{self, StreamExt};
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+// Cache library items for 5 minutes
+static LIBRARY_CACHE: Lazy<Mutex<Option<(Instant, HashMap<String, AbsLibraryItem>)>>> = 
+    Lazy::new(|| Mutex::new(None));
 
 #[derive(Debug, Serialize)]
 pub struct ConnectionTest {
@@ -79,24 +87,38 @@ pub async fn test_abs_connection(config: config::Config) -> Result<ConnectionTes
         message: format!("Connected to {}", config.abs_base_url),
     })
 }
+
+#[tauri::command]
+pub async fn clear_abs_library_cache() -> Result<String, String> {
+    let mut cache = LIBRARY_CACHE.lock().unwrap();
+    *cache = None;
+    Ok("Library cache cleared".to_string())
+}
+
 #[tauri::command]
 pub async fn push_abs_updates(request: PushRequest) -> Result<PushResult, String> {
+    let total_start = std::time::Instant::now();
+    
+    println!("🚀 Push: {} items", request.items.len());
+    
     let config = config::load_config().map_err(|e| e.to_string())?;
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     
-    // ✅ FETCH LIBRARY ITEMS ONLY ONCE (not per item!)
-    println!("📚 Fetching AudiobookShelf library (one time)...");
-    let library_items = fetch_abs_library_items(&client, &config).await?;
-    println!("📊 Loaded {} library items", library_items.len());
+    // Use cached library fetch
+    let fetch_start = std::time::Instant::now();
+    let library_items = fetch_abs_library_items_cached(&client, &config).await?;
+    println!("   📚 Library ready in {:?}", fetch_start.elapsed());
     
+    // Match items
     let mut unmatched = Vec::new();
     let mut targets = Vec::new();
     let mut seen_ids = HashSet::new();
     
-    // Now process all items against the CACHED library
     for item in &request.items {
         let normalized_path = normalize_path(&item.path);
-        
         if let Some(library_item) = find_matching_item(&normalized_path, &library_items) {
             if seen_ids.insert(library_item.id.clone()) {
                 targets.push((library_item.id.clone(), item.clone()));
@@ -106,83 +128,37 @@ pub async fn push_abs_updates(request: PushRequest) -> Result<PushResult, String
         }
     }
     
-    // Update all matched items
-    let mut failed = Vec::new();
-    let mut updated = 0;
-    
-    for (item_id, push_item) in targets {
-        match update_abs_item(&client, &config, &item_id, &push_item.metadata).await {
-            Ok(true) => updated += 1,
-            Ok(false) => {},
-            Err(err) => {
-                failed.push(PushFailure {
-                    path: push_item.path.clone(),
-                    reason: err.reason,
-                    status: err.status,
-                });
-            }
-        }
+    if targets.is_empty() {
+        return Ok(PushResult { updated: 0, unmatched, failed: vec![] });
     }
     
-    Ok(PushResult { updated, unmatched, failed })
-}
-#[tauri::command]
-pub async fn push_abs_updates_bulk(request: PushRequest) -> Result<PushResult, String> {
-    let config = config::load_config().map_err(|e| e.to_string())?;
-    let client = reqwest::Client::new();
+    println!("   🎯 Matched {} items, updating with 10 parallel workers...", targets.len());
     
-    println!("📚 Fetching AudiobookShelf library once...");
-    let start = std::time::Instant::now();
-    let library_items = fetch_abs_library_items(&client, &config).await?;
-    println!("📊 Loaded {} items in {:?}", library_items.len(), start.elapsed());
-    
-    println!("🔍 Processing {} requests...", request.items.len());
-    
-    let mut unmatched = Vec::new();
-    let mut targets = Vec::new();
-    let mut seen_ids = HashSet::new();
-    
-    // Match all items
-    for item in &request.items {
-        let normalized_path = normalize_path(&item.path);
-        
-        if let Some(library_item) = find_matching_item(&normalized_path, &library_items) {
-            if seen_ids.insert(library_item.id.clone()) {
-                targets.push((library_item.id.clone(), item.clone()));
-            }
-        } else {
-            unmatched.push(item.path.clone());
-        }
-    }
-    
-    println!("✅ Matched {}/{} items", targets.len(), request.items.len());
-    
-    // Update in parallel batches of 10
-    let mut failed = Vec::new();
-    let mut updated = 0;
-    
-    use futures::stream::{self, StreamExt};
-    
+    // PARALLEL UPDATE - 10 concurrent requests
+    let update_start = std::time::Instant::now();
     let results: Vec<_> = stream::iter(targets)
         .map(|(item_id, push_item)| {
             let client = client.clone();
             let config = config.clone();
             async move {
-                update_abs_item(&client, &config, &item_id, &push_item.metadata).await
-                    .map(|success| (success, push_item.path.clone()))
+                let result = update_abs_item(&client, &config, &item_id, &push_item.metadata).await;
+                (push_item.path, result)
             }
         })
-        .buffer_unordered(10) // Process 10 at a time
+        .buffer_unordered(10)
         .collect()
         .await;
     
-    for result in results {
+    let mut failed = Vec::new();
+    let mut updated = 0;
+    
+    for (path, result) in results {
         match result {
-            Ok((true, _)) => updated += 1,
-            Ok((false, _)) => {},
+            Ok(true) => updated += 1,
+            Ok(false) => {},
             Err(err) => {
                 failed.push(PushFailure {
-                    path: "".to_string(),
+                    path,
                     reason: err.reason,
                     status: err.status,
                 });
@@ -190,8 +166,8 @@ pub async fn push_abs_updates_bulk(request: PushRequest) -> Result<PushResult, S
         }
     }
     
-    println!("✅ Push complete: {} updated, {} unmatched, {} failed", 
-        updated, unmatched.len(), failed.len());
+    println!("   ✅ Updated {} in {:?} (total: {:?})", 
+        updated, update_start.elapsed(), total_start.elapsed());
     
     Ok(PushResult { updated, unmatched, failed })
 }
@@ -252,6 +228,36 @@ pub async fn clear_abs_cache() -> Result<String, String> {
 }
 
 // Helper functions
+
+async fn fetch_abs_library_items_cached(
+    client: &reqwest::Client,
+    config: &config::Config,
+) -> Result<HashMap<String, AbsLibraryItem>, String> {
+    // Check cache in a separate scope so lock is dropped
+    {
+        let cache = LIBRARY_CACHE.lock().unwrap();
+        
+        if let Some((timestamp, items)) = &*cache {
+            if timestamp.elapsed() < Duration::from_secs(300) {
+                println!("   💾 Using cached library ({} items, age: {:.1}s)", 
+                    items.len(), timestamp.elapsed().as_secs_f64());
+                return Ok(items.clone());
+            }
+        }
+    } // Lock dropped here
+    
+    // Cache miss or expired - fetch fresh
+    println!("   🔍 Fetching fresh library...");
+    let items = fetch_abs_library_items(client, config).await?;
+    
+    // Update cache
+    {
+        let mut cache = LIBRARY_CACHE.lock().unwrap();
+        *cache = Some((Instant::now(), items.clone()));
+    } // Lock dropped here
+    
+    Ok(items)
+}
 
 async fn fetch_abs_library_items(
     client: &reqwest::Client,
