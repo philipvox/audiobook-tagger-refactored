@@ -50,7 +50,8 @@ fn main() {
             commands::covers::search_cover_options,
             commands::covers::download_cover_from_url,
             commands::covers::set_cover_from_file,
-            commands::abs::push_abs_updates_bulk,
+            commands::abs::clear_abs_library_cache,
+
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -92,37 +92,85 @@ function chunkArray(array, chunkSize) {
   }
   return chunks;
 }
+// src/hooks/useTagOperations.js - OPTIMIZED VERSION
+// Only send ONE file per book group
+
 const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
-  console.time('🔍 TOTAL PUSH TIME');
-  
   try {
     setPushing(true);
     
-    const items = [];
+    console.log('🔍 Building items for push...');
+    
+    // Group files by book - ONLY SEND ONE FILE PER BOOK
+    const bookMap = new Map();
+    
     groups.forEach(group => {
-      group.files.forEach(file => {
-        if (selectedFiles.has(file.id)) {
-          items.push({
-            path: file.path,
+      // Check if any file in this group is selected
+      const hasSelectedFile = group.files.some(f => selectedFiles.has(f.id));
+      
+      if (hasSelectedFile) {
+        // Only add this book once (use first file as representative)
+        const firstFile = group.files[0];
+        if (!bookMap.has(group.id)) {
+          bookMap.set(group.id, {
+            path: firstFile.path,  // ABS only needs ONE file path per book
             metadata: group.metadata
           });
         }
-      });
+      }
     });
-
-    console.log(`📊 Pushing ${items.length} items to backend...`);
     
-    // ✅ ONE CALL - Let Rust handle it
-    const result = await invoke('push_abs_updates_bulk', { 
-      request: { items } 
-    });
+    const allItems = Array.from(bookMap.values());
+    
+    console.log(`📦 Optimized: ${selectedFiles.size} files → ${allItems.length} books`);
+    console.log(`📦 Pushing ${allItems.length} books in chunks of 50...`);
+    
+    // CHUNK INTO BATCHES OF 50
+    const CHUNK_SIZE = 50;
+    let totalUpdated = 0;
+    let totalUnmatched = [];
+    let totalFailed = [];
+    
+    for (let i = 0; i < allItems.length; i += CHUNK_SIZE) {
+      const chunk = allItems.slice(i, i + CHUNK_SIZE);
+      const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
+      const totalChunks = Math.ceil(allItems.length / CHUNK_SIZE);
+      
+      console.log(`🚀 Chunk ${chunkNum}/${totalChunks} (${chunk.length} books)...`);
+      
+      try {
+        const result = await invoke('push_abs_updates', { 
+          request: { items: chunk } 
+        });
+        
+        totalUpdated += result.updated || 0;
+        totalUnmatched.push(...(result.unmatched || []));
+        totalFailed.push(...(result.failed || []));
+        
+        console.log(`   ✅ Chunk ${chunkNum} done: ${result.updated} updated`);
+        
+        // Small delay between chunks
+        if (i + CHUNK_SIZE < allItems.length) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      } catch (error) {
+        console.error(`❌ Chunk ${chunkNum} failed:`, error);
+      }
+    }
+    
+    console.log(`\n✅ Push complete:`);
+    console.log(`   📚 Books updated: ${totalUpdated}`);
+    console.log(`   ❌ Failed: ${totalFailed.length}`);
+    console.log(`   ⚠️  Unmatched: ${totalUnmatched.length}`);
     
     setPushing(false);
-    console.timeEnd('🔍 TOTAL PUSH TIME');
-    
-    return result;
+    return {
+      updated: totalUpdated,
+      unmatched: totalUnmatched,
+      failed: totalFailed
+    };
   } catch (error) {
-    console.error('❌ Push failed:', error);
+    console.error('Push failed:', error);
     setPushing(false);
     throw error;
   }
