@@ -14,6 +14,9 @@ pub async fn scan_directories(
 ) -> Result<ScanResult, Box<dyn std::error::Error + Send + Sync>> {
     println!("🔍 Starting scan of {} paths", paths.len());
     
+    // ✅ THIS LINE MUST BE HERE
+    crate::progress::reset_progress();
+    
     if let Some(ref flag) = cancel_flag {
         if flag.load(Ordering::SeqCst) {
             println!("Scan cancelled before start");
@@ -40,7 +43,11 @@ pub async fn scan_directories(
     
     let total_files: usize = groups.iter().map(|g| g.files.len()).sum();
     println!("📚 Found {} books with {} total files", groups.len(), total_files);
-    
+
+    crate::progress::set_total(groups.len());
+    crate::progress::update_progress(0, groups.len(), "Starting processing...");
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
     let processed_groups = processor::process_all_groups(
         groups,
         &config,

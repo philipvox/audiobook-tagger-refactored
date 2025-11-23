@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { BookList } from '../components/scanner/BookList';
 import { MetadataPanel } from '../components/scanner/MetadataPanel';
 import { ActionBar } from '../components/scanner/ActionBar';
@@ -12,7 +12,7 @@ import { useFileSelection } from '../hooks/useFileSelection';
 import { useTagOperations } from '../hooks/useTagOperations';
 import { useApp } from '../context/AppContext';
 
-export function ScannerPage() {
+export function ScannerPage({ onActionsReady }) {
   const { groups, setGroups, fileStatuses, updateFileStatuses, clearFileStatuses, writeProgress } = useApp();
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState(new Set());
@@ -31,7 +31,11 @@ export function ScannerPage() {
     handleRescan,
     cancelScan
   } = useScan();
-  
+  useEffect(() => {
+    if (onActionsReady) {
+      onActionsReady({ handleScan, scanning });
+    }
+  }, [handleScan, scanning, onActionsReady]);
   const {
     selectedFiles,
     setSelectedFiles,
@@ -444,14 +448,18 @@ const handlePushClick = () => {
       </div>
 
       {/* Progress bars */}
-      {scanning && scanProgress.total > 0 && (
-        <ProgressBar
-          type="scan"
-          progress={scanProgress}
-          onCancel={cancelScan}
-          calculateETA={calculateETA}
-        />
-      )}
+      {(() => {
+        // console.log('🔵 ScannerPage render - scanning:', scanning, 'progress:', scanProgress);
+        return scanning && (
+          <ProgressBar
+            key={scanProgress.startTime} 
+            type="scan"
+            progress={scanProgress}
+            onCancel={cancelScan}
+            calculateETA={calculateETA}
+          />
+        );
+      })()}
 
       {writing && writeProgress.total > 0 && (
         <ProgressBar
