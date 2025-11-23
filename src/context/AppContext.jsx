@@ -1,4 +1,4 @@
-// src/context/AppContext.jsx - Add logging to see if events are received
+// src/context/AppContext.jsx
 import { createContext, useContext, useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -10,6 +10,7 @@ export function AppProvider({ children }) {
   const [groups, setGroups] = useState([]);
   const [fileStatuses, setFileStatuses] = useState({});
   const [writeProgress, setWriteProgress] = useState({ current: 0, total: 0 });
+  const [isLoadingConfig, setIsLoadingConfig] = useState(true); // ✅ ADD THIS
 
   // Load config on mount
   useEffect(() => {
@@ -20,7 +21,7 @@ export function AppProvider({ children }) {
   useEffect(() => {
     const setupListener = async () => {
       const unlisten = await listen('write_progress', (event) => {
-        console.log('📊 Write progress event received:', event.payload); // ✅ DEBUG
+        console.log('📊 Write progress event received:', event.payload);
         setWriteProgress(event.payload);
       });
       return unlisten;
@@ -36,10 +37,13 @@ export function AppProvider({ children }) {
 
   const loadConfig = async () => {
     try {
+      setIsLoadingConfig(true); // ✅ ADD THIS
       const cfg = await invoke('get_config');
       setConfig(cfg);
     } catch (error) {
       console.error('Failed to load config:', error);
+    } finally {
+      setIsLoadingConfig(false); // ✅ ADD THIS
     }
   };
 
@@ -87,7 +91,8 @@ export function AppProvider({ children }) {
     setWriteProgress
   };
 
-  if (!config) {
+  // ✅ CHANGE THIS - Show loading without unmounting children
+  if (isLoadingConfig) {
     return (
       <div className="h-screen flex items-center justify-center">
         <div className="text-gray-500">Loading...</div>

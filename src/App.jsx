@@ -5,12 +5,11 @@ import { ScannerPage } from './pages/ScannerPage';
 import { MaintenancePage } from './pages/MaintenancePage';
 import { SettingsPage } from './pages/SettingsPage';
 import { RawTagInspector } from './components/RawTagInspector';
-import { useScan } from './hooks/useScan';
 
 function AppContent() {
   const [activeTab, setActiveTab] = useState('scanner');
   const [showTagInspector, setShowTagInspector] = useState(false);
-  const { handleScan, scanning } = useScan();
+  const [scannerActions, setScannerActions] = useState(null);
 
   return (
     <div className="h-screen flex flex-col bg-gray-50">
@@ -24,12 +23,12 @@ function AppContent() {
           
           <div className="flex items-center gap-4">
             <button 
-              onClick={handleScan} 
-              disabled={scanning} 
+              onClick={() => scannerActions?.handleScan()} 
+              disabled={scannerActions?.scanning} 
               className="btn btn-primary flex items-center gap-2"
             >
-              <RefreshCw className={`w-4 h-4 ${scanning ? 'animate-spin' : ''}`} />
-              {scanning ? 'Scanning...' : 'Scan Library'}
+              <RefreshCw className={`w-4 h-4 ${scannerActions?.scanning ? 'animate-spin' : ''}`} />
+              {scannerActions?.scanning ? 'Scanning...' : 'Scan Library'}
             </button>
             <button
               onClick={() => setShowTagInspector(true)}
@@ -89,7 +88,7 @@ function AppContent() {
 
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">
-        {activeTab === 'scanner' && <ScannerPage />}
+        {activeTab === 'scanner' && <ScannerPage onActionsReady={setScannerActions} />}
         {activeTab === 'maintenance' && <MaintenancePage />}
         {activeTab === 'settings' && <SettingsPage />}
       </main>

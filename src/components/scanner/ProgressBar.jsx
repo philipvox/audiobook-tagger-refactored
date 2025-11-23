@@ -2,7 +2,8 @@
 import { RefreshCw, Save } from 'lucide-react';
 
 export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA }) {
-  // ✅ Add a check to prevent flickering
+  // console.log('🎨 ProgressBar render:', { type, progress, isVisible: progress.total > 0 });
+  
   const isVisible = progress.total > 0;
   
   if (!isVisible) return null;

@@ -15,6 +15,7 @@ export function useScan() {
   });
   
   const progressIntervalRef = useRef(null);
+  const resetTimeoutRef = useRef(null);
 
   const calculateETA = useCallback(() => {
     if (!scanProgress.startTime || scanProgress.current === 0) return 'Calculating...';
@@ -30,10 +31,14 @@ export function useScan() {
   }, [scanProgress]);
 
   const handleScan = useCallback(async () => {
-    // Clear any existing interval first
     if (progressIntervalRef.current) {
       clearInterval(progressIntervalRef.current);
       progressIntervalRef.current = null;
+    }
+    
+    if (resetTimeoutRef.current) {
+      clearTimeout(resetTimeoutRef.current);
+      resetTimeoutRef.current = null;
     }
     
     try {
@@ -46,7 +51,6 @@ export function useScan() {
       
       const paths = Array.isArray(selected) ? selected : [selected];
       
-      // Reset state
       setScanning(true);
       const startTime = Date.now();
       setScanProgress({
@@ -57,7 +61,6 @@ export function useScan() {
         filesPerSecond: 0
       });
       
-      // Start polling with ref
       progressIntervalRef.current = setInterval(async () => {
         try {
           const progress = await invoke('get_scan_progress');
@@ -73,20 +76,18 @@ export function useScan() {
             filesPerSecond: rate
           });
         } catch (error) {
-          // Ignore
+          // Ignore polling errors
         }
       }, 500);
       
       try {
         const result = await invoke('scan_library', { paths });
         
-        // Stop polling immediately after scan completes
         if (progressIntervalRef.current) {
           clearInterval(progressIntervalRef.current);
           progressIntervalRef.current = null;
         }
         
-        // Process results
         setGroups(prevGroups => {
           const existingFilePaths = new Map();
           prevGroups.forEach(group => {
@@ -115,7 +116,6 @@ export function useScan() {
         });
         
       } finally {
-        // Ensure interval is cleared
         if (progressIntervalRef.current) {
           clearInterval(progressIntervalRef.current);
           progressIntervalRef.current = null;
@@ -123,8 +123,7 @@ export function useScan() {
         
         setScanning(false);
         
-        // Reset progress after a small delay to let UI update
-        setTimeout(() => {
+        resetTimeoutRef.current = setTimeout(() => {
           setScanProgress({
             current: 0,
             total: 0,
@@ -132,6 +131,7 @@ export function useScan() {
             startTime: null,
             filesPerSecond: 0
           });
+          resetTimeoutRef.current = null;
         }, 500);
       }
     } catch (error) {
@@ -140,6 +140,11 @@ export function useScan() {
       if (progressIntervalRef.current) {
         clearInterval(progressIntervalRef.current);
         progressIntervalRef.current = null;
+      }
+      
+      if (resetTimeoutRef.current) {
+        clearTimeout(resetTimeoutRef.current);
+        resetTimeoutRef.current = null;
       }
       
       setScanning(false);
@@ -154,10 +159,14 @@ export function useScan() {
   }, [setGroups]);
 
   const handleRescan = useCallback(async (selectedFiles, groups) => {
-    // Clear any existing interval first
     if (progressIntervalRef.current) {
       clearInterval(progressIntervalRef.current);
       progressIntervalRef.current = null;
+    }
+    
+    if (resetTimeoutRef.current) {
+      clearTimeout(resetTimeoutRef.current);
+      resetTimeoutRef.current = null;
     }
     
     try {
@@ -187,7 +196,7 @@ export function useScan() {
             filesPerSecond: rate
           });
         } catch (error) {
-          // Ignore
+          // Ignore polling errors
         }
       }, 500);
       
@@ -250,7 +259,7 @@ export function useScan() {
         
         setScanning(false);
         
-        setTimeout(() => {
+        resetTimeoutRef.current = setTimeout(() => {
           setScanProgress({
             current: 0,
             total: 0,
@@ -258,6 +267,7 @@ export function useScan() {
             startTime: null,
             filesPerSecond: 0
           });
+          resetTimeoutRef.current = null;
         }, 500);
       }
     } catch (error) {
@@ -266,6 +276,11 @@ export function useScan() {
       if (progressIntervalRef.current) {
         clearInterval(progressIntervalRef.current);
         progressIntervalRef.current = null;
+      }
+      
+      if (resetTimeoutRef.current) {
+        clearTimeout(resetTimeoutRef.current);
+        resetTimeoutRef.current = null;
       }
       
       setScanning(false);
@@ -280,6 +295,11 @@ export function useScan() {
       if (progressIntervalRef.current) {
         clearInterval(progressIntervalRef.current);
         progressIntervalRef.current = null;
+      }
+      
+      if (resetTimeoutRef.current) {
+        clearTimeout(resetTimeoutRef.current);
+        resetTimeoutRef.current = null;
       }
       
       setScanning(false);
@@ -301,6 +321,6 @@ export function useScan() {
     calculateETA,
     handleScan,
     handleRescan,
-    cancelScan
+    cancelScan,
   };
 }

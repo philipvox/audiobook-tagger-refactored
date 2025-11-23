@@ -19,7 +19,8 @@ pub async fn process_all_groups(
     
     let total = groups.len();
     println!("⚙️  Processing {} groups with {} workers", total, max_workers);
-    
+        // crate::progress::set_total(total);
+
     let processed_count = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
     
@@ -61,13 +62,13 @@ pub async fn process_all_groups(
     
     Ok(results)
 }
-
 async fn process_book_group(
     mut group: BookGroup,
     config: &Config,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<BookGroup, Box<dyn std::error::Error + Send + Sync>> {
     
+    // ✅ Check at start
     if let Some(ref flag) = cancel_flag {
         if flag.load(Ordering::SeqCst) {
             return Ok(group);
@@ -96,8 +97,16 @@ async fn process_book_group(
                 .unwrap_or(std::path::Path::new(""))
                 .to_string_lossy()
                 .to_string(),
-            tags: file_tags.clone(),
+            tags: file_tags.clone(),  // ✅ ADD THIS LINE
         };
+        
+        // ✅ Check before GPT extraction
+        if let Some(ref flag) = cancel_flag {
+            if flag.load(Ordering::SeqCst) {
+                println!("   ⏸️  Cancelled during extraction");
+                return Ok(group);
+            }
+        }
         
         // Extract with GPT
         let (extracted_title, extracted_author) = extract_book_info_with_gpt(
@@ -111,6 +120,14 @@ async fn process_book_group(
         // FALLBACK CHAIN: Try Google Books → Audible → GPT
         let mut google_data = None;
         let mut audible_data = None;
+        
+        // ✅ Check before Google Books
+        if let Some(ref flag) = cancel_flag {
+            if flag.load(Ordering::SeqCst) {
+                println!("   ⏸️  Cancelled before Google Books");
+                return Ok(group);
+            }
+        }
         
         // Try Google Books first
         if let Some(ref api_key) = config.google_books_api_key {
@@ -126,12 +143,29 @@ async fn process_book_group(
                 }
                 Err(e) => {
                     println!("   ⚠️  Google Books error: {}", e);
+                    
+                    // ✅ Check before Audible fallback
+                    if let Some(ref flag) = cancel_flag {
+                        if flag.load(Ordering::SeqCst) {
+                            println!("   ⏸️  Cancelled before Audible fallback");
+                            return Ok(group);
+                        }
+                    }
+                    
                     // Google failed, try Audible
                     println!("   🎧 Trying Audible as fallback...");
                     audible_data = fetch_audible_metadata(&extracted_title, &extracted_author).await;
                 }
             }
         } else {
+            // ✅ Check before Audible
+            if let Some(ref flag) = cancel_flag {
+                if flag.load(Ordering::SeqCst) {
+                    println!("   ⏸️  Cancelled before Audible");
+                    return Ok(group);
+                }
+            }
+            
             // No Google API key, try Audible
             println!("   🎧 No Google Books API key, trying Audible...");
             audible_data = fetch_audible_metadata(&extracted_title, &extracted_author).await;
@@ -139,6 +173,14 @@ async fn process_book_group(
         
         // If we still don't have data, try GPT enrichment as last resort
         let needs_gpt_enrichment = google_data.is_none() && audible_data.is_none();
+        
+        // ✅ Check before cover fetch
+        if let Some(ref flag) = cancel_flag {
+            if flag.load(Ordering::SeqCst) {
+                println!("   ⏸️  Cancelled before cover fetch");
+                return Ok(group);
+            }
+        }
         
         // Fetch cover art using dedicated module
         println!("   🖼️  Fetching cover art...");
@@ -172,6 +214,14 @@ async fn process_book_group(
                 None
             }
         };
+        
+        // ✅ Check before final GPT merge
+        if let Some(ref flag) = cancel_flag {
+            if flag.load(Ordering::SeqCst) {
+                println!("   ⏸️  Cancelled before GPT merge");
+                return Ok(group);
+            }
+        }
         
         // Merge all metadata with GPT
         println!("   🤖 Merging metadata with GPT...");
@@ -212,6 +262,14 @@ async fn process_book_group(
             println!("   ⚠️  Failed to cache metadata: {}", e);
         } else {
             println!("   💾 Cached metadata");
+        }
+    }
+    
+    // ✅ Final check before calculating changes
+    if let Some(ref flag) = cancel_flag {
+        if flag.load(Ordering::SeqCst) {
+            println!("   ⏸️  Cancelled before calculating changes");
+            return Ok(group);
         }
     }
     
