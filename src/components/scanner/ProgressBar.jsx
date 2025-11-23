@@ -1,7 +1,13 @@
+// src/components/scanner/ProgressBar.jsx
 import { RefreshCw, Save } from 'lucide-react';
 
 export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA }) {
-  if (type === 'scan' && progress.total > 0) {
+  // ✅ Add a check to prevent flickering
+  const isVisible = progress.total > 0;
+  
+  if (!isVisible) return null;
+
+  if (type === 'scan') {
     return (
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg z-50">
         <div className="px-6 py-4">
@@ -21,9 +27,6 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
                   Cancel
                 </button>
               )}
-              <div className="text-sm text-gray-600">
-                {progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0}% complete
-              </div>
             </div>
             
             <div className="text-right">
@@ -59,13 +62,13 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
     );
   }
 
-  if (type === 'write' && progress.total > 0) {
+  if (type === 'write') {
     return (
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg z-50">
         <div className="px-6 py-4">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
-              <Save className="w-5 h-5 text-blue-600 animate-pulse" />
+              <Save className="w-5 h-5 text-green-600 animate-pulse" />
               <span className="font-semibold text-gray-900">
                 Writing tags {progress.current} of {progress.total}
               </span>
@@ -76,7 +79,7 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
           </div>
           <div className="w-full bg-gray-200 rounded-full h-3">
             <div 
-              className="bg-blue-600 h-3 rounded-full transition-all duration-300"
+              className="bg-green-600 h-3 rounded-full transition-all duration-300"
               style={{ width: `${progress.total > 0 ? (progress.current / progress.total) * 100 : 0}%` }}
             ></div>
           </div>

@@ -1,3 +1,4 @@
+// src/context/AppContext.jsx - Add logging to see if events are received
 import { createContext, useContext, useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -17,29 +18,19 @@ export function AppProvider({ children }) {
 
   // Listen for write progress events
   useEffect(() => {
-    let unlistenFn;
-    
     const setupListener = async () => {
-      try {
-        const unlisten = await listen('write_progress', (event) => {
-          console.log('Write progress event:', event.payload);
-          setWriteProgress(event.payload);
-        });
-        return unlisten;
-      } catch (error) {
-        console.error('Failed to setup write progress listener:', error);
-        return null;
-      }
+      const unlisten = await listen('write_progress', (event) => {
+        console.log('📊 Write progress event received:', event.payload); // ✅ DEBUG
+        setWriteProgress(event.payload);
+      });
+      return unlisten;
     };
     
-    setupListener().then(fn => { 
-      unlistenFn = fn; 
-    });
+    let unlistenFn;
+    setupListener().then(fn => { unlistenFn = fn; });
     
     return () => {
-      if (unlistenFn) {
-        unlistenFn();
-      }
+      if (unlistenFn) unlistenFn();
     };
   }, []);
 
