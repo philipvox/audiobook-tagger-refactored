@@ -389,66 +389,95 @@ struct RawFileData {
 //     year: Option<String>,
 //     comment: Option<String>,
 // }
+
 fn calculate_changes(group: &mut BookGroup) -> usize {
+    use lofty::probe::Probe;
+    use lofty::tag::Accessor;
+    
     let mut total_changes = 0;
     
     for file in &mut group.files {
         file.changes.clear();
         
-        let existing_tags = read_file_tags(&file.path);
+        // Read existing tags
+        let existing_tags = match Probe::open(&file.path) {
+            Ok(probe) => match probe.read() {
+                Ok(tagged) => {
+                    let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+                    tag.map(|t| {
+                        (
+                            t.title().map(|s| s.to_string()),
+                            t.artist().map(|s| s.to_string()),
+                            t.album().map(|s| s.to_string()),  // ✅ Read album too
+                        )
+                    })
+                },
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
         
-        if existing_tags.title.as_deref() != Some(&group.metadata.title) {
-            file.changes.insert("title".to_string(), MetadataChange {
-                old: existing_tags.title.unwrap_or_default(),
-                new: group.metadata.title.clone(),
-            });
-            total_changes += 1;
-        }
-        
-        if existing_tags.artist.as_deref() != Some(&group.metadata.author) {
-            file.changes.insert("author".to_string(), MetadataChange {
-                old: existing_tags.artist.unwrap_or_default(),
-                new: group.metadata.author.clone(),
-            });
-            total_changes += 1;
-        }
-        
-        if let Some(ref narrator) = group.metadata.narrator {
-            if existing_tags.comment.as_deref() != Some(narrator) {
-                file.changes.insert("narrator".to_string(), MetadataChange {
-                    old: existing_tags.comment.unwrap_or_default(),
-                    new: narrator.clone(),
+        // Compare and build changes
+        if let Some((existing_title, existing_artist, existing_album)) = existing_tags {
+            // Title changes
+            if existing_title.as_deref() != Some(&group.metadata.title) {
+                file.changes.insert("title".to_string(), MetadataChange {
+                    old: existing_title.unwrap_or_default(),
+                    new: group.metadata.title.clone(),
                 });
                 total_changes += 1;
             }
+            
+            // Author changes
+            if existing_artist.as_deref() != Some(&group.metadata.author) {
+                file.changes.insert("author".to_string(), MetadataChange {
+                    old: existing_artist.unwrap_or_default(),
+                    new: group.metadata.author.clone(),
+                });
+                total_changes += 1;
+            }
+            
+            // ✅ Album changes (for audiobooks, album should match title)
+            if existing_album.as_deref() != Some(&group.metadata.title) {
+                file.changes.insert("album".to_string(), MetadataChange {
+                    old: existing_album.unwrap_or_default(),
+                    new: group.metadata.title.clone(),
+                });
+                total_changes += 1;
+            }
+        } else {
+            // No existing tags, mark all as new
+            file.changes.insert("title".to_string(), MetadataChange {
+                old: String::new(),
+                new: group.metadata.title.clone(),
+            });
+            file.changes.insert("author".to_string(), MetadataChange {
+                old: String::new(),
+                new: group.metadata.author.clone(),
+            });
+            file.changes.insert("album".to_string(), MetadataChange {
+                old: String::new(),
+                new: group.metadata.title.clone(),
+            });
+            total_changes += 3;
+        }
+        
+        // Add other fields if they exist
+        if let Some(ref narrator) = group.metadata.narrator {
+            file.changes.insert("narrator".to_string(), MetadataChange {
+                old: String::new(),
+                new: narrator.clone(),
+            });
+            total_changes += 1;
         }
         
         if !group.metadata.genres.is_empty() {
-            let new_genre = group.metadata.genres.join(", ");
-            if existing_tags.genre.as_deref() != Some(&new_genre) {
-                file.changes.insert("genre".to_string(), MetadataChange {
-                    old: existing_tags.genre.unwrap_or_default(),
-                    new: new_genre,
-                });
-                total_changes += 1;
-            }
+            file.changes.insert("genre".to_string(), MetadataChange {
+                old: String::new(),
+                new: group.metadata.genres.join(", "),
+            });
+            total_changes += 1;
         }
-        
-        if let Some(ref year) = group.metadata.year {
-            if existing_tags.year.as_deref() != Some(year) {
-                file.changes.insert("year".to_string(), MetadataChange {
-                    old: existing_tags.year.unwrap_or_default(),
-                    new: year.clone(),
-                });
-                total_changes += 1;
-            }
-        }
-        
-        file.status = if file.changes.is_empty() {
-            "unchanged".to_string()
-        } else {
-            "pending".to_string()
-        };
     }
     
     total_changes

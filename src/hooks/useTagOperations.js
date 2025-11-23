@@ -10,6 +10,8 @@ export function useTagOperations() {
   const writeSelectedTags = useCallback(async (selectedFiles) => {
     try {
       setWriting(true);
+      
+      // ✅ Set initial progress
       setWriteProgress({ current: 0, total: selectedFiles.size });
 
       const filesMap = {};
@@ -17,8 +19,7 @@ export function useTagOperations() {
         group.files.forEach(file => {
           filesMap[file.id] = {
             path: file.path,
-            changes: file.changes,
-            group_id: group.id  // Add group_id here
+            changes: file.changes
           };
         });
       });
@@ -38,14 +39,21 @@ export function useTagOperations() {
       });
       updateFileStatuses(newStatuses);
       
-      setWriting(false);
+      // ✅ Keep progress visible for 1 second before clearing
+      setTimeout(() => {
+        setWriteProgress({ current: 0, total: 0 });
+        setWriting(false);
+      }, 1000);
+      
       return result;
     } catch (error) {
       console.error('Write failed:', error);
+      setWriteProgress({ current: 0, total: 0 });
       setWriting(false);
       throw error;
     }
   }, [config, groups, updateFileStatuses, setWriteProgress]);
+
 
   const renameFiles = useCallback(async (selectedFiles) => {
     try {
