@@ -6,8 +6,7 @@ export function useTagOperations() {
   const { config, groups, updateFileStatuses, setWriteProgress } = useApp();
   const [writing, setWriting] = useState(false);
   const [pushing, setPushing] = useState(false);
-
-  const writeSelectedTags = useCallback(async (selectedFiles) => {
+  const writeSelectedTags = useCallback(async (selectedFiles, shouldBackup) => {
     try {
       setWriting(true);
       
@@ -28,7 +27,7 @@ export function useTagOperations() {
         request: {
           file_ids: Array.from(selectedFiles),
           files: filesMap,
-          backup: config.backup_tags
+          backup: shouldBackup  // ✅ Use passed parameter instead of config
         }
       });
 
@@ -52,9 +51,7 @@ export function useTagOperations() {
       setWriting(false);
       throw error;
     }
-  }, [config, groups, updateFileStatuses, setWriteProgress]);
-
-
+  }, [groups, updateFileStatuses, setWriteProgress]);  // ✅ Remove config dependency
   const renameFiles = useCallback(async (selectedFiles) => {
     try {
       setWriting(true);
@@ -121,8 +118,9 @@ const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
         const firstFile = group.files[0];
         if (!bookMap.has(group.id)) {
           bookMap.set(group.id, {
-            path: firstFile.path,  // ABS only needs ONE file path per book
-            metadata: group.metadata
+            path: firstFile.path,
+            metadata: group.metadata,
+            group_id: group.id
           });
         }
       }

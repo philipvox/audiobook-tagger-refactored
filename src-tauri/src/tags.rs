@@ -1,7 +1,17 @@
 use anyhow::Result;
 use std::path::Path;
 
+// Keep the async wrapper for compatibility
 pub async fn write_file_tags(
+    file_path: &str,
+    changes: &std::collections::HashMap<String, crate::scanner::MetadataChange>,
+    backup: bool,
+) -> Result<()> {
+    write_file_tags_sync(file_path, changes, backup)
+}
+
+// ✅ NEW: Synchronous version for spawn_blocking
+pub fn write_file_tags_sync(
     file_path: &str,
     changes: &std::collections::HashMap<String, crate::scanner::MetadataChange>,
     backup: bool,
@@ -30,15 +40,14 @@ pub async fn write_file_tags(
         .to_lowercase();
     
     match ext.as_str() {
-        "m4a" | "m4b" => write_m4a_tags(file_path, changes).await,
-        "mp3" | "flac" | "ogg" | "opus" => write_standard_tags(file_path, changes).await,
+        "m4a" | "m4b" => write_m4a_tags_sync(file_path, changes),
+        "mp3" | "flac" | "ogg" | "opus" => write_standard_tags_sync(file_path, changes),
         _ => anyhow::bail!("Unsupported format: {}", ext)
     }
 }
-// src-tauri/src/tags.rs
 
-// iTunes M4A/M4B files
-async fn write_m4a_tags(
+// iTunes M4A/M4B files - synchronous
+fn write_m4a_tags_sync(
     file_path: &str,
     changes: &std::collections::HashMap<String, crate::scanner::MetadataChange>,
 ) -> Result<()> {
@@ -51,12 +60,10 @@ async fn write_m4a_tags(
         match field.as_str() {
             "title" => {
                 tag.set_title(&change.new);
-                // ✅ Also set album for audiobook consistency
                 tag.set_album(&change.new);
             },
             "artist" | "author" => {
                 tag.set_artist(&change.new);
-                // ✅ Also set album artist
                 tag.set_album_artist(&change.new);
             },
             "album" => tag.set_album(&change.new),
@@ -92,8 +99,8 @@ async fn write_m4a_tags(
     Ok(())
 }
 
-// MP3, FLAC, OGG, etc using lofty
-async fn write_standard_tags(
+// MP3, FLAC, OGG, etc using lofty - synchronous
+fn write_standard_tags_sync(
     file_path: &str,
     changes: &std::collections::HashMap<String, crate::scanner::MetadataChange>,
 ) -> Result<()> {
@@ -116,14 +123,12 @@ async fn write_standard_tags(
             "title" => {
                 tag.remove_key(&ItemKey::TrackTitle);
                 tag.set_title(change.new.clone());
-                // ✅ Also set album for audiobook consistency
                 tag.remove_key(&ItemKey::AlbumTitle);
                 tag.set_album(change.new.clone());
             },
             "artist" | "author" => {
                 tag.remove_key(&ItemKey::TrackArtist);
                 tag.set_artist(change.new.clone());
-                // ✅ Also set album artist
                 tag.remove_key(&ItemKey::AlbumArtist);
                 tag.insert_text(ItemKey::AlbumArtist, change.new.clone());
             },

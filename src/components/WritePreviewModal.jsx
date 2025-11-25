@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, FileAudio, AlertTriangle, CheckCircle } from 'lucide-react';
+import { X, FileAudio, AlertTriangle, CheckCircle, Zap } from 'lucide-react';
 
 export function WritePreviewModal({ 
   isOpen, 
@@ -9,6 +9,8 @@ export function WritePreviewModal({
   groups, 
   backupEnabled 
 }) {
+  const [skipBackup, setSkipBackup] = useState(false);
+
   if (!isOpen) return null;
 
   // Build preview data
@@ -57,12 +59,23 @@ export function WritePreviewModal({
                 Review the changes that will be written to {previewData.length} file{previewData.length === 1 ? '' : 's'} 
                 ({totalChanges} total changes)
               </p>
-              {backupEnabled && (
-                <div className="flex items-center gap-2 mt-2 text-sm text-green-700 bg-green-50 px-3 py-1.5 rounded-lg">
-                  <CheckCircle className="w-4 h-4" />
-                  Original files will be backed up
-                </div>
-              )}
+              
+              {/* ✅ NEW: Backup Options */}
+              <div className="mt-4 space-y-2">
+                {backupEnabled && !skipBackup && (
+                  <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 px-3 py-1.5 rounded-lg">
+                    <CheckCircle className="w-4 h-4" />
+                    Original files will be backed up (.backup extension)
+                  </div>
+                )}
+                
+                {skipBackup && (
+                  <div className="flex items-center gap-2 text-sm text-orange-700 bg-orange-50 px-3 py-1.5 rounded-lg">
+                    <Zap className="w-4 h-4" />
+                    <span className="font-semibold">Fast mode:</span> No backups (30% faster)
+                  </div>
+                )}
+              </div>
             </div>
             <button
               onClick={onClose}
@@ -125,22 +138,48 @@ export function WritePreviewModal({
         </div>
 
         {/* Footer */}
-        <div className="px-6 pb-6 flex gap-3 justify-end border-t border-gray-200 pt-4">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors font-medium"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => {
-              onConfirm();
-              onClose();
-            }}
-            className="px-4 py-2 rounded-lg transition-colors font-medium bg-yellow-600 hover:bg-yellow-700 text-white"
-          >
-            Write {totalChanges} Changes to {previewData.length} File{previewData.length === 1 ? '' : 's'}
-          </button>
+        <div className="px-6 pb-6 flex flex-col gap-4 border-t border-gray-200 pt-4">
+          {/* ✅ NEW: Skip Backup Toggle */}
+          <div className="flex items-center justify-between p-4 bg-gradient-to-r from-orange-50 to-amber-50 rounded-lg border border-orange-200">
+            <div className="flex items-center gap-3">
+              <Zap className="w-5 h-5 text-orange-600" />
+              <div>
+                <div className="font-medium text-gray-900">Fast Mode (Skip Backups)</div>
+                <div className="text-sm text-gray-600">
+                  ~30% faster, but no backup files created
+                </div>
+              </div>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={skipBackup}
+                onChange={(e) => setSkipBackup(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-orange-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-600"></div>
+            </label>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex gap-3 justify-end">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors font-medium"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                onConfirm(skipBackup); // ✅ Pass skipBackup to parent
+                onClose();
+              }}
+              className="px-4 py-2 rounded-lg transition-colors font-medium bg-yellow-600 hover:bg-yellow-700 text-white flex items-center gap-2"
+            >
+              {skipBackup && <Zap className="w-4 h-4" />}
+              Write {totalChanges} Changes to {previewData.length} File{previewData.length === 1 ? '' : 's'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
