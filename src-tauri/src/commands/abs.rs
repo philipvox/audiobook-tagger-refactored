@@ -24,8 +24,8 @@ pub struct ConnectionTest {
 pub struct PushItem {
     path: String,
     metadata: scanner::BookMetadata,
+    group_id: String,
 }
-
 #[derive(Debug, Deserialize)]
 pub struct PushRequest {
     items: Vec<PushItem>,
@@ -37,12 +37,12 @@ pub struct PushFailure {
     reason: String,
     status: Option<u16>,
 }
-
 #[derive(Debug, Serialize)]
 pub struct PushResult {
     updated: usize,
     unmatched: Vec<String>,
     failed: Vec<PushFailure>,
+    covers_uploaded: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -129,19 +129,31 @@ pub async fn push_abs_updates(request: PushRequest) -> Result<PushResult, String
     }
     
     if targets.is_empty() {
-        return Ok(PushResult { updated: 0, unmatched, failed: vec![] });
+        return Ok(PushResult { updated: 0, unmatched, failed: vec![], covers_uploaded: 0 });
     }
     
     println!("   🎯 Matched {} items, updating with 10 parallel workers...", targets.len());
     
     // PARALLEL UPDATE - 10 concurrent requests
     let update_start = std::time::Instant::now();
+    let covers_uploaded = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    
     let results: Vec<_> = stream::iter(targets)
         .map(|(item_id, push_item)| {
             let client = client.clone();
             let config = config.clone();
+            let covers_count = covers_uploaded.clone();
             async move {
-                let result = update_abs_item(&client, &config, &item_id, &push_item.metadata).await;
+                let mut result = update_abs_item(&client, &config, &item_id, &push_item.metadata).await;
+                
+                if result.is_ok() {
+                    match upload_cover_to_abs(&client, &config, &item_id, &push_item.group_id).await {
+                        Ok(true) => { covers_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+                        Ok(false) => {}
+                        Err(e) => { println!("   ⚠️  Cover upload failed for {}: {}", item_id, e); }
+                    }
+                }
+                
                 (push_item.path, result)
             }
         })
@@ -169,9 +181,59 @@ pub async fn push_abs_updates(request: PushRequest) -> Result<PushResult, String
     println!("   ✅ Updated {} in {:?} (total: {:?})", 
         updated, update_start.elapsed(), total_start.elapsed());
     
-    Ok(PushResult { updated, unmatched, failed })
+    let covers_uploaded_count = covers_uploaded.load(std::sync::atomic::Ordering::SeqCst);
+        if covers_uploaded_count > 0 {
+            println!("   🖼️  Uploaded {} covers", covers_uploaded_count);
+        }
+        
+        Ok(PushResult { updated, unmatched, failed, covers_uploaded: covers_uploaded_count })
 }
-
+// Upload cover to AudiobookShelf
+async fn upload_cover_to_abs(
+    client: &reqwest::Client,
+    config: &config::Config,
+    item_id: &str,
+    group_id: &str,
+) -> Result<bool, String> {
+    let cover_cache_key = format!("cover_{}", group_id);
+    let cover_data: Option<(Vec<u8>, String)> = crate::cache::get(&cover_cache_key);
+    
+    if let Some((data, mime_type)) = cover_data {
+        println!("   🖼️  Uploading cover for item {} ({} KB)", item_id, data.len() / 1024);
+        
+        let extension = match mime_type.as_str() {
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/png" => "png",
+            "image/webp" => "webp",
+            _ => "jpg",
+        };
+        
+        let part = reqwest::multipart::Part::bytes(data)
+            .file_name(format!("cover.{}", extension))
+            .mime_str(&mime_type)
+            .map_err(|e| format!("Failed to create multipart: {}", e))?;
+        
+        let form = reqwest::multipart::Form::new().part("cover", part);
+        let url = format!("{}/api/items/{}/cover", config.abs_base_url, item_id);
+        
+        let response = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", config.abs_api_token))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("Cover upload failed: {}", e))?;
+        
+        if response.status().is_success() {
+            println!("   ✅ Cover uploaded for {}", item_id);
+            Ok(true)
+        } else {
+            Err(format!("Status {}", response.status()))
+        }
+    } else {
+        Ok(false)
+    }
+}
 #[tauri::command]
 pub async fn restart_abs_docker() -> Result<String, String> {
     use std::process::Command;

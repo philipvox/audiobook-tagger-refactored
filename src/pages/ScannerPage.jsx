@@ -13,7 +13,7 @@ import { useTagOperations } from '../hooks/useTagOperations';
 import { useApp } from '../context/AppContext';
 
 export function ScannerPage({ onActionsReady }) {
-  const { groups, setGroups, fileStatuses, updateFileStatuses, clearFileStatuses, writeProgress } = useApp();
+  const { config, groups, setGroups, fileStatuses, updateFileStatuses, clearFileStatuses, writeProgress } = useApp();
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState(new Set());
   const [expandedGroups, setExpandedGroups] = useState(new Set());
@@ -245,10 +245,12 @@ const handleGroupClick = (group, index, event) => {
 
     setShowWritePreview(true);
   };
-
-  const performWrite = async () => {
+  const performWrite = async (skipBackup = false) => {
     try {
-      const result = await writeSelectedTags(selectedFiles);
+      // ✅ Override backup setting if skipBackup is true
+      const shouldBackup = skipBackup ? false : config.backup_tags;
+      
+      const result = await writeSelectedTags(selectedFiles, shouldBackup);
       
       if (result.failed > 0) {
         showConfirm({
@@ -261,7 +263,7 @@ const handleGroupClick = (group, index, event) => {
       } else {
         showConfirm({
           title: "Write Complete",
-          message: `Successfully wrote tags to ${result.success} files!`,
+          message: `Successfully wrote tags to ${result.success} files!${skipBackup ? '\n\n⚡ Fast mode: No backups created' : ''}`,
           confirmText: "OK",
           type: "info",
           onConfirm: () => {
@@ -510,15 +512,14 @@ const handlePushClick = () => {
           onCancel={() => setShowRenameModal(false)}
         />
       )}
-
       {showWritePreview && (
         <WritePreviewModal
           isOpen={showWritePreview}
           onClose={() => setShowWritePreview(false)}
-          onConfirm={performWrite}
+          onConfirm={performWrite}  // ✅ This now receives skipBackup param
           selectedFiles={selectedFiles}
           groups={groups}
-          backupEnabled={true}
+          backupEnabled={config.backup_tags}
         />
       )}
 

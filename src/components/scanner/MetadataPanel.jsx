@@ -1,29 +1,71 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Book, Edit, Upload, RefreshCw, Download, X, Image as ImageIcon } from 'lucide-react';
 
 export function MetadataPanel({ group, onEdit }) {
   const [coverData, setCoverData] = useState(null);
+  const [coverUrl, setCoverUrl] = useState(null);
   const [showCoverSearch, setShowCoverSearch] = useState(false);
   const [coverOptions, setCoverOptions] = useState([]);
   const [searchingCovers, setSearchingCovers] = useState(false);
   const [downloadingCover, setDownloadingCover] = useState(false);
   const [selectedUrl, setSelectedUrl] = useState(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  
+  // Track blob URL for cleanup
+  const blobUrlRef = useRef(null);
 
+  // Cleanup blob URL when component unmounts or cover changes
+  useEffect(() => {
+    return () => {
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  // Load cover when group changes
   useEffect(() => {
     if (group) {
       loadCover();
+    } else {
+      // Cleanup when no group
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+      setCoverUrl(null);
+      setCoverData(null);
     }
-  }, [group, refreshTrigger]);
+  }, [group?.id, refreshTrigger]);
 
   const loadCover = async () => {
+    // Cleanup previous blob URL
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = null;
+    }
+    setCoverUrl(null);
+    
     try {
       const cover = await invoke('get_cover_for_group', {
         groupId: group.id,
       });
       setCoverData(cover);
+      
+      // Create blob URL only once
+      if (cover && cover.data) {
+        try {
+          const blob = new Blob([new Uint8Array(cover.data)], { type: cover.mime_type || 'image/jpeg' });
+          const url = URL.createObjectURL(blob);
+          blobUrlRef.current = url;
+          setCoverUrl(url);
+        } catch (error) {
+          console.error('Error creating cover URL:', error);
+        }
+      }
     } catch (error) {
       console.error('Failed to load cover:', error);
       setCoverData(null);
@@ -111,19 +153,6 @@ export function MetadataPanel({ group, onEdit }) {
   }
 
   const metadata = group.metadata;
-
-  const getCoverImageSrc = () => {
-    if (!coverData) return null;
-    try {
-      const blob = new Blob([new Uint8Array(coverData.data)], { type: coverData.mime_type });
-      return URL.createObjectURL(blob);
-    } catch (error) {
-      console.error('Error creating cover URL:', error);
-      return null;
-    }
-  };
-
-  const coverImageSrc = getCoverImageSrc();
 
   return (
     <div className="flex-1 overflow-y-auto p-6 bg-gradient-to-br from-gray-50 to-white">
@@ -270,10 +299,10 @@ export function MetadataPanel({ group, onEdit }) {
             <div className="lg:col-span-1">
               <div className="sticky top-6 space-y-4">
                 <div className="aspect-[2/3] bg-gradient-to-br from-gray-100 to-gray-200 rounded-2xl shadow-xl overflow-hidden border-4 border-white ring-1 ring-gray-200 relative">
-                  {coverImageSrc ? (
+                  {coverUrl ? (
                     <>
                       <img 
-                        src={coverImageSrc} 
+                        src={coverUrl} 
                         alt={`${metadata.title} cover`}
                         className="w-full h-full object-cover"
                         onError={(e) => {
@@ -325,123 +354,119 @@ export function MetadataPanel({ group, onEdit }) {
       </div>
 
       {/* Cover Search Modal */}
-{showCoverSearch && (
-  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-    <div className="bg-white rounded-xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-      <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-2xl font-bold text-gray-900">Find Better Cover</h2>
-            <p className="text-sm text-gray-600 mt-1">{metadata.title}</p>
-          </div>
-          <button 
-            onClick={() => {
-              setShowCoverSearch(false);
-              setCoverOptions([]);
-            }} 
-            className="p-2 hover:bg-blue-100 rounded-lg transition-colors"
-          >
-            <X className="w-6 h-6 text-gray-600" />
-          </button>
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-6">
-        {searchingCovers ? (
-          <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-            <p className="text-gray-600">Searching for covers...</p>
-          </div>
-        ) : coverOptions.length === 0 ? (
-          <div className="text-center py-12">
-            <ImageIcon className="w-16 h-16 text-gray-300 mx-auto mb-4" />
-            <p className="text-gray-600 mb-4">No covers found from online sources</p>
-            <button 
-              onClick={handleUploadCover} 
-              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors flex items-center gap-2 mx-auto"
-            >
-              <Upload className="w-4 h-4" />
-              Upload Custom Cover
-            </button>
-          </div>
-        ) : (
-          <div className="space-y-6">
-            {/* Grid of cover options */}
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-              {coverOptions.map((option, idx) => (
-                <div 
-                  key={idx} 
-                  className="group border border-gray-200 rounded-lg overflow-hidden hover:shadow-xl hover:border-blue-300 transition-all bg-white"
+      {showCoverSearch && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+            <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-2xl font-bold text-gray-900">Find Better Cover</h2>
+                  <p className="text-sm text-gray-600 mt-1">{metadata.title}</p>
+                </div>
+                <button 
+                  onClick={() => {
+                    setShowCoverSearch(false);
+                    setCoverOptions([]);
+                  }} 
+                  className="p-2 hover:bg-blue-100 rounded-lg transition-colors"
                 >
-                  {/* Image container with fixed aspect ratio */}
-                  <div className="aspect-[2/3] bg-gray-100 relative overflow-hidden">
-                    <img
-                      src={option.url}
-                      alt="Cover preview"
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                      onError={(e) => {
-                        e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="300"%3E%3Crect fill="%23ddd" width="200" height="300"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23999" font-size="14"%3ENo Image%3C/text%3E%3C/svg%3E';
-                      }}
-                    />
-                    
-                    {/* Overlay on hover */}
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center p-3">
-                      <button
-                        onClick={() => handleDownloadCover(option.url)}
-                        disabled={downloadingCover && selectedUrl === option.url}
-                        className="w-full px-3 py-2 bg-white hover:bg-gray-100 text-gray-900 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 text-sm"
+                  <X className="w-6 h-6 text-gray-600" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6">
+              {searchingCovers ? (
+                <div className="text-center py-12">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+                  <p className="text-gray-600">Searching for covers...</p>
+                </div>
+              ) : coverOptions.length === 0 ? (
+                <div className="text-center py-12">
+                  <ImageIcon className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+                  <p className="text-gray-600 mb-4">No covers found from online sources</p>
+                  <button 
+                    onClick={handleUploadCover} 
+                    className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors flex items-center gap-2 mx-auto"
+                  >
+                    <Upload className="w-4 h-4" />
+                    Upload Custom Cover
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                    {coverOptions.map((option, idx) => (
+                      <div 
+                        key={idx} 
+                        className="group border border-gray-200 rounded-lg overflow-hidden hover:shadow-xl hover:border-blue-300 transition-all bg-white"
                       >
-                        {downloadingCover && selectedUrl === option.url ? (
-                          <>
-                            <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-900"></div>
-                            <span>Downloading...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Download className="w-3 h-3" />
-                            <span>Use This</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
+                        <div className="aspect-[2/3] bg-gray-100 relative overflow-hidden">
+                          <img
+                            src={option.url}
+                            alt="Cover preview"
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            loading="lazy"
+                            onError={(e) => {
+                              e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="300"%3E%3Crect fill="%23ddd" width="200" height="300"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23999" font-size="14"%3ENo Image%3C/text%3E%3C/svg%3E';
+                            }}
+                          />
+                          
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center p-3">
+                            <button
+                              onClick={() => handleDownloadCover(option.url)}
+                              disabled={downloadingCover && selectedUrl === option.url}
+                              className="w-full px-3 py-2 bg-white hover:bg-gray-100 text-gray-900 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 text-sm"
+                            >
+                              {downloadingCover && selectedUrl === option.url ? (
+                                <>
+                                  <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-900"></div>
+                                  <span>Downloading...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Download className="w-3 h-3" />
+                                  <span>Use This</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                        
+                        <div className="p-3 bg-white">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-xs font-semibold text-gray-900 truncate">
+                              {option.source}
+                            </span>
+                            {option.width > 0 && (
+                              <span className="text-xs text-gray-500">
+                                {option.width}×{option.height}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-gray-600">
+                            {option.size_estimate}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                  
-                  {/* Info section */}
-                  <div className="p-3 bg-white">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-semibold text-gray-900 truncate">
-                        {option.source}
-                      </span>
-                      {option.width > 0 && (
-                        <span className="text-xs text-gray-500">
-                          {option.width}×{option.height}
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-xs text-gray-600">
-                      {option.size_estimate}
-                    </div>
+
+                  <div className="border-t border-gray-200 pt-6 mt-6">
+                    <button
+                      onClick={handleUploadCover}
+                      className="w-full px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Upload className="w-4 h-4" />
+                      Upload Custom Cover Instead
+                    </button>
                   </div>
                 </div>
-              ))}
-            </div>
-
-            {/* Upload custom button at bottom */}
-            <div className="border-t border-gray-200 pt-6 mt-6">
-              <button
-                onClick={handleUploadCover}
-                className="w-full px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
-              >
-                <Upload className="w-4 h-4" />
-                Upload Custom Cover Instead
-              </button>
+              )}
             </div>
           </div>
-        )}
-      </div>
-    </div>
-  </div>
-)}
+        </div>
+      )}
     </div>
   );
 }
