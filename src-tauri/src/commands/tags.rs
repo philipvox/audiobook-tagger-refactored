@@ -1,10 +1,13 @@
 // src-tauri/src/commands/tags.rs
+// COMPLETE REPLACEMENT FILE
+
 use crate::{config, scanner, tag_inspector};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::Emitter;
+use futures::stream::{self, StreamExt};
 
 #[derive(Debug, Deserialize)]
 pub struct WriteRequest {
@@ -13,14 +16,14 @@ pub struct WriteRequest {
     pub backup: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteResult {
     pub success: usize,
     pub failed: usize,
     pub errors: Vec<WriteError>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteError {
     pub file_id: String,
     pub path: String,
@@ -44,9 +47,9 @@ pub async fn write_tags(
     let config = config::load_config().unwrap_or_default();
     let max_workers = config.max_workers.max(1);
     
-    println!("🚀 Writing {} files with {} parallel workers", total, max_workers);
+    println!("🚀 Writing {} files with {} workers", total, max_workers);
     
-    // Build files_to_write from request
+    // Build files list
     let files_to_write: Vec<_> = request.file_ids.iter()
         .filter_map(|file_id| {
             request.files.get(file_id).map(|file_data| {
@@ -55,65 +58,62 @@ pub async fn write_tags(
         })
         .collect();
     
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_workers));
     let completed = Arc::new(AtomicUsize::new(0));
-    let mut handles = Vec::new();
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let failed_count = Arc::new(AtomicUsize::new(0));
+    let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
     
-    for (file_id, path, changes) in files_to_write {
-        let sem = Arc::clone(&semaphore);
-        let completed_clone = Arc::clone(&completed);
-        let window_clone = window.clone();
-        
-        let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
+    // ✅ STREAMING - only max_workers at a time
+    stream::iter(files_to_write)
+        .map(|(file_id, path, changes)| {
+            let window = window.clone();
+            let completed = Arc::clone(&completed);
+            let success_count = Arc::clone(&success_count);
+            let failed_count = Arc::clone(&failed_count);
+            let errors = Arc::clone(&errors);
             
-            // ✅ Use spawn_blocking for true parallel I/O
-            let result = tokio::task::spawn_blocking(move || {
-                crate::tags::write_file_tags_sync(&path, &changes, backup)
-            }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Task error: {}", e)));
-            
-            let current = completed_clone.fetch_add(1, Ordering::SeqCst) + 1;
-            
-            // Emit progress every 10 files or on completion for efficiency
-            if current % 10 == 0 || current == total {
-                let _ = window_clone.emit("write_progress", serde_json::json!({
-                    "current": current,
-                    "total": total
-                }));
-            }
-            
-            (file_id, result)
-        });
-        
-        handles.push(handle);
-    }
-    
-    // Collect results
-    let mut success = 0;
-    let mut failed = 0;
-    let mut errors = Vec::new();
-    
-    for handle in handles {
-        let (file_id, result) = handle.await.unwrap();
-        
-        match result {
-            Ok(_) => success += 1,
-            Err(e) => {
-                failed += 1;
-                if let Some(file_data) = request.files.get(&file_id) {
-                    errors.push(WriteError {
-                        file_id,
-                        path: file_data.path.clone(),
-                        error: e.to_string(),
-                    });
+            async move {
+                let path_for_write = path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::tags::write_file_tags_sync(&path_for_write, &changes, backup)
+                }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("Task error: {}", e)));
+                
+                let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                
+                match result {
+                    Ok(()) => {
+                        success_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(e) => {
+                        failed_count.fetch_add(1, Ordering::SeqCst);
+                        errors.lock().unwrap().push(WriteError {
+                            file_id: file_id.clone(),
+                            path: path.clone(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+                
+                // Progress every 50 files
+                if current % 50 == 0 || current == total {
+                    let _ = window.emit("write_progress", serde_json::json!({
+                        "current": current,
+                        "total": total
+                    }));
                 }
             }
-        }
-    }
+        })
+        .buffer_unordered(max_workers)
+        .collect::<Vec<_>>()
+        .await;
     
-    println!("✅ Write complete: {} success, {} failed", success, failed);
+    let success = success_count.load(Ordering::SeqCst);
+    let failed = failed_count.load(Ordering::SeqCst);
+    let all_errors = errors.lock().unwrap().clone();
     
-    Ok(WriteResult { success, failed, errors })
+    println!("✅ Complete: {} success, {} failed", success, failed);
+    
+    Ok(WriteResult { success, failed, errors: all_errors })
 }
 
 #[tauri::command]
