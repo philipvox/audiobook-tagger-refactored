@@ -1,16 +1,18 @@
-// commands/abs.rs
-// AudiobookShelf server integration commands
+// src-tauri/src/commands/abs.rs
+// WITH PROGRESS EVENTS for every phase
 
 use crate::{config, scanner};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use futures::stream::{self, StreamExt};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+use tauri::Emitter;
 
-// Cache library items for 5 minutes
 static LIBRARY_CACHE: Lazy<Mutex<Option<(Instant, HashMap<String, AbsLibraryItem>)>>> = 
     Lazy::new(|| Mutex::new(None));
 
@@ -26,17 +28,19 @@ pub struct PushItem {
     metadata: scanner::BookMetadata,
     group_id: String,
 }
+
 #[derive(Debug, Deserialize)]
 pub struct PushRequest {
     items: Vec<PushItem>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PushFailure {
     path: String,
     reason: String,
     status: Option<u16>,
 }
+
 #[derive(Debug, Serialize)]
 pub struct PushResult {
     updated: usize,
@@ -50,6 +54,7 @@ pub struct AbsLibraryItem {
     id: String,
     path: String,
     #[serde(default)]
+    #[allow(non_snake_case)]
     isFile: bool,
 }
 
@@ -96,28 +101,50 @@ pub async fn clear_abs_library_cache() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn push_abs_updates(request: PushRequest) -> Result<PushResult, String> {
-    let total_start = std::time::Instant::now();
+pub async fn push_abs_updates(window: tauri::Window, request: PushRequest) -> Result<PushResult, String> {
+    let total_start = Instant::now();
+    let workers: usize = 60;
+    let total_items = request.items.len();
     
-    println!("🚀 Push: {} items", request.items.len());
+    println!("⚡ PUSH TO ABS: {} items", total_items);
+    
+    // ✅ PHASE 1: Connecting
+    let _ = window.emit("push_progress", json!({
+        "phase": "connecting",
+        "message": "Connecting to AudiobookShelf...",
+        "current": 0,
+        "total": total_items
+    }));
     
     let config = config::load_config().map_err(|e| e.to_string())?;
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
     
-    // Use cached library fetch
-    let fetch_start = std::time::Instant::now();
-    let library_items = fetch_abs_library_items_cached(&client, &config).await?;
-    println!("   📚 Library ready in {:?}", fetch_start.elapsed());
+    // ✅ PHASE 2: Fetching library
+    let _ = window.emit("push_progress", json!({
+        "phase": "fetching",
+        "message": "Fetching library items from ABS...",
+        "current": 0,
+        "total": total_items
+    }));
     
-    // Match items
+    let library_items = fetch_abs_library_items_with_progress(&client, &config, &window).await?;
+    
+    // ✅ PHASE 3: Matching
+    let _ = window.emit("push_progress", json!({
+        "phase": "matching",
+        "message": format!("Matching {} items to library...", total_items),
+        "current": 0,
+        "total": total_items
+    }));
+    
     let mut unmatched = Vec::new();
     let mut targets = Vec::new();
     let mut seen_ids = HashSet::new();
     
-    for item in &request.items {
+    for (idx, item) in request.items.iter().enumerate() {
         let normalized_path = normalize_path(&item.path);
         if let Some(library_item) = find_matching_item(&normalized_path, &library_items) {
             if seen_ids.insert(library_item.id.clone()) {
@@ -126,210 +153,144 @@ pub async fn push_abs_updates(request: PushRequest) -> Result<PushResult, String
         } else {
             unmatched.push(item.path.clone());
         }
+        
+        // Progress every 100 items
+        if idx % 100 == 0 {
+            let _ = window.emit("push_progress", json!({
+                "phase": "matching",
+                "message": format!("Matching items... {}/{}", idx, total_items),
+                "current": idx,
+                "total": total_items
+            }));
+        }
     }
     
     if targets.is_empty() {
+        let _ = window.emit("push_progress", json!({
+            "phase": "complete",
+            "message": "No matching items found",
+            "current": total_items,
+            "total": total_items
+        }));
         return Ok(PushResult { updated: 0, unmatched, failed: vec![], covers_uploaded: 0 });
     }
     
-    println!("   🎯 Matched {} items, updating with 10 parallel workers...", targets.len());
+    let matched_count = targets.len();
+    println!("   🎯 Matched {} items, {} unmatched", matched_count, unmatched.len());
     
-    // PARALLEL UPDATE - 10 concurrent requests
-    let update_start = std::time::Instant::now();
-    let covers_uploaded = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // ✅ PHASE 4: Pushing updates
+    let _ = window.emit("push_progress", json!({
+        "phase": "pushing",
+        "message": format!("Pushing {} items to ABS...", matched_count),
+        "current": 0,
+        "total": matched_count
+    }));
     
-    let results: Vec<_> = stream::iter(targets)
+    let updated_count = Arc::new(AtomicUsize::new(0));
+    let covers_count = Arc::new(AtomicUsize::new(0));
+    let failed_items = Arc::new(Mutex::new(Vec::new()));
+    let processed = Arc::new(AtomicUsize::new(0));
+    
+    stream::iter(targets)
         .map(|(item_id, push_item)| {
             let client = client.clone();
             let config = config.clone();
-            let covers_count = covers_uploaded.clone();
+            let updated = Arc::clone(&updated_count);
+            let covers = Arc::clone(&covers_count);
+            let failed = Arc::clone(&failed_items);
+            let processed = Arc::clone(&processed);
+            let window = window.clone();
+            let matched_count = matched_count;
+            
             async move {
-                let mut result = update_abs_item(&client, &config, &item_id, &push_item.metadata).await;
-                
-                if result.is_ok() {
-                    match upload_cover_to_abs(&client, &config, &item_id, &push_item.group_id).await {
-                        Ok(true) => { covers_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
-                        Ok(false) => {}
-                        Err(e) => { println!("   ⚠️  Cover upload failed for {}: {}", item_id, e); }
+                match update_abs_item(&client, &config, &item_id, &push_item.metadata).await {
+                    Ok(true) => {
+                        updated.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(true) = upload_cover_to_abs(&client, &config, &item_id, &push_item.group_id).await {
+                            covers.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        if let Ok(mut f) = failed.lock() {
+                            f.push(PushFailure {
+                                path: push_item.path.clone(),
+                                reason: err.reason,
+                                status: err.status,
+                            });
+                        }
                     }
                 }
                 
-                (push_item.path, result)
+                let current = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                
+                // Progress every 20 items
+                if current % 20 == 0 || current == matched_count {
+                    let _ = window.emit("push_progress", json!({
+                        "phase": "pushing",
+                        "message": format!("Updating metadata... {}/{}", current, matched_count),
+                        "current": current,
+                        "total": matched_count
+                    }));
+                }
             }
         })
-        .buffer_unordered(10)
-        .collect()
+        .buffer_unordered(workers)
+        .collect::<Vec<_>>()
         .await;
     
-    let mut failed = Vec::new();
-    let mut updated = 0;
+    let updated = updated_count.load(Ordering::Relaxed);
+    let covers_uploaded = covers_count.load(Ordering::Relaxed);
+    let failed = failed_items.lock().map(|f| f.clone()).unwrap_or_default();
+    let elapsed = total_start.elapsed();
     
-    for (path, result) in results {
-        match result {
-            Ok(true) => updated += 1,
-            Ok(false) => {},
-            Err(err) => {
-                failed.push(PushFailure {
-                    path,
-                    reason: err.reason,
-                    status: err.status,
-                });
-            }
-        }
-    }
+    // ✅ PHASE 5: Complete
+    let _ = window.emit("push_progress", json!({
+        "phase": "complete",
+        "message": format!("Done! {} updated, {} covers in {:.1}s", updated, covers_uploaded, elapsed.as_secs_f64()),
+        "current": matched_count,
+        "total": matched_count
+    }));
     
-    println!("   ✅ Updated {} in {:?} (total: {:?})", 
-        updated, update_start.elapsed(), total_start.elapsed());
+    println!("✅ PUSH DONE: {} updated, {} covers in {:.1}s", 
+        updated, covers_uploaded, elapsed.as_secs_f64());
     
-    let covers_uploaded_count = covers_uploaded.load(std::sync::atomic::Ordering::SeqCst);
-        if covers_uploaded_count > 0 {
-            println!("   🖼️  Uploaded {} covers", covers_uploaded_count);
-        }
-        
-        Ok(PushResult { updated, unmatched, failed, covers_uploaded: covers_uploaded_count })
+    Ok(PushResult { updated, unmatched, failed, covers_uploaded })
 }
-// Upload cover to AudiobookShelf
-async fn upload_cover_to_abs(
+
+async fn fetch_abs_library_items_with_progress(
     client: &reqwest::Client,
     config: &config::Config,
-    item_id: &str,
-    group_id: &str,
-) -> Result<bool, String> {
-    let cover_cache_key = format!("cover_{}", group_id);
-    let cover_data: Option<(Vec<u8>, String)> = crate::cache::get(&cover_cache_key);
-    
-    if let Some((data, mime_type)) = cover_data {
-        println!("   🖼️  Uploading cover for item {} ({} KB)", item_id, data.len() / 1024);
-        
-        let extension = match mime_type.as_str() {
-            "image/jpeg" | "image/jpg" => "jpg",
-            "image/png" => "png",
-            "image/webp" => "webp",
-            _ => "jpg",
-        };
-        
-        let part = reqwest::multipart::Part::bytes(data)
-            .file_name(format!("cover.{}", extension))
-            .mime_str(&mime_type)
-            .map_err(|e| format!("Failed to create multipart: {}", e))?;
-        
-        let form = reqwest::multipart::Form::new().part("cover", part);
-        let url = format!("{}/api/items/{}/cover", config.abs_base_url, item_id);
-        
-        let response = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", config.abs_api_token))
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| format!("Cover upload failed: {}", e))?;
-        
-        if response.status().is_success() {
-            println!("   ✅ Cover uploaded for {}", item_id);
-            Ok(true)
-        } else {
-            Err(format!("Status {}", response.status()))
-        }
-    } else {
-        Ok(false)
-    }
-}
-#[tauri::command]
-pub async fn restart_abs_docker() -> Result<String, String> {
-    use std::process::Command;
-    
-    let output = Command::new("docker")
-        .args(&["restart", "audiobookshelf"])
-        .output()
-        .map_err(|e| format!("Failed to execute docker command: {}", e))?;
-    
-    if output.status.success() {
-        Ok("Container restarted successfully".to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Docker restart failed: {}", stderr))
-    }
-}
-
-#[tauri::command]
-pub async fn force_abs_rescan() -> Result<String, String> {
-    let config = config::load_config().map_err(|e| e.to_string())?;
-    
-    let client = reqwest::Client::new();
-    let url = format!("{}/api/libraries/{}/scan", config.abs_base_url, config.abs_library_id);
-    
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", config.abs_api_token))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    
-    if response.status().is_success() {
-        Ok("Library rescan triggered".to_string())
-    } else {
-        Err(format!("Failed to trigger rescan: {}", response.status()))
-    }
-}
-
-#[tauri::command]
-pub async fn clear_abs_cache() -> Result<String, String> {
-    use std::process::Command;
-    
-    let output = Command::new("docker")
-        .args(&["exec", "audiobookshelf", "rm", "-rf", "/config/cache/*"])
-        .output()
-        .map_err(|e| format!("Failed to execute command: {}", e))?;
-    
-    if output.status.success() {
-        Ok("Cache cleared successfully".to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Failed to clear cache: {}", stderr))
-    }
-}
-
-// Helper functions
-
-async fn fetch_abs_library_items_cached(
-    client: &reqwest::Client,
-    config: &config::Config,
+    window: &tauri::Window,
 ) -> Result<HashMap<String, AbsLibraryItem>, String> {
-    // Check cache in a separate scope so lock is dropped
+    // Check cache first
     {
         let cache = LIBRARY_CACHE.lock().unwrap();
-        
         if let Some((timestamp, items)) = &*cache {
             if timestamp.elapsed() < Duration::from_secs(300) {
-                println!("   💾 Using cached library ({} items, age: {:.1}s)", 
-                    items.len(), timestamp.elapsed().as_secs_f64());
+                let _ = window.emit("push_progress", json!({
+                    "phase": "fetching",
+                    "message": format!("Using cached library ({} items)", items.len()),
+                    "current": items.len(),
+                    "total": items.len()
+                }));
                 return Ok(items.clone());
             }
         }
-    } // Lock dropped here
+    }
     
-    // Cache miss or expired - fetch fresh
-    println!("   🔍 Fetching fresh library...");
-    let items = fetch_abs_library_items(client, config).await?;
-    
-    // Update cache
-    {
-        let mut cache = LIBRARY_CACHE.lock().unwrap();
-        *cache = Some((Instant::now(), items.clone()));
-    } // Lock dropped here
-    
-    Ok(items)
-}
-
-async fn fetch_abs_library_items(
-    client: &reqwest::Client,
-    config: &config::Config,
-) -> Result<HashMap<String, AbsLibraryItem>, String> {
     let mut items_map = HashMap::new();
     let mut page = 0;
     let limit = 200;
     
     loop {
+        let _ = window.emit("push_progress", json!({
+            "phase": "fetching",
+            "message": format!("Fetching library page {}... ({} items so far)", page + 1, items_map.len()),
+            "current": items_map.len(),
+            "total": 0
+        }));
+        
         let url = format!("{}/api/libraries/{}/items?limit={}&page={}", 
             config.abs_base_url, config.abs_library_id, limit, page);
         
@@ -356,7 +317,111 @@ async fn fetch_abs_library_items(
         page += 1;
     }
     
+    let _ = window.emit("push_progress", json!({
+        "phase": "fetching",
+        "message": format!("Library loaded: {} items", items_map.len()),
+        "current": items_map.len(),
+        "total": items_map.len()
+    }));
+    
+    // Update cache
+    {
+        let mut cache = LIBRARY_CACHE.lock().unwrap();
+        *cache = Some((Instant::now(), items_map.clone()));
+    }
+    
     Ok(items_map)
+}
+
+async fn upload_cover_to_abs(
+    client: &reqwest::Client,
+    config: &config::Config,
+    item_id: &str,
+    group_id: &str,
+) -> Result<bool, String> {
+    let cover_cache_key = format!("cover_{}", group_id);
+    let cover_data: Option<(Vec<u8>, String)> = crate::cache::get(&cover_cache_key);
+    
+    if let Some((data, mime_type)) = cover_data {
+        let extension = match mime_type.as_str() {
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/png" => "png",
+            "image/webp" => "webp",
+            _ => "jpg",
+        };
+        
+        let part = reqwest::multipart::Part::bytes(data)
+            .file_name(format!("cover.{}", extension))
+            .mime_str(&mime_type)
+            .map_err(|e| format!("Multipart error: {}", e))?;
+        
+        let form = reqwest::multipart::Form::new().part("cover", part);
+        let url = format!("{}/api/items/{}/cover", config.abs_base_url, item_id);
+        
+        let response = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", config.abs_api_token))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        
+        Ok(response.status().is_success())
+    } else {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub async fn restart_abs_docker() -> Result<String, String> {
+    use std::process::Command;
+    
+    let output = Command::new("docker")
+        .args(["restart", "audiobookshelf"])
+        .output()
+        .map_err(|e| format!("Failed: {}", e))?;
+    
+    if output.status.success() {
+        Ok("Container restarted".to_string())
+    } else {
+        Err(format!("Failed: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+#[tauri::command]
+pub async fn force_abs_rescan() -> Result<String, String> {
+    let config = config::load_config().map_err(|e| e.to_string())?;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/libraries/{}/scan", config.abs_base_url, config.abs_library_id);
+    
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", config.abs_api_token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    if response.status().is_success() {
+        Ok("Rescan triggered".to_string())
+    } else {
+        Err(format!("Failed: {}", response.status()))
+    }
+}
+
+#[tauri::command]
+pub async fn clear_abs_cache() -> Result<String, String> {
+    use std::process::Command;
+    
+    let output = Command::new("docker")
+        .args(["exec", "audiobookshelf", "rm", "-rf", "/config/cache/*"])
+        .output()
+        .map_err(|e| format!("Failed: {}", e))?;
+    
+    if output.status.success() {
+        Ok("Cache cleared".to_string())
+    } else {
+        Err(format!("Failed: {}", String::from_utf8_lossy(&output.stderr)))
+    }
 }
 
 fn normalize_path(path: &str) -> String {
@@ -375,7 +440,6 @@ fn find_matching_item<'a>(
         return Some(item);
     }
     
-    // Try matching by folder name
     if let Some(book_folder) = extract_book_folder(path) {
         for (abs_path, item) in items.iter() {
             if abs_path.ends_with(&book_folder) {
@@ -384,7 +448,6 @@ fn find_matching_item<'a>(
         }
     }
     
-    // Try parent directory matching
     let mut current = path.to_string();
     while let Some(pos) = current.rfind('/') {
         current.truncate(pos);
@@ -410,11 +473,9 @@ fn extract_book_folder(path: &str) -> Option<String> {
         }
     }
     
-    if let Some(last) = parts.iter().rev().find(|p| !p.is_empty() && !p.ends_with(".m4b") && !p.ends_with(".m4a") && !p.ends_with(".mp3")) {
-        return Some((*last).to_string());
-    }
-    
-    None
+    parts.iter().rev()
+        .find(|p| !p.is_empty() && !p.ends_with(".m4b") && !p.ends_with(".m4a") && !p.ends_with(".mp3"))
+        .map(|s| (*s).to_string())
 }
 
 async fn update_abs_item(
@@ -432,23 +493,15 @@ async fn update_abs_item(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| PushError {
-            reason: e.to_string(),
-            status: None,
-        })?;
+        .map_err(|e| PushError { reason: e.to_string(), status: None })?;
     
     let status = response.status();
     if !status.is_success() {
-        return Err(PushError {
-            reason: format!("Status {}", status),
-            status: Some(status.as_u16()),
-        });
+        return Err(PushError { reason: format!("Status {}", status), status: Some(status.as_u16()) });
     }
     
-    let body: UpdateMediaResponse = response.json().await.map_err(|e| PushError {
-        reason: e.to_string(),
-        status: Some(status.as_u16()),
-    })?;
+    let body: UpdateMediaResponse = response.json().await
+        .map_err(|e| PushError { reason: e.to_string(), status: Some(status.as_u16()) })?;
     
     Ok(body.updated)
 }

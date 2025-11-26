@@ -1,285 +1,230 @@
 use super::types::*;
 use crate::config::Config;
 use crate::cache;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};  // Add Ordering and AtomicUsize
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
 use lofty::file::TaggedFileExt;
-// ADD THIS FUNCTION HERE - AT THE TOP!
-
 use futures::stream::{self, StreamExt};
 
+// ✅ TURBO: 50 workers, parallel metadata, cover tracking
 pub async fn process_all_groups(
     groups: Vec<BookGroup>,
     config: &Config,
     cancel_flag: Option<Arc<AtomicBool>>
 ) -> Result<Vec<BookGroup>, Box<dyn std::error::Error + Send + Sync>> {
     
-    let max_workers = config.max_workers;
+    // ✅ 50 workers - balanced for speed vs rate limiting on cover services
+    let max_workers = 50;
     let total = groups.len();
     
-    println!("⚙️  Processing {} groups with {} workers (streaming)", total, max_workers);
+    println!("⚡ TURBO SCAN: {} books, {} workers (parallel metadata, then covers)", total, max_workers);
     
     let processed_count = Arc::new(AtomicUsize::new(0));
+    let covers_found = Arc::new(AtomicUsize::new(0));
     let cancel = cancel_flag.clone();
+    let start_time = std::time::Instant::now();
     
-    // ✅ Stream processes max_workers concurrently, continuously
     let results: Vec<_> = stream::iter(groups)
         .map(|group| {
             let config_clone = config.clone();
             let cancel_clone = cancel.clone();
             let count_clone = Arc::clone(&processed_count);
+            let covers_clone = Arc::clone(&covers_found);
             let group_name = group.group_name.clone();
             
             async move {
-                // Check cancellation
                 if let Some(ref flag) = cancel_clone {
-                    if flag.load(Ordering::SeqCst) {
+                    if flag.load(Ordering::Relaxed) {
                         return None;
                     }
                 }
                 
-                let result = process_book_group(group, &config_clone, cancel_clone).await;
+                let result = process_book_group(group, &config_clone, cancel_clone, Arc::clone(&covers_clone)).await;
                 
-                let current = count_clone.fetch_add(1, Ordering::SeqCst) + 1;
-                crate::progress::update_progress(current, total, &group_name);
+                let current = count_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                let covers = covers_clone.load(Ordering::Relaxed);
+                
+                // ✅ Progress every 10 books with cover count
+                if current % 10 == 0 || current == total {
+                    crate::progress::update_progress_with_covers(current, total, &group_name, covers);
+                }
                 
                 result.ok()
             }
         })
-        .buffer_unordered(max_workers) // ✅ Always max_workers in flight
+        .buffer_unordered(max_workers)
         .filter_map(|x| async { x })
         .collect()
         .await;
     
+    let elapsed = start_time.elapsed();
+    let books_per_sec = results.len() as f64 / elapsed.as_secs_f64();
+    let final_covers = covers_found.load(Ordering::Relaxed);
+    println!("✅ Done: {} books, {} covers in {:.1}s ({:.1}/sec)", 
+        results.len(), final_covers, elapsed.as_secs_f64(), books_per_sec);
+    
     Ok(results)
 }
+
 async fn process_book_group(
     mut group: BookGroup,
     config: &Config,
     cancel_flag: Option<Arc<AtomicBool>>,
+    covers_found: Arc<AtomicUsize>,
 ) -> Result<BookGroup, Box<dyn std::error::Error + Send + Sync>> {
     
-    // ✅ Check at start
     if let Some(ref flag) = cancel_flag {
-        if flag.load(Ordering::SeqCst) {
+        if flag.load(Ordering::Relaxed) {
             return Ok(group);
         }
     }
     
     let cache_key = format!("book_{}", group.group_name);
     
-    // Check cache first
+    // Check cache first - instant return if cached
     if let Some(cached_metadata) = cache::get::<BookMetadata>(&cache_key) {
-        println!("💾 Cache hit for: {}", group.group_name);
         group.metadata = cached_metadata;
-    } else {
-        println!("📖 Processing: {}", group.group_name);
-        
-        // Read first file's tags
-        let sample_file = &group.files[0];
-        let file_tags = read_file_tags(&sample_file.path);
-        
-        // Create RawFileData for GPT extraction
-        let raw_file = RawFileData {
-            path: sample_file.path.clone(),
-            filename: sample_file.filename.clone(),
-            parent_dir: std::path::Path::new(&sample_file.path)
-                .parent()
-                .unwrap_or(std::path::Path::new(""))
-                .to_string_lossy()
-                .to_string(),
-            tags: file_tags.clone(),  // ✅ ADD THIS LINE
-        };
-        
-        // ✅ Check before GPT extraction
-        if let Some(ref flag) = cancel_flag {
-            if flag.load(Ordering::SeqCst) {
-                println!("   ⏸️  Cancelled during extraction");
-                return Ok(group);
-            }
-        }
-        
-        // Extract with GPT
-        let (extracted_title, extracted_author) = extract_book_info_with_gpt(
-            &raw_file,
-            &group.group_name,
-            config.openai_api_key.as_deref()
-        ).await;
-        
-        println!("   📝 Extracted: '{}' by '{}'", extracted_title, extracted_author);
-        
-        // FALLBACK CHAIN: Try Google Books → Audible → GPT
-        let mut google_data = None;
-        let mut audible_data = None;
-        
-        // ✅ Check before Google Books
-        if let Some(ref flag) = cancel_flag {
-            if flag.load(Ordering::SeqCst) {
-                println!("   ⏸️  Cancelled before Google Books");
-                return Ok(group);
-            }
-        }
-        
-        // Try Google Books first
-        if let Some(ref api_key) = config.google_books_api_key {
-            println!("   🔍 Fetching Google Books data...");
-            match fetch_google_books_data(&extracted_title, &extracted_author, api_key).await {
-                Ok(data) => {
-                    if data.is_some() {
-                        println!("   ✅ Google Books data found");
-                        google_data = data;
-                    } else {
-                        println!("   ⚠️  No Google Books data");
-                    }
-                }
-                Err(e) => {
-                    println!("   ⚠️  Google Books error: {}", e);
-                    
-                    // ✅ Check before Audible fallback
-                    if let Some(ref flag) = cancel_flag {
-                        if flag.load(Ordering::SeqCst) {
-                            println!("   ⏸️  Cancelled before Audible fallback");
-                            return Ok(group);
-                        }
-                    }
-                    
-                    // Google failed, try Audible
-                    println!("   🎧 Trying Audible as fallback...");
-                    audible_data = fetch_audible_metadata(&extracted_title, &extracted_author).await;
-                }
-            }
-        } else {
-            // ✅ Check before Audible
-            if let Some(ref flag) = cancel_flag {
-                if flag.load(Ordering::SeqCst) {
-                    println!("   ⏸️  Cancelled before Audible");
-                    return Ok(group);
-                }
-            }
-            
-            // No Google API key, try Audible
-            println!("   🎧 No Google Books API key, trying Audible...");
-            audible_data = fetch_audible_metadata(&extracted_title, &extracted_author).await;
-        }
-        
-        // If we still don't have data, try GPT enrichment as last resort
-        let needs_gpt_enrichment = google_data.is_none() && audible_data.is_none();
-        
-        // ✅ Check before cover fetch
-        if let Some(ref flag) = cancel_flag {
-            if flag.load(Ordering::SeqCst) {
-                println!("   ⏸️  Cancelled before cover fetch");
-                return Ok(group);
-            }
-        }
-        
-        // Fetch cover art using dedicated module
-        println!("   🖼️  Fetching cover art...");
-        let cover_art = match crate::cover_art::fetch_and_download_cover(
-            &extracted_title,
-            &extracted_author,
-            audible_data.as_ref().and_then(|d| d.asin.clone()).as_deref(),
-            config.google_books_api_key.as_deref(),
-        ).await {
-            Ok(cover) => {
-                if cover.data.is_some() {
-                    println!("   ✅ Cover art downloaded");
-                    
-                    // Cache the cover separately for the cover viewer
-                    if let Some(ref data) = cover.data {
-                        let cover_cache_key = format!("cover_{}", group.id);
-                        let mime_type = cover.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
-                        if let Err(e) = cache::set(&cover_cache_key, &(data.clone(), mime_type)) {
-                            println!("   ⚠️  Failed to cache cover: {}", e);
-                        }
-                    }
-                } else if cover.url.is_some() {
-                    println!("   ⚠️  Cover URL found but download failed");
-                } else {
-                    println!("   ⚠️  No cover art found");
-                }
-                Some(cover)
-            }
-            Err(e) => {
-                println!("   ⚠️  Cover art error: {}", e);
-                None
-            }
-        };
-        
-        // ✅ Check before final GPT merge
-        if let Some(ref flag) = cancel_flag {
-            if flag.load(Ordering::SeqCst) {
-                println!("   ⏸️  Cancelled before GPT merge");
-                return Ok(group);
-            }
-        }
-        
-        // Merge all metadata with GPT
-        println!("   🤖 Merging metadata with GPT...");
-        let mut final_metadata = if needs_gpt_enrichment {
-            // Use GPT to enrich with missing data
-            enrich_with_gpt(
-                &group.group_name,
-                &extracted_title,
-                &extracted_author,
-                &file_tags,
-                config.openai_api_key.as_deref()
-            ).await
-        } else {
-            merge_all_with_gpt(
-                &group.group_name,
-                &extracted_title,
-                &extracted_author,
-                &file_tags,
-                google_data,
-                audible_data,
-                config.openai_api_key.as_deref()
-            ).await
-        };
-        
-        // Add cover art to metadata
-        if let Some(cover) = cover_art {
-            final_metadata.cover_url = cover.url;
-            final_metadata.cover_data = cover.data;
-            final_metadata.cover_mime = cover.mime_type;
-        }
-        
-        println!("   ✅ Processing complete for: {}", final_metadata.title);
-        
-        group.metadata = final_metadata;
-        
-        // Cache the result
-        if let Err(e) = cache::set(&cache_key, &group.metadata) {
-            println!("   ⚠️  Failed to cache metadata: {}", e);
-        } else {
-            println!("   💾 Cached metadata");
-        }
+        group.total_changes = calculate_changes(&mut group);
+        return Ok(group);
     }
     
-    // ✅ Final check before calculating changes
+    // Read first file's tags
+    let sample_file = &group.files[0];
+    let file_tags = read_file_tags(&sample_file.path);
+    
+    let raw_file = RawFileData {
+        path: sample_file.path.clone(),
+        filename: sample_file.filename.clone(),
+        parent_dir: std::path::Path::new(&sample_file.path)
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .to_string_lossy()
+            .to_string(),
+        tags: file_tags.clone(),
+    };
+    
     if let Some(ref flag) = cancel_flag {
-        if flag.load(Ordering::SeqCst) {
-            println!("   ⏸️  Cancelled before calculating changes");
+        if flag.load(Ordering::Relaxed) {
             return Ok(group);
         }
     }
     
-    // Calculate changes by reading existing tags
-    println!("   🔄 Calculating tag changes...");
+    // Extract with GPT (or fallback to tags)
+    let (extracted_title, extracted_author) = extract_book_info_with_gpt(
+        &raw_file,
+        &group.group_name,
+        config.openai_api_key.as_deref()
+    ).await;
+    
+    if let Some(ref flag) = cancel_flag {
+        if flag.load(Ordering::Relaxed) {
+            return Ok(group);
+        }
+    }
+    
+    // ✅ TURBO: Fetch Google Books AND Audible in parallel (metadata only)
+    let title_clone = extracted_title.clone();
+    let author_clone = extracted_author.clone();
+    let google_api_key = config.google_books_api_key.clone();
+    
+    let google_future = async {
+        if let Some(ref api_key) = google_api_key {
+            fetch_google_books_data(&title_clone, &author_clone, api_key).await.ok().flatten()
+        } else {
+            None
+        }
+    };
+    
+    let title_clone2 = extracted_title.clone();
+    let author_clone2 = extracted_author.clone();
+    let audible_future = fetch_audible_metadata(&title_clone2, &author_clone2);
+    
+    // ✅ Run metadata fetches in parallel (NOT cover - we need ASIN first!)
+    let (google_data, audible_data) = tokio::join!(
+        google_future,
+        audible_future
+    );
+    
+    if let Some(ref flag) = cancel_flag {
+        if flag.load(Ordering::Relaxed) {
+            return Ok(group);
+        }
+    }
+    
+    // ✅ NOW fetch cover - we have ASIN from Audible if available
+    let asin = audible_data.as_ref().and_then(|d| d.asin.clone());
+    let cover_art = match crate::cover_art::fetch_and_download_cover(
+        &extracted_title,
+        &extracted_author,
+        asin.as_deref(),  // ✅ Pass ASIN so Audible covers work!
+        config.google_books_api_key.as_deref(),
+    ).await {
+        Ok(cover) if cover.data.is_some() => {
+            if let Some(ref data) = cover.data {
+                let cover_cache_key = format!("cover_{}", group.id);
+                let mime_type = cover.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
+                let _ = cache::set(&cover_cache_key, &(data.clone(), mime_type));
+                // ✅ Track cover found
+                covers_found.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(cover)
+        }
+        _ => None
+    };
+    
+    // If we still don't have data, try GPT enrichment as last resort
+    let needs_gpt_enrichment = google_data.is_none() && audible_data.is_none();
+    
+    if let Some(ref flag) = cancel_flag {
+        if flag.load(Ordering::Relaxed) {
+            return Ok(group);
+        }
+    }
+    
+    // Merge all metadata with GPT
+    let mut final_metadata = if needs_gpt_enrichment {
+        enrich_with_gpt(
+            &group.group_name,
+            &extracted_title,
+            &extracted_author,
+            &file_tags,
+            config.openai_api_key.as_deref()
+        ).await
+    } else {
+        merge_all_with_gpt(
+            &group.group_name,
+            &extracted_title,
+            &extracted_author,
+            &file_tags,
+            google_data,
+            audible_data,
+            config.openai_api_key.as_deref()
+        ).await
+    };
+    
+    // Add cover URL to metadata (data is cached separately)
+    if let Some(cover) = cover_art {
+        final_metadata.cover_url = cover.url;
+        final_metadata.cover_mime = cover.mime_type;
+    }
+    
+    group.metadata = final_metadata;
+    
+    // Cache the result
+    let _ = cache::set(&cache_key, &group.metadata);
+    
+    // Calculate changes
     group.total_changes = calculate_changes(&mut group);
-    println!("   📊 {} total changes detected", group.total_changes);
     
     Ok(group)
 }
+
 async fn fetch_audible_metadata(
     title: &str,
     author: &str,
 ) -> Option<AudibleMetadata> {
-    println!("   🎧 Searching Audible CLI...");
-    
     // Build search query
     let search_query = format!("{} {}", title, author);
     
@@ -329,8 +274,6 @@ async fn fetch_audible_metadata(
             match serde_json::from_str::<AudibleResponse>(&json_str) {
                 Ok(response) => {
                     if let Some(product) = response.products.first() {
-                        println!("   ✅ Audible data found: {}", product.title);
-                        
                         return Some(AudibleMetadata {
                             asin: Some(product.asin.clone()),
                             title: Some(product.title.clone()),
@@ -350,25 +293,17 @@ async fn fetch_audible_metadata(
                             release_date: product.release_date.clone(),
                             description: product.merchandising_summary.clone(),
                         });
-                    } else {
-                        println!("   ⚠️  No Audible results");
                     }
                 }
-                Err(e) => {
-                    println!("   ⚠️  Failed to parse Audible response: {}", e);
-                }
+                Err(_) => {}
             }
         }
-        Ok(_) => {
-            println!("   ⚠️  Audible CLI returned error");
-        }
-        Err(e) => {
-            println!("   ⚠️  Audible CLI not available: {}", e);
-        }
+        _ => {}
     }
     
     None
 }
+
 #[derive(Clone)]
 struct FileTags {
     title: Option<String>,
@@ -394,33 +329,12 @@ fn read_file_tags(path: &str) -> FileTags {
                         comment: t.comment().map(|s| s.to_string()),
                     }
                 } else {
-                    FileTags {
-                        title: None,
-                        artist: None,
-                        album: None,
-                        genre: None,
-                        year: None,
-                        comment: None,
-                    }
+                    FileTags { title: None, artist: None, album: None, genre: None, year: None, comment: None }
                 }
             },
-            Err(_) => FileTags {
-                title: None,
-                artist: None,
-                album: None,
-                genre: None,
-                year: None,
-                comment: None,
-            },
+            Err(_) => FileTags { title: None, artist: None, album: None, genre: None, year: None, comment: None },
         },
-        Err(_) => FileTags {
-            title: None,
-            artist: None,
-            album: None,
-            genre: None,
-            year: None,
-            comment: None,
-        },
+        Err(_) => FileTags { title: None, artist: None, album: None, genre: None, year: None, comment: None },
     }
 }
 
@@ -432,46 +346,28 @@ struct RawFileData {
     tags: FileTags,
 }
 
-// #[derive(Clone)]
-// struct FileTags {
-//     title: Option<String>,
-//     artist: Option<String>,
-//     album: Option<String>,
-//     genre: Option<String>,
-//     year: Option<String>,
-//     comment: Option<String>,
-// }
-
 fn calculate_changes(group: &mut BookGroup) -> usize {
-    use lofty::probe::Probe;
-    use lofty::tag::Accessor;
-    
     let mut total_changes = 0;
     
     for file in &mut group.files {
         file.changes.clear();
         
-        // Read existing tags
         let existing_tags = match Probe::open(&file.path) {
             Ok(probe) => match probe.read() {
                 Ok(tagged) => {
                     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
-                    tag.map(|t| {
-                        (
-                            t.title().map(|s| s.to_string()),
-                            t.artist().map(|s| s.to_string()),
-                            t.album().map(|s| s.to_string()),  // ✅ Read album too
-                        )
-                    })
+                    tag.map(|t| (
+                        t.title().map(|s| s.to_string()),
+                        t.artist().map(|s| s.to_string()),
+                        t.album().map(|s| s.to_string()),
+                    ))
                 },
                 Err(_) => None,
             },
             Err(_) => None,
         };
         
-        // Compare and build changes
         if let Some((existing_title, existing_artist, existing_album)) = existing_tags {
-            // Title changes
             if existing_title.as_deref() != Some(&group.metadata.title) {
                 file.changes.insert("title".to_string(), MetadataChange {
                     old: existing_title.unwrap_or_default(),
@@ -480,7 +376,6 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
                 total_changes += 1;
             }
             
-            // Author changes
             if existing_artist.as_deref() != Some(&group.metadata.author) {
                 file.changes.insert("author".to_string(), MetadataChange {
                     old: existing_artist.unwrap_or_default(),
@@ -489,7 +384,6 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
                 total_changes += 1;
             }
             
-            // ✅ Album changes (for audiobooks, album should match title)
             if existing_album.as_deref() != Some(&group.metadata.title) {
                 file.changes.insert("album".to_string(), MetadataChange {
                     old: existing_album.unwrap_or_default(),
@@ -498,7 +392,6 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
                 total_changes += 1;
             }
         } else {
-            // No existing tags, mark all as new
             file.changes.insert("title".to_string(), MetadataChange {
                 old: String::new(),
                 new: group.metadata.title.clone(),
@@ -514,7 +407,6 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             total_changes += 3;
         }
         
-        // Add other fields if they exist
         if let Some(ref narrator) = group.metadata.narrator {
             file.changes.insert("narrator".to_string(), MetadataChange {
                 old: String::new(),
@@ -647,8 +539,7 @@ JSON:"#,
                     }
                 }
             }
-            Err(e) => {
-                println!("   ⚠️  GPT extraction error (attempt {}): {}", attempt, e);
+            Err(_) => {
                 if attempt == 2 {
                     return (
                         sample_file.tags.title.clone().unwrap_or_else(|| folder_name.to_string()),
@@ -664,6 +555,7 @@ JSON:"#,
         sample_file.tags.artist.clone().unwrap_or_else(|| String::from("Unknown"))
     )
 }
+
 pub async fn enrich_with_gpt(
     folder_name: &str,
     extracted_title: &str,
@@ -674,7 +566,6 @@ pub async fn enrich_with_gpt(
     let api_key = match api_key {
         Some(key) if !key.is_empty() => key,
         _ => {
-            // No API key, return basic metadata
             return BookMetadata {
                 title: extracted_title.to_string(),
                 author: extracted_author.to_string(),
@@ -687,14 +578,12 @@ pub async fn enrich_with_gpt(
                 year: None,
                 description: None,
                 isbn: None,
-                cover_data: None,
+                asin: None,
                 cover_mime: None,
                 cover_url: None,
             };
         }
     };
-    
-    println!("   🤖 Using GPT to enrich metadata (no external sources available)...");
     
     let prompt = format!(
 r#"You are enriching audiobook metadata when no external databases are available.
@@ -737,12 +626,8 @@ JSON:"#,
     
     match call_gpt_api(&prompt, api_key, "gpt-4o-mini", 800).await {
         Ok(json_str) => {
-            // Parse as generic JSON first to handle type mismatches
             match serde_json::from_str::<serde_json::Value>(&json_str) {
                 Ok(json) => {
-                    println!("   ✅ GPT enrichment successful");
-                    
-                    // Helper to convert Value to Option<String>
                     let get_string = |v: &serde_json::Value| -> Option<String> {
                         match v {
                             serde_json::Value::String(s) => Some(s.clone()),
@@ -775,13 +660,12 @@ JSON:"#,
                         year: json.get("year").and_then(get_string),
                         description: json.get("description").and_then(get_string),
                         isbn: None,
-                        cover_data: None,
+                        asin: None,
                         cover_mime: None,
                         cover_url: None,
                     }
                 }
-                Err(e) => {
-                    println!("   ⚠️  GPT parse error: {}", e);
+                Err(_) => {
                     BookMetadata {
                         title: extracted_title.to_string(),
                         author: extracted_author.to_string(),
@@ -794,15 +678,14 @@ JSON:"#,
                         year: None,
                         description: None,
                         isbn: None,
-                        cover_data: None,
+                        asin: None,
                         cover_mime: None,
                         cover_url: None,
                     }
                 }
             }
         }
-        Err(e) => {
-            println!("   ⚠️  GPT enrichment failed: {}", e);
+        Err(_) => {
             BookMetadata {
                 title: extracted_title.to_string(),
                 author: extracted_author.to_string(),
@@ -815,7 +698,7 @@ JSON:"#,
                 year: None,
                 description: None,
                 isbn: None,
-                cover_data: None,
+                asin: None,
                 cover_mime: None,
                 cover_url: None,
             }
@@ -824,9 +707,7 @@ JSON:"#,
 }
 
 fn extract_series_from_folder(folder_name: &str) -> (Option<String>, Option<String>) {
-    // Try to extract series name and book number from folder
     if let Some(book_num) = extract_book_number_from_folder(folder_name) {
-        // Try to extract series name (everything before the book number pattern)
         let patterns = [
             regex::Regex::new(r"(.+?)\s+(?:Book\s*[#]?)?\d+").ok(),
             regex::Regex::new(r"(.+?)\s+[#]\d+").ok(),
@@ -846,9 +727,10 @@ fn extract_series_from_folder(folder_name: &str) -> (Option<String>, Option<Stri
     
     (None, None)
 }
+
 #[derive(serde::Deserialize, Debug)]
 struct AudibleMetadata {
-    asin: Option<String>,  // ADD THIS LINE
+    asin: Option<String>,
     title: Option<String>,
     authors: Vec<String>,
     narrators: Vec<String>,
@@ -876,13 +758,10 @@ async fn merge_all_with_gpt(
     let api_key = match api_key {
         Some(key) if !key.is_empty() => key,
         _ => {
-            // Return fallback metadata if no API key
             return fallback_metadata(extracted_title, extracted_author, google_data, audible_data, None);
         }
     };
     
-    // ... rest of merge_all_with_gpt remains the same
-    // PRE-EXTRACT reliable year from sources
     let reliable_year = audible_data.as_ref()
         .and_then(|d| d.release_date.clone())
         .and_then(|date| date.split('-').next().map(|s| s.to_string()))
@@ -947,16 +826,6 @@ OUTPUT FIELDS:
 TITLE RULES:
 The title must contain only the specific book title. Remove all series indicators such as Book X, Book #X, #X:, or any series name in parentheses.
 
-Correct examples:
-* "Night of the Ninjas"
-* "Dogs in the Dead of Night"
-* "High Time for Heroes"
-
-Incorrect examples:
-* "Magic Tree House #46: Dogs in the Dead of Night"
-* "The Magic Tree House: Book 51"
-* "Hi, Jack? (The Magic Tree House)"
-
 Return ONLY valid JSON:
 {{
   "title": "specific book title",
@@ -987,29 +856,22 @@ JSON:"#,
         Ok(json_str) => {
             match serde_json::from_str::<BookMetadata>(&json_str) {
                 Ok(mut metadata) => {
-                    // FORCE the reliable year back in (in case GPT changed it)
                     if let Some(year) = reliable_year {
                         metadata.year = Some(year);
                     }
-                    
-                    println!("   ✅ Final: title='{}', author='{}', narrator={:?}", 
-                        metadata.title, metadata.author, metadata.narrator);
-                    println!("            genres={:?}, publisher={:?}, year={:?}",
-                        metadata.genres, metadata.publisher, metadata.year);
                     metadata
                 }
-                Err(e) => {
-                    println!("   ⚠️  GPT parse error: {}", e);
+                Err(_) => {
                     fallback_metadata(extracted_title, extracted_author, google_data, audible_data, reliable_year)
                 }
             }
         }
-        Err(e) => {
-            println!("   ⚠️  GPT merge error: {}", e);
+        Err(_) => {
             fallback_metadata(extracted_title, extracted_author, google_data, audible_data, reliable_year)
         }
     }
 }
+
 fn fallback_metadata(
     extracted_title: &str,
     extracted_author: &str,
@@ -1037,9 +899,9 @@ fn fallback_metadata(
             .or_else(|| audible_data.as_ref().and_then(|d| d.description.clone())),
         isbn: google_data.as_ref()
             .and_then(|d| d.isbn.clone()),
-        cover_data: None,      // ADD THIS
-        cover_mime: None,      // ADD THIS
-        cover_url: None,       // ADD THIS
+        asin: audible_data.as_ref().and_then(|d| d.asin.clone()),
+        cover_mime: None,
+        cover_url: None,
     }
 }
 

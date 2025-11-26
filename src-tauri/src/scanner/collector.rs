@@ -33,6 +33,7 @@ pub async fn collect_and_group_files(
     
     Ok(groups)
 }
+
 fn collect_audio_files_from_path(path: &str) -> Result<Vec<RawFileData>, Box<dyn std::error::Error + Send + Sync>> {
     let mut files = Vec::new();
     
@@ -40,10 +41,8 @@ fn collect_audio_files_from_path(path: &str) -> Result<Vec<RawFileData>, Box<dyn
         .follow_links(true)
         .into_iter()
         .filter_entry(|e| {
-            // Skip backup directories
             if e.file_type().is_dir() {
                 if let Some(dir_name) = e.path().file_name().and_then(|n| n.to_str()) {
-                    // Skip directories that look like backups
                     if dir_name.starts_with("backup_") || 
                        dir_name == "backups" || 
                        dir_name == ".backups" {
@@ -53,7 +52,6 @@ fn collect_audio_files_from_path(path: &str) -> Result<Vec<RawFileData>, Box<dyn
                 }
             }
             
-            // Skip macOS metadata files
             if let Some(file_name) = e.path().file_name().and_then(|n| n.to_str()) {
                 if file_name.starts_with("._") {
                     return false;
@@ -70,7 +68,6 @@ fn collect_audio_files_from_path(path: &str) -> Result<Vec<RawFileData>, Box<dyn
         
         let path = entry.path();
         
-        // Double-check: skip any file starting with ._
         if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
             if file_name.starts_with("._") {
                 continue;
@@ -98,6 +95,7 @@ fn collect_audio_files_from_path(path: &str) -> Result<Vec<RawFileData>, Box<dyn
     
     Ok(files)
 }
+
 fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
     let mut groups: HashMap<String, Vec<RawFileData>> = HashMap::new();
     
@@ -145,9 +143,9 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                     publisher: None,
                     year: None,
                     isbn: None,
-                    cover_data: None,      // ADD THIS
-                    cover_mime: None,       // ADD THIS
-                    cover_url: None,        // ADD THIS
+                    asin: None,
+                    cover_url: None,
+                    cover_mime: None,
                 },
                 files: audio_files,
                 total_changes: 0,

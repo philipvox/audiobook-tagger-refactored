@@ -27,34 +27,35 @@ pub enum GroupType {
     MultiPart,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BookMetadata {
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     pub author: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub narrator: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<String>,
     #[serde(default)]
     pub genres: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isbn: Option<String>,
-    // Cover art fields
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cover_data: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_mime: Option<String>,
 }
 
@@ -75,6 +76,8 @@ pub struct MetadataChange {
 
 pub type FieldChange = MetadataChange;
 
+// RawFileData - simple version for collector.rs
+// processor.rs defines its own local version with tags
 #[derive(Debug, Clone)]
 pub struct RawFileData {
     pub path: String,

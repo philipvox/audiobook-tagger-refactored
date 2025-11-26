@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef } from 'react';
+// src/hooks/useScan.js
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useApp } from '../context/AppContext';
@@ -11,26 +12,49 @@ export function useScan() {
     total: 0,
     currentFile: '',
     startTime: null,
-    filesPerSecond: 0
+    filesPerSecond: 0,
+    covers_found: 0,
   });
   
   const progressIntervalRef = useRef(null);
   const resetTimeoutRef = useRef(null);
 
+  useEffect(() => {
+    return () => {
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+      }
+      if (resetTimeoutRef.current) {
+        clearTimeout(resetTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const calculateETA = useCallback(() => {
-    if (!scanProgress.startTime || scanProgress.current === 0) return 'Calculating...';
+    const { current, total, startTime, filesPerSecond } = scanProgress;
     
-    const elapsed = (Date.now() - scanProgress.startTime) / 1000;
-    const rate = scanProgress.current / elapsed;
-    const remaining = scanProgress.total - scanProgress.current;
-    const eta = remaining / rate;
+    if (!startTime || current === 0 || filesPerSecond === 0) {
+      return 'Calculating...';
+    }
     
-    if (eta < 60) return `${Math.round(eta)}s`;
-    if (eta < 3600) return `${Math.round(eta / 60)}m ${Math.round(eta % 60)}s`;
-    return `${Math.floor(eta / 3600)}h ${Math.round((eta % 3600) / 60)}m`;
+    const remaining = total - current;
+    const secondsLeft = remaining / filesPerSecond;
+    
+    if (secondsLeft < 60) {
+      return `${Math.round(secondsLeft)}s`;
+    } else if (secondsLeft < 3600) {
+      const mins = Math.floor(secondsLeft / 60);
+      const secs = Math.round(secondsLeft % 60);
+      return `${mins}m ${secs}s`;
+    } else {
+      const hours = Math.floor(secondsLeft / 3600);
+      const mins = Math.floor((secondsLeft % 3600) / 60);
+      return `${hours}h ${mins}m`;
+    }
   }, [scanProgress]);
 
   const handleScan = useCallback(async () => {
+    // Clean up any existing intervals
     if (progressIntervalRef.current) {
       clearInterval(progressIntervalRef.current);
       progressIntervalRef.current = null;
@@ -42,14 +66,19 @@ export function useScan() {
     }
     
     try {
+      // OPEN FILE PICKER
       const selected = await open({
         directory: true,
         multiple: true,
       });
       
-      if (!selected) return;
+      if (!selected) {
+        console.log('No folder selected');
+        return;
+      }
       
       const paths = Array.isArray(selected) ? selected : [selected];
+      console.log('Scanning paths:', paths);
       
       setScanning(true);
       const startTime = Date.now();
@@ -58,9 +87,11 @@ export function useScan() {
         total: 0,
         currentFile: '',
         startTime,
-        filesPerSecond: 0
+        filesPerSecond: 0,
+        covers_found: 0,
       });
       
+      // Poll for progress
       progressIntervalRef.current = setInterval(async () => {
         try {
           const progress = await invoke('get_scan_progress');
@@ -73,7 +104,8 @@ export function useScan() {
             total: progress.total,
             currentFile: progress.current_file || '',
             startTime,
-            filesPerSecond: rate
+            filesPerSecond: rate,
+            covers_found: progress.covers_found || 0,
           });
         } catch (error) {
           // Ignore polling errors
@@ -88,32 +120,10 @@ export function useScan() {
           progressIntervalRef.current = null;
         }
         
-        setGroups(prevGroups => {
-          const existingFilePaths = new Map();
-          prevGroups.forEach(group => {
-            group.files.forEach(file => {
-              existingFilePaths.set(file.path, group.id);
-            });
-          });
-          
-          const groupIdsToReplace = new Set();
-          const uniqueNewGroups = [];
-          
-          result.groups.forEach(newGroup => {
-            const newGroupFilePaths = newGroup.files.map(f => f.path);
-            
-            newGroupFilePaths.forEach(path => {
-              if (existingFilePaths.has(path)) {
-                groupIdsToReplace.add(existingFilePaths.get(path));
-              }
-            });
-            
-            uniqueNewGroups.push(newGroup);
-          });
-          
-          const filtered = prevGroups.filter(g => !groupIdsToReplace.has(g.id));
-          return [...filtered, ...uniqueNewGroups];
-        });
+        // Simple direct set - replace all groups
+        if (result && result.groups) {
+          setGroups(result.groups);
+        }
         
       } finally {
         if (progressIntervalRef.current) {
@@ -129,7 +139,8 @@ export function useScan() {
             total: 0,
             currentFile: '',
             startTime: null,
-            filesPerSecond: 0
+            filesPerSecond: 0,
+            covers_found: 0,
           });
           resetTimeoutRef.current = null;
         }, 500);
@@ -148,13 +159,7 @@ export function useScan() {
       }
       
       setScanning(false);
-      setScanProgress({
-        current: 0,
-        total: 0,
-        currentFile: '',
-        startTime: null,
-        filesPerSecond: 0
-      });
+      throw error;
     }
   }, [setGroups]);
 
@@ -170,15 +175,36 @@ export function useScan() {
     }
     
     try {
+      const selectedFilePaths = new Set();
+      const pathsToScan = new Set();
+      
+      groups.forEach(group => {
+        group.files.forEach(file => {
+          if (selectedFiles.has(file.id)) {
+            selectedFilePaths.add(file.path);
+            const lastSlash = file.path.lastIndexOf('/');
+            if (lastSlash > 0) {
+              pathsToScan.add(file.path.substring(0, lastSlash));
+            }
+          }
+        });
+      });
+      
+      const paths = Array.from(pathsToScan);
+      
+      if (paths.length === 0) {
+        return { success: false, count: 0 };
+      }
+      
       setScanning(true);
       const startTime = Date.now();
-      
       setScanProgress({
         current: 0,
         total: 0,
         currentFile: '',
         startTime,
-        filesPerSecond: 0
+        filesPerSecond: 0,
+        covers_found: 0,
       });
       
       progressIntervalRef.current = setInterval(async () => {
@@ -193,46 +219,22 @@ export function useScan() {
             total: progress.total,
             currentFile: progress.current_file || '',
             startTime,
-            filesPerSecond: rate
+            filesPerSecond: rate,
+            covers_found: progress.covers_found || 0,
           });
         } catch (error) {
-          // Ignore polling errors
+          // Ignore
         }
       }, 500);
       
       try {
-        const groupsToRescan = [];
-        const selectedFilePaths = new Set();
-        
-        groups.forEach(group => {
-          const hasSelectedFile = group.files.some(f => selectedFiles.has(f.id));
-          if (hasSelectedFile) {
-            groupsToRescan.push(group);
-            group.files.forEach(f => selectedFilePaths.add(f.path));
-          }
-        });
-
-        if (groupsToRescan.length === 0) {
-          return;
-        }
-
-        const foldersToRescan = new Set();
-        groupsToRescan.forEach(group => {
-          group.files.forEach(file => {
-            const parts = file.path.split('/');
-            parts.pop();
-            const bookFolder = parts.join('/');
-            foldersToRescan.add(bookFolder);
-          });
-        });
-
-        const paths = Array.from(foldersToRescan);
-        
-        const allNewGroups = [];
+        let allNewGroups = [];
         for (const path of paths) {
           try {
             const result = await invoke('scan_library', { paths: [path] });
-            allNewGroups.push(...result.groups);
+            if (result && result.groups) {
+              allNewGroups.push(...result.groups);
+            }
           } catch (error) {
             console.error(`Failed to scan ${path}:`, error);
           }
@@ -265,7 +267,8 @@ export function useScan() {
             total: 0,
             currentFile: '',
             startTime: null,
-            filesPerSecond: 0
+            filesPerSecond: 0,
+            covers_found: 0,
           });
           resetTimeoutRef.current = null;
         }, 500);
@@ -308,7 +311,8 @@ export function useScan() {
         total: 0,
         currentFile: '',
         startTime: null,
-        filesPerSecond: 0
+        filesPerSecond: 0,
+        covers_found: 0,
       });
     } catch (error) {
       console.error('Failed to cancel scan:', error);
