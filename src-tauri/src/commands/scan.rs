@@ -8,14 +8,48 @@ static CANCEL_FLAG: Lazy<Arc<AtomicBool>> = Lazy::new(|| Arc::new(AtomicBool::ne
 
 #[tauri::command]
 pub async fn scan_library(paths: Vec<String>) -> Result<scanner::ScanResult, String> {
+    println!("🔍 scan_library called with {} paths", paths.len());
+    
     CANCEL_FLAG.store(false, Ordering::SeqCst);
     
-    // ✅ CRITICAL FIX: Reset progress before each scan
-    // crate::progress::reset_progress();
+    // FORCE cache clear every time to prevent stale data issues
+    if let Err(e) = crate::cache::clear() {
+        println!("⚠️ Cache clear failed: {}", e);
+    } else {
+        println!("🗑️ Cache cleared successfully");
+    }
     
-    scanner::scan_directories(&paths, Some(CANCEL_FLAG.clone()))
+    let result = scanner::scan_directories(&paths, Some(CANCEL_FLAG.clone()))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            println!("❌ Scan error: {}", e);
+            e.to_string()
+        })?;
+    
+    println!("📊 Scan complete: {} groups, {} files", result.groups.len(), result.total_files);
+    
+    // DEBUG: Try to serialize to check for cycles
+    match serde_json::to_string(&result) {
+        Ok(json) => {
+            println!("✅ JSON serialization OK, {} bytes", json.len());
+        }
+        Err(e) => {
+            println!("❌ JSON serialization FAILED: {}", e);
+            // Try to find which group causes the issue
+            for (i, group) in result.groups.iter().enumerate() {
+                match serde_json::to_string(group) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        println!("❌ Group {} ({}) failed: {}", i, group.group_name, e);
+                        println!("   Metadata: {:?}", group.metadata);
+                    }
+                }
+            }
+            return Err(format!("Serialization error: {}", e));
+        }
+    }
+    
+    Ok(result)
 }
 
 #[tauri::command]
