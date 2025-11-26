@@ -5,8 +5,6 @@ import { ActionBar } from '../components/scanner/ActionBar';
 import { ProgressBar } from '../components/scanner/ProgressBar';
 import { EditMetadataModal } from '../components/EditMetadataModal';
 import { RenamePreviewModal } from '../components/RenamePreviewModal';
-import { WritePreviewModal } from '../components/WritePreviewModal';
-import { ConfirmModal } from '../components/ConfirmModal';
 import { useScan } from '../hooks/useScan';
 import { useFileSelection } from '../hooks/useFileSelection';
 import { useTagOperations } from '../hooks/useTagOperations';
@@ -20,8 +18,6 @@ export function ScannerPage({ onActionsReady }) {
   const [showEditModal, setShowEditModal] = useState(false);
   const [editingGroup, setEditingGroup] = useState(null);
   const [showRenameModal, setShowRenameModal] = useState(false);
-  const [showWritePreview, setShowWritePreview] = useState(false);
-  const [confirmModal, setConfirmModal] = useState(null);
   
   const {
     scanning,
@@ -31,11 +27,13 @@ export function ScannerPage({ onActionsReady }) {
     handleRescan,
     cancelScan
   } = useScan();
+
   useEffect(() => {
     if (onActionsReady) {
       onActionsReady({ handleScan, scanning });
     }
   }, [handleScan, scanning, onActionsReady]);
+
   const {
     selectedFiles,
     setSelectedFiles,
@@ -56,53 +54,42 @@ export function ScannerPage({ onActionsReady }) {
     pushToAudiobookShelf
   } = useTagOperations();
 
-  const showConfirm = (config) => {
-    setConfirmModal(config);
-  };
-
-  const hideConfirm = () => {
-    setConfirmModal(null);
-  };
-
   // FIXED: Prevent text selection on Shift+Click and properly handle range selection
-const handleGroupClick = (group, index, event) => {
-  // PREVENT TEXT SELECTION on Shift+Click
-  if (event.shiftKey) {
-    event.preventDefault();
-  }
+  const handleGroupClick = (group, index, event) => {
+    if (event.shiftKey) {
+      event.preventDefault();
+    }
 
-  setSelectedGroup(group);
-  
-  if (event.shiftKey && lastSelectedIndex !== null) {
-    // Shift-click: select range
-    const start = Math.min(lastSelectedIndex, index);
-    const end = Math.max(lastSelectedIndex, index);
+    setSelectedGroup(group);
     
-    const newSelectedFiles = new Set(selectedFiles);
-    const newSelectedGroupIds = new Set(selectedGroupIds);
-    
-    for (let i = start; i <= end; i++) {
-      const g = groups[i];
-      newSelectedGroupIds.add(g.id);
-      g.files.forEach(f => newSelectedFiles.add(f.id));
+    if (event.shiftKey && lastSelectedIndex !== null) {
+      const start = Math.min(lastSelectedIndex, index);
+      const end = Math.max(lastSelectedIndex, index);
+      
+      const newSelectedFiles = new Set(selectedFiles);
+      const newSelectedGroupIds = new Set(selectedGroupIds);
+      
+      for (let i = start; i <= end; i++) {
+        const g = groups[i];
+        newSelectedGroupIds.add(g.id);
+        g.files.forEach(f => newSelectedFiles.add(f.id));
+      }
+      
+      setSelectedFiles(newSelectedFiles);
+      setSelectedGroupIds(newSelectedGroupIds);
+    } else if (!event.shiftKey && !event.metaKey && !event.ctrlKey) {
+      const newSelectedFiles = new Set();
+      const newSelectedGroupIds = new Set();
+      
+      newSelectedGroupIds.add(group.id);
+      group.files.forEach(f => newSelectedFiles.add(f.id));
+      
+      setSelectedFiles(newSelectedFiles);
+      setSelectedGroupIds(newSelectedGroupIds);
     }
     
-    setSelectedFiles(newSelectedFiles);
-    setSelectedGroupIds(newSelectedGroupIds);
-  } else if (!event.shiftKey && !event.metaKey && !event.ctrlKey) {
-    // Normal click without modifier keys: DESELECT others, select only this one
-    const newSelectedFiles = new Set();
-    const newSelectedGroupIds = new Set();
-    
-    newSelectedGroupIds.add(group.id);
-    group.files.forEach(f => newSelectedFiles.add(f.id));
-    
-    setSelectedFiles(newSelectedFiles);
-    setSelectedGroupIds(newSelectedGroupIds);
-  }
-  
-  setLastSelectedIndex(index);
-};
+    setLastSelectedIndex(index);
+  };
 
   const handleSelectGroup = (group, checked) => {
     selectAllInGroup(group, checked);
@@ -218,190 +205,85 @@ const handleGroupClick = (group, index, event) => {
     setEditingGroup(null);
   };
 
-  const handleWriteClick = () => {
-    const filesWithChanges = getFilesWithChanges(groups);
-    
+  // ✅ SIMPLIFIED - No popups, just write
+  const handleWriteClick = async () => {
     if (selectedFiles.size === 0) {
-      showConfirm({
-        title: "No Files Selected",
-        message: "Please select files to write tags to before proceeding.",
-        confirmText: "OK",
-        type: "info",
-        onConfirm: () => {}
-      });
+      console.log('No files selected');
       return;
     }
 
+    const filesWithChanges = getFilesWithChanges(groups);
     if (filesWithChanges.length === 0) {
-      showConfirm({
-        title: "No Changes to Write",
-        message: "The selected files don't have any pending changes to write.",
-        confirmText: "OK",
-        type: "info",
-        onConfirm: () => {}
-      });
+      console.log('No changes to write');
       return;
     }
 
-    setShowWritePreview(true);
-  };
-  const performWrite = async (skipBackup = false) => {
     try {
-      // ✅ Override backup setting if skipBackup is true
-      const shouldBackup = skipBackup ? false : config.backup_tags;
+      console.log(`🚀 Writing ${filesWithChanges.length} files...`);
+      const result = await writeSelectedTags(selectedFiles, false); // false = no backup for speed
+      console.log(`✅ Wrote ${result.success} files, ${result.failed} failed`);
       
-      const result = await writeSelectedTags(selectedFiles, shouldBackup);
-      
-      if (result.failed > 0) {
-        showConfirm({
-          title: "Write Results",
-          message: `Successfully written: ${result.success} files\nFailed: ${result.failed} files\n\nCheck the status indicators for details.`,
-          confirmText: "OK",
-          type: "warning",
-          onConfirm: () => {}
-        });
-      } else {
-        showConfirm({
-          title: "Write Complete",
-          message: `Successfully wrote tags to ${result.success} files!${skipBackup ? '\n\n⚡ Fast mode: No backups created' : ''}`,
-          confirmText: "OK",
-          type: "info",
-          onConfirm: () => {
-            handleClearSelection();
-          }
-        });
+      if (result.success > 0) {
+        handleClearSelection();
       }
     } catch (error) {
-      showConfirm({
-        title: "Write Failed",
-        message: `Failed to write tags: ${error}`,
-        confirmText: "OK",
-        type: "danger",
-        onConfirm: () => {}
-      });
+      console.error('Write failed:', error);
     }
   };
 
+  // ✅ SIMPLIFIED - No popup
   const handleRenameClick = () => {
-    if (selectedFiles.size === 0) {
-      showConfirm({
-        title: "No Files Selected",
-        message: "Please select files to rename before proceeding.",
-        confirmText: "OK",
-        type: "info",
-        onConfirm: () => {}
-      });
-      return;
-    }
-
+    if (selectedFiles.size === 0) return;
     setShowRenameModal(true);
   };
 
+  // ✅ SIMPLIFIED - No popup, just rescan
   const handleRescanClick = async () => {
-    if (selectedFiles.size === 0) {
-      showConfirm({
-        title: "No Files Selected",
-        message: "Please select files to rescan before proceeding.",
-        confirmText: "OK",
-        type: "info",
-        onConfirm: () => {}
-      });
+    if (selectedFiles.size === 0) return;
+
+    try {
+      console.log(`🔄 Rescanning ${selectedFiles.size} files...`);
+      const result = await handleRescan(selectedFiles, groups);
+      console.log(`✅ Rescanned ${result.count} books`);
+      handleClearSelection();
+      clearFileStatuses();
+    } catch (error) {
+      console.error('Rescan failed:', error);
+    }
+  };
+
+  // ✅ SIMPLIFIED - No popup, just push
+  const handlePushClick = async () => {
+    const successCount = getSuccessCount(fileStatuses);
+    
+    if (successCount === 0) {
+      console.log('No files ready to push');
       return;
     }
 
-    showConfirm({
-      title: "Rescan Selected Files",
-      message: `Re-scan ${selectedFiles.size} selected file(s) for fresh metadata?`,
-      confirmText: "Rescan Files",
-      type: "info",
-      onConfirm: async () => {
-        try {
-          const result = await handleRescan(selectedFiles, groups);
-          handleClearSelection();
-          clearFileStatuses();
-          
-          showConfirm({
-            title: "Rescan Complete",
-            message: `Successfully rescanned ${result.count} book(s).`,
-            confirmText: "OK",
-            type: "info",
-            onConfirm: () => {}
-          });
-        } catch (error) {
-          showConfirm({
-            title: "Rescan Failed",
-            message: `Failed to rescan: ${error}`,
-            confirmText: "OK",
-            type: "danger",
-            onConfirm: () => {}
-          });
+    try {
+      console.log(`📤 Pushing ${successCount} files to AudiobookShelf...`);
+      const successfulFileIds = Array.from(selectedFiles).filter(id => fileStatuses[id] === 'success');
+      
+      const result = await pushToAudiobookShelf(
+        new Set(successfulFileIds),
+        (progress) => {
+          console.log(`Progress: ${progress.itemsProcessed}/${progress.totalItems} items`);
         }
+      );
+      
+      console.log(`✅ Pushed ${result.updated || 0} items`);
+      
+      if (result.unmatched?.length > 0) {
+        console.log(`⚠️ Unmatched: ${result.unmatched.length} files`);
       }
-    });
-  };
-
-const handlePushClick = () => {
-  const successCount = getSuccessCount(fileStatuses);
-  
-  if (successCount === 0) {
-    showConfirm({
-      title: "No Files Ready",
-      message: "No successfully written files to push. Please write tags first.",
-      confirmText: "OK",
-      type: "info",
-      onConfirm: () => {}
-    });
-    return;
-  }
-
-  showConfirm({
-    title: "Push to AudiobookShelf",
-    message: `Push ${successCount} file(s) to AudiobookShelf server?\n\nFiles will be processed in batches to avoid memory issues.`,
-    confirmText: `Push ${successCount} Files`,
-    type: "info",
-    onConfirm: async () => {
-      try {
-        const successfulFileIds = Array.from(selectedFiles).filter(id => fileStatuses[id] === 'success');
-        
-        // Show progress during push
-        const result = await pushToAudiobookShelf(
-          new Set(successfulFileIds),
-          (progress) => {
-            console.log(`Progress: ${progress.itemsProcessed}/${progress.totalItems} items (chunk ${progress.current}/${progress.total})`);
-          }
-        );
-        
-        let message = `✅ Successfully updated ${result.updated || 0} item${result.updated === 1 ? '' : 's'} in AudiobookShelf!`;
-
-        if (result.unmatched && result.unmatched.length > 0) {
-          message += `\n\n⚠️ Unmatched files: ${result.unmatched.slice(0, 5).join(', ')}${
-            result.unmatched.length > 5 ? `... (+${result.unmatched.length - 5} more)` : ''
-          }`;
-        }
-
-        if (result.failed && result.failed.length > 0) {
-          message += `\n\n❌ Failed: ${result.failed.length} item${result.failed.length === 1 ? '' : 's'}`;
-        }
-
-        showConfirm({
-          title: "Push Complete",
-          message: message,
-          confirmText: "OK",
-          type: result.failed?.length > 0 ? "warning" : "info",
-          onConfirm: () => {}
-        });
-      } catch (error) {
-        showConfirm({
-          title: "Push Failed",
-          message: `Failed to push updates: ${error.toString()}`,
-          confirmText: "OK",
-          type: "danger",
-          onConfirm: () => {}
-        });
+      if (result.failed?.length > 0) {
+        console.log(`❌ Failed: ${result.failed.length} files`);
       }
+    } catch (error) {
+      console.error('Push failed:', error);
     }
-  });
-};
+  };
 
   return (
     <div className="h-full flex flex-col relative">
@@ -450,18 +332,15 @@ const handlePushClick = () => {
       </div>
 
       {/* Progress bars */}
-      {(() => {
-        // console.log('🔵 ScannerPage render - scanning:', scanning, 'progress:', scanProgress);
-        return scanning && (
-          <ProgressBar
-            key={scanProgress.startTime} 
-            type="scan"
-            progress={scanProgress}
-            onCancel={cancelScan}
-            calculateETA={calculateETA}
-          />
-        );
-      })()}
+      {scanning && (
+        <ProgressBar
+          key={scanProgress.startTime} 
+          type="scan"
+          progress={scanProgress}
+          onCancel={cancelScan}
+          calculateETA={calculateETA}
+        />
+      )}
 
       {writing && writeProgress.total > 0 && (
         <ProgressBar
@@ -470,7 +349,7 @@ const handlePushClick = () => {
         />
       )}
 
-      {/* Modals */}
+      {/* Modals - only edit and rename remain */}
       {showEditModal && editingGroup && (
         <EditMetadataModal
           isOpen={showEditModal}
@@ -500,39 +379,10 @@ const handlePushClick = () => {
               setShowRenameModal(false);
               await handleScan();
             } catch (error) {
-              showConfirm({
-                title: "Rename Failed",
-                message: `Failed to rename files: ${error}`,
-                confirmText: "OK",
-                type: "danger",
-                onConfirm: () => {}
-              });
+              console.error('Rename failed:', error);
             }
           }}
           onCancel={() => setShowRenameModal(false)}
-        />
-      )}
-      {showWritePreview && (
-        <WritePreviewModal
-          isOpen={showWritePreview}
-          onClose={() => setShowWritePreview(false)}
-          onConfirm={performWrite}  // ✅ This now receives skipBackup param
-          selectedFiles={selectedFiles}
-          groups={groups}
-          backupEnabled={config.backup_tags}
-        />
-      )}
-
-      {confirmModal && (
-        <ConfirmModal
-          isOpen={true}
-          onClose={hideConfirm}
-          onConfirm={confirmModal.onConfirm}
-          title={confirmModal.title}
-          message={confirmModal.message}
-          confirmText={confirmModal.confirmText}
-          cancelText={confirmModal.cancelText}
-          type={confirmModal.type}
         />
       )}
     </div>

@@ -8,6 +8,9 @@ use lofty::probe::Probe;
 use lofty::tag::Accessor;
 use lofty::file::TaggedFileExt;
 // ADD THIS FUNCTION HERE - AT THE TOP!
+
+use futures::stream::{self, StreamExt};
+
 pub async fn process_all_groups(
     groups: Vec<BookGroup>,
     config: &Config,
@@ -15,50 +18,41 @@ pub async fn process_all_groups(
 ) -> Result<Vec<BookGroup>, Box<dyn std::error::Error + Send + Sync>> {
     
     let max_workers = config.max_workers;
-    let semaphore = Arc::new(Semaphore::new(max_workers));
-    
     let total = groups.len();
-    println!("⚙️  Processing {} groups with {} workers", total, max_workers);
-        // crate::progress::set_total(total);
-
+    
+    println!("⚙️  Processing {} groups with {} workers (streaming)", total, max_workers);
+    
     let processed_count = Arc::new(AtomicUsize::new(0));
-    let mut handles = Vec::new();
+    let cancel = cancel_flag.clone();
     
-    for group in groups {
-        if let Some(ref flag) = cancel_flag {
-            if flag.load(Ordering::SeqCst) {
-                println!("Processing cancelled");
-                break;
+    // ✅ Stream processes max_workers concurrently, continuously
+    let results: Vec<_> = stream::iter(groups)
+        .map(|group| {
+            let config_clone = config.clone();
+            let cancel_clone = cancel.clone();
+            let count_clone = Arc::clone(&processed_count);
+            let group_name = group.group_name.clone();
+            
+            async move {
+                // Check cancellation
+                if let Some(ref flag) = cancel_clone {
+                    if flag.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                }
+                
+                let result = process_book_group(group, &config_clone, cancel_clone).await;
+                
+                let current = count_clone.fetch_add(1, Ordering::SeqCst) + 1;
+                crate::progress::update_progress(current, total, &group_name);
+                
+                result.ok()
             }
-        }
-        
-        let sem = Arc::clone(&semaphore);
-        let config_clone = config.clone();
-        let cancel_clone = cancel_flag.clone();
-        let count_clone = Arc::clone(&processed_count);
-        let group_name = group.group_name.clone();
-        
-        let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
-            let result = process_book_group(group, &config_clone, cancel_clone).await;
-            
-            let current = count_clone.fetch_add(1, Ordering::SeqCst) + 1;
-            crate::progress::update_progress(current, total, &group_name);
-            
-            result
-        });
-        
-        handles.push(handle);
-    }
-    
-    let mut results = Vec::new();
-    for handle in handles {
-        match handle.await {
-            Ok(Ok(processed)) => results.push(processed),
-            Ok(Err(e)) => eprintln!("Failed to process group: {}", e),
-            Err(e) => eprintln!("Task failed: {}", e),
-        }
-    }
+        })
+        .buffer_unordered(max_workers) // ✅ Always max_workers in flight
+        .filter_map(|x| async { x })
+        .collect()
+        .await;
     
     Ok(results)
 }
