@@ -8,6 +8,74 @@ use lofty::tag::Accessor;
 use lofty::file::TaggedFileExt;
 use futures::stream::{self, StreamExt};
 
+/// Normalize text - replace & with and, fix quotes, etc.
+fn normalize_text(text: &str) -> String {
+    let mut normalized = text.to_string();
+    
+    // Replace & with and
+    normalized = normalized.replace(" & ", " and ");
+    normalized = normalized.replace("&", " and ");
+    
+    // Normalize apostrophes and quotes
+    normalized = normalized.replace("\u{2019}", "'");  // right single quote to apostrophe
+    normalized = normalized.replace("\u{2018}", "'");  // left single quote to apostrophe
+    normalized = normalized.replace("\u{201C}", "\""); // left double quote
+    normalized = normalized.replace("\u{201D}", "\""); // right double quote
+    
+    // Normalize hyphens and dashes
+    normalized = normalized.replace("\u{2014}", "-");  // em dash
+    normalized = normalized.replace("\u{2013}", "-");  // en dash
+    
+    // Normalize whitespace
+    normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    
+    normalized.trim().to_string()
+}
+
+/// Normalize series names with additional title-casing
+fn normalize_series_name(name: &str) -> String {
+    let mut normalized = normalize_text(name);
+    
+    // Remove certain punctuation for series names
+    normalized = normalized.replace(":", "");
+    normalized = normalized.replace(";", "");
+    normalized = normalized.replace(" - ", " ");
+    
+    // Title case
+    normalized = normalized
+        .split(' ')
+        .map(|word| {
+            let mut chars: Vec<char> = word.chars().collect();
+            if !chars.is_empty() {
+                chars[0] = chars[0].to_uppercase().next().unwrap_or(chars[0]);
+                for c in chars.iter_mut().skip(1) {
+                    *c = c.to_lowercase().next().unwrap_or(*c);
+                }
+            }
+            chars.into_iter().collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    
+    // Fix common words that should be lowercase (unless first word)
+    let lowercase_words = ["and", "the", "of", "in", "on", "at", "to", "for", "a", "an"];
+    let words: Vec<&str> = normalized.split(' ').collect();
+    normalized = words
+        .iter()
+        .enumerate()
+        .map(|(i, word)| {
+            if i > 0 && lowercase_words.contains(&word.to_lowercase().as_str()) {
+                word.to_lowercase()
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    
+    normalized.trim().to_string()
+}
+
 // ✅ TURBO: 50 workers, parallel metadata, cover tracking
 pub async fn process_all_groups(
     groups: Vec<BookGroup>,
@@ -15,8 +83,8 @@ pub async fn process_all_groups(
     cancel_flag: Option<Arc<AtomicBool>>
 ) -> Result<Vec<BookGroup>, Box<dyn std::error::Error + Send + Sync>> {
     
-    // ✅ 50 workers - balanced for speed vs rate limiting on cover services
-    let max_workers = 50;
+    // ✅ 10 workers - balanced for speed vs rate limiting on APIs
+    let max_workers = 10;
     let total = groups.len();
     
     println!("⚡ TURBO SCAN: {} books, {} workers (parallel metadata, then covers)", total, max_workers);
@@ -75,6 +143,7 @@ async fn process_book_group(
     covers_found: Arc<AtomicUsize>,
 ) -> Result<BookGroup, Box<dyn std::error::Error + Send + Sync>> {
     
+    
     if let Some(ref flag) = cancel_flag {
         if flag.load(Ordering::Relaxed) {
             return Ok(group);
@@ -89,6 +158,7 @@ async fn process_book_group(
         group.total_changes = calculate_changes(&mut group);
         return Ok(group);
     }
+    
     
     // Read first file's tags
     let sample_file = &group.files[0];
@@ -118,6 +188,7 @@ async fn process_book_group(
         config.openai_api_key.as_deref()
     ).await;
     
+    
     if let Some(ref flag) = cancel_flag {
         if flag.load(Ordering::Relaxed) {
             return Ok(group);
@@ -146,6 +217,9 @@ async fn process_book_group(
         google_future,
         audible_future
     );
+    
+    if let Some(ref aud) = audible_data {
+    }
     
     if let Some(ref flag) = cancel_flag {
         if flag.load(Ordering::Relaxed) {
@@ -210,6 +284,7 @@ async fn process_book_group(
         final_metadata.cover_mime = cover.mime_type;
     }
     
+    
     group.metadata = final_metadata;
     
     // Cache the result
@@ -225,83 +300,168 @@ async fn fetch_audible_metadata(
     title: &str,
     author: &str,
 ) -> Option<AudibleMetadata> {
-    // Build search query
+    // Build search query for Audible website
     let search_query = format!("{} {}", title, author);
+    // Simple URL encoding
+    let encoded_query = search_query
+        .replace(' ', "+")
+        .replace('&', "%26")
+        .replace('\'', "%27");
+    let search_url = format!(
+        "https://www.audible.com/search?keywords={}",
+        encoded_query
+    );
     
-    // Call audible CLI
-    let output = tokio::process::Command::new("audible")
-        .args(&["search", "-t", &search_query, "--output-format", "json"])
-        .output()
-        .await;
     
-    match output {
-        Ok(result) if result.status.success() => {
-            let json_str = String::from_utf8_lossy(&result.stdout);
-            
-            #[derive(serde::Deserialize)]
-            struct AudibleResponse {
-                products: Vec<AudibleProduct>,
-            }
-            
-            #[derive(serde::Deserialize)]
-            struct AudibleProduct {
-                asin: String,
-                title: String,
-                authors: Option<Vec<AudibleAuthor>>,
-                narrators: Option<Vec<AudibleNarrator>>,
-                series: Option<Vec<AudibleSeriesInfo>>,
-                publisher_name: Option<String>,
-                release_date: Option<String>,
-                merchandising_summary: Option<String>,
-            }
-            
-            #[derive(serde::Deserialize)]
-            struct AudibleAuthor {
-                name: String,
-            }
-            
-            #[derive(serde::Deserialize)]
-            struct AudibleNarrator {
-                name: String,
-            }
-            
-            #[derive(serde::Deserialize)]
-            struct AudibleSeriesInfo {
-                title: String,
-                sequence: Option<String>,
-            }
-            
-            match serde_json::from_str::<AudibleResponse>(&json_str) {
-                Ok(response) => {
-                    if let Some(product) = response.products.first() {
-                        return Some(AudibleMetadata {
-                            asin: Some(product.asin.clone()),
-                            title: Some(product.title.clone()),
-                            authors: product.authors.as_ref()
-                                .map(|a| a.iter().map(|author| author.name.clone()).collect())
-                                .unwrap_or_default(),
-                            narrators: product.narrators.as_ref()
-                                .map(|n| n.iter().map(|narrator| narrator.name.clone()).collect())
-                                .unwrap_or_default(),
-                            series: product.series.as_ref()
-                                .map(|s| s.iter().map(|series| AudibleSeries {
-                                    name: series.title.clone(),
-                                    position: series.sequence.clone(),
-                                }).collect())
-                                .unwrap_or_default(),
-                            publisher: product.publisher_name.clone(),
-                            release_date: product.release_date.clone(),
-                            description: product.merchandising_summary.clone(),
-                        });
-                    }
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .build()
+        .ok()?;
+    
+    let response = match client.get(&search_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return None;
+        }
+    };
+    
+    let html = match response.text().await {
+        Ok(h) => h,
+        Err(e) => {
+            return None;
+        }
+    };
+    
+    // Parse the search results page to find the first result ASIN
+    // Look for product link pattern: /pd/Title/ASIN
+    let asin_regex = regex::Regex::new(r#"/pd/[^/]+/([A-Z0-9]{10})"#).ok()?;
+    let asin = match asin_regex.captures(&html) {
+        Some(caps) => caps.get(1)?.as_str().to_string(),
+        None => {
+            // Try alternate pattern
+            let alt_regex = regex::Regex::new(r#"data-asin="([A-Z0-9]{10})""#).ok()?;
+            match alt_regex.captures(&html) {
+                Some(caps) => caps.get(1)?.as_str().to_string(),
+                None => {
+                    return None;
                 }
-                Err(_) => {}
             }
         }
-        _ => {}
-    }
+    };
     
-    None
+    
+    // Now fetch the product details page
+    let product_url = format!("https://www.audible.com/pd/{}", asin);
+    let product_response = match client.get(&product_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return None;
+        }
+    };
+    
+    let product_html = match product_response.text().await {
+        Ok(h) => h,
+        Err(e) => {
+            return None;
+        }
+    };
+    
+    // Extract title from og:title meta tag (most reliable)
+    let title_regex = regex::Regex::new(r#"<meta[^>]*property="og:title"[^>]*content="([^"]+)""#).ok()?;
+    let extracted_title = title_regex.captures(&product_html)
+        .and_then(|c| c.get(1))
+        .map(|m| {
+            let t = m.as_str().trim();
+            // Remove " (Audiobook)" suffix if present
+            t.replace(" (Audiobook)", "").replace(" Audiobook", "")
+        });
+    
+    // Also try alternate title pattern
+    let extracted_title = extracted_title.or_else(|| {
+        let alt_title_regex = regex::Regex::new(r#"<h1[^>]*>([^<]+)</h1>"#).ok()?;
+        alt_title_regex.captures(&product_html)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string())
+    });
+    
+    
+    // Extract author - look for "By:" or author link
+    let author_regex = regex::Regex::new(r#"/author/[^"]*"[^>]*>([^<]+)</a>"#).ok()?;
+    let extracted_author = author_regex.captures(&product_html)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string());
+    
+    // Extract narrator - look for "Narrated by:" pattern
+    let narrator_regex = regex::Regex::new(r#"/narrator/[^"]*"[^>]*>([^<]+)</a>"#).ok()?;
+    let extracted_narrator = narrator_regex.captures(&product_html)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string());
+    
+    // Extract series info - THIS IS THE KEY PART
+    // Pattern 1: Look for series link followed by "Book X"
+    // Example: <a href="/series/Mr-Putter-Tabby/...">Mr. Putter & Tabby</a>, Book 14
+    let series_with_book_regex = regex::Regex::new(
+        r#"/series/[^"]*"[^>]*>([^<]+)</a>[^<]*,?\s*Book\s*(\d+)"#
+    ).ok()?;
+    
+    let (series_name, series_position) = if let Some(caps) = series_with_book_regex.captures(&product_html) {
+        let name = caps.get(1).map(|m| m.as_str().trim().to_string());
+        let position = caps.get(2).map(|m| m.as_str().to_string());
+        (name, position)
+    } else {
+        // Pattern 2: Try looking in the breadcrumb or metadata area
+        // Sometimes it's formatted as "Series Name, Book X" without the link structure
+        let series_text_regex = regex::Regex::new(
+            r#"([^<>"]+),\s*Book\s*(\d+)\s*</a>"#
+        ).ok()?;
+        
+        if let Some(caps) = series_text_regex.captures(&product_html) {
+            let name = caps.get(1).map(|m| m.as_str().trim().to_string());
+            let position = caps.get(2).map(|m| m.as_str().to_string());
+            (name, position)
+        } else {
+            // Pattern 3: Just find series name without position
+            let series_only_regex = regex::Regex::new(r#"/series/[^"]*"[^>]*>([^<]+)</a>"#).ok()?;
+            let name = series_only_regex.captures(&product_html)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().trim().to_string());
+            if name.is_some() {
+            }
+            (name, None)
+        }
+    };
+    
+    // Extract publisher
+    let publisher_regex = regex::Regex::new(r#"/publisher/[^"]*"[^>]*>([^<]+)</a>"#).ok()?;
+    let publisher = publisher_regex.captures(&product_html)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string());
+    
+    // Extract release date from JSON-LD or meta
+    let date_regex = regex::Regex::new(r#""datePublished"\s*:\s*"([^"]+)""#).ok()?;
+    let release_date = date_regex.captures(&product_html)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string());
+    
+    let series_vec = if let Some(name) = series_name {
+        vec![AudibleSeries {
+            name,
+            position: series_position,
+        }]
+    } else {
+        vec![]
+    };
+    
+    Some(AudibleMetadata {
+        asin: Some(asin),
+        title: extracted_title,
+        authors: extracted_author.map(|a| vec![a]).unwrap_or_default(),
+        narrators: extracted_narrator.map(|n| vec![n]).unwrap_or_default(),
+        series: series_vec,
+        publisher,
+        release_date,
+        description: None,
+    })
 }
 
 #[derive(Clone)]
@@ -518,6 +678,7 @@ JSON:"#,
                             .unwrap_or(&sample_file.tags.artist.as_deref().unwrap_or("Unknown"))
                             .to_string();
                         
+                        
                         if title.to_lowercase().contains("track") || 
                            title.to_lowercase().contains("chapter") ||
                            title.to_lowercase().contains("part") {
@@ -529,7 +690,7 @@ JSON:"#,
                         
                         return (title, author);
                     }
-                    Err(_) => {
+                    Err(e) => {
                         if attempt == 2 {
                             return (
                                 sample_file.tags.title.clone().unwrap_or_else(|| folder_name.to_string()),
@@ -571,7 +732,7 @@ pub async fn enrich_with_gpt(
                 author: extracted_author.to_string(),
                 subtitle: None,
                 narrator: None,
-                series: extract_series_from_folder(folder_name).0,
+                series: extract_series_from_folder(folder_name).0.map(|s| normalize_series_name(&s)),
                 sequence: extract_series_from_folder(folder_name).1,
                 genres: vec![],
                 publisher: None,
@@ -586,30 +747,43 @@ pub async fn enrich_with_gpt(
     };
     
     let prompt = format!(
-r#"You are enriching audiobook metadata when no external databases are available.
+r#"You are enriching audiobook metadata using your knowledge.
 
 FOLDER NAME: {}
 TITLE: {}
 AUTHOR: {}
 COMMENT TAG: {:?}
 
-Based on your knowledge, provide as much metadata as you can for this audiobook:
+Based on your knowledge, provide metadata for this audiobook:
 
-1. Narrator: Check if the comment field contains narrator info, or use your knowledge
-2. Series: Extract from folder name if present (patterns like Book 01, Book 45, etc.)
-3. Sequence: Extract book number from folder or filename AS A STRING
-4. Genres: Provide 1-3 appropriate genres from this list: {}
-5. Publisher: If you know the typical publisher for this author/series
-6. Year: If you know when this book was published AS A STRING
-7. Description: A brief 2-3 sentence description of the book
+1. Narrator: Check comment field or use your knowledge
+2. Series: What series does this book belong to?
+3. Sequence: See SEQUENCE DETERMINATION below
+4. Genres: Provide 1-4 appropriate genres from this list: {}
+5. Publisher: If you know the publisher
+6. Year: Publication year AS A STRING
+7. Description: A brief 2-3 sentence description
 
-IMPORTANT: All values must be strings or null. Numbers like 1 must be written as "1".
+SEQUENCE DETERMINATION - THINK STEP BY STEP:
+1. Identify the series this book belongs to
+2. List the books in this series by publication year (earliest first)
+3. Find this book's position in that chronological order
+4. Return that position number as a string
 
-Return ONLY valid JSON (use null for missing fields):
+Example for "Mr. Putter & Tabby Walk the Dog" by Cynthia Rylant:
+- Series started 1994 with "Pour the Tea" (#1)
+- "Walk the Dog" was published 1994 as the 2nd book
+- So sequence = "2"
+
+DO NOT default to "1" - think through the actual publication order.
+
+IMPORTANT: All values must be strings or null. Numbers like 14 must be written as "14".
+
+Return ONLY valid JSON:
 {{
   "narrator": null,
-  "series": null,
-  "sequence": null,
+  "series": "series name or null",
+  "sequence": "position in publication order",
   "genres": ["Genre1", "Genre2"],
   "publisher": null,
   "year": null,
@@ -648,13 +822,16 @@ JSON:"#,
                         }
                     };
                     
+                    let series = json.get("series").and_then(get_string).map(|s| normalize_series_name(&s));
+                    let sequence = json.get("sequence").and_then(get_string);
+                    
                     BookMetadata {
                         title: extracted_title.to_string(),
                         author: extracted_author.to_string(),
                         subtitle: None,
                         narrator: json.get("narrator").and_then(get_string),
-                        series: json.get("series").and_then(get_string),
-                        sequence: json.get("sequence").and_then(get_string),
+                        series,
+                        sequence,
                         genres: json.get("genres").map(get_string_array).unwrap_or_default(),
                         publisher: json.get("publisher").and_then(get_string),
                         year: json.get("year").and_then(get_string),
@@ -665,13 +842,13 @@ JSON:"#,
                         cover_url: None,
                     }
                 }
-                Err(_) => {
+                Err(e) => {
                     BookMetadata {
                         title: extracted_title.to_string(),
                         author: extracted_author.to_string(),
                         subtitle: None,
                         narrator: None,
-                        series: extract_series_from_folder(folder_name).0,
+                        series: extract_series_from_folder(folder_name).0.map(|s| normalize_series_name(&s)),
                         sequence: extract_series_from_folder(folder_name).1,
                         genres: vec![],
                         publisher: None,
@@ -691,7 +868,7 @@ JSON:"#,
                 author: extracted_author.to_string(),
                 subtitle: None,
                 narrator: None,
-                series: extract_series_from_folder(folder_name).0,
+                series: extract_series_from_folder(folder_name).0.map(|s| normalize_series_name(&s)),
                 sequence: extract_series_from_folder(folder_name).1,
                 genres: vec![],
                 publisher: None,
@@ -717,7 +894,7 @@ fn extract_series_from_folder(folder_name: &str) -> (Option<String>, Option<Stri
         for pattern in patterns.iter().flatten() {
             if let Some(caps) = pattern.captures(folder_name) {
                 if let Some(series_name) = caps.get(1) {
-                    return (Some(series_name.as_str().trim().to_string()), Some(book_num));
+                    return (Some(normalize_series_name(series_name.as_str().trim())), Some(book_num));
                 }
             }
         }
@@ -755,6 +932,12 @@ async fn merge_all_with_gpt(
     audible_data: Option<AudibleMetadata>,
     api_key: Option<&str>
 ) -> BookMetadata {
+    if let Some(ref aud) = audible_data {
+        for s in &aud.series {
+        }
+    } else {
+    }
+    
     let api_key = match api_key {
         Some(key) if !key.is_empty() => key,
         _ => {
@@ -769,6 +952,12 @@ async fn merge_all_with_gpt(
             google_data.as_ref()
                 .and_then(|d| d.year.clone())
         });
+    
+    // Extract Audible series info BEFORE consuming for summary
+    // This is the authoritative source for sequence numbers!
+    let audible_series = audible_data.as_ref()
+        .and_then(|d| d.series.first())
+        .map(|s| (s.name.clone(), s.position.clone()));
     
     let google_summary = if let Some(ref data) = google_data {
         format!(
@@ -804,9 +993,6 @@ SOURCES:
 4. Audible: {}
 5. Sample comment: {:?}
 
-SERIES RULES:
-If the folder or filename includes patterns like Book 01 or War of the Roses 01, extract the series name and the book number.
-
 APPROVED GENRES (maximum 3, comma separated):
 {}
 
@@ -815,16 +1001,29 @@ OUTPUT FIELDS:
 * subtitle: Use only if provided by Google Books or Audible.
 * author: Clean and standardized.
 * narrator: Use Audible narrators or find in comments.
-* series: Extract from filename or folder if present.
-* sequence: Extract book number from any source including patterns like 01 or 02.
-* genres: Select one to three from the approved list. If the book is for children, always include "Children's" from the approved list.
+* series: The series this book belongs to.
+* sequence: See SEQUENCE DETERMINATION below.
+* genres: Select one to three from the approved list. If the book is clearly for young children (picture books, early readers, etc.), always include "Children's". If the book is for young adults (YA), include "Young Adult" or other appropriate tags such as "Fantasy", "Romance", or "Science Fiction" based on the content. Use your best judgment to match the tone, audience, and themes.
 * publisher: Prefer Google Books or Audible.
 * {}
 * description: Short description from Google Books or Audible, minimum length 200 characters.
 * isbn: From Google Books.
 
-TITLE RULES:
-The title must contain only the specific book title. Remove all series indicators such as Book X, Book #X, #X:, or any series name in parentheses.
+SEQUENCE DETERMINATION - THINK STEP BY STEP:
+1. Identify the series name (e.g., "Mr. Putter & Tabby")
+2. Recall ALL books in this series in publication order by release year
+3. Find where THIS specific book title falls in that chronological list
+4. The sequence number is its position (1st published = "1", 5th published = "5", etc.)
+
+For example, Mr. Putter & Tabby series by Cynthia Rylant:
+- "Pour the Tea" (1994) = "1"
+- "Walk the Dog" (1994) = "2" 
+- "Bake the Cake" (1994) = "3"
+- "Pick the Pears" (1995) = "4"
+- ... and so on through all 26+ books
+
+DO NOT guess "1" or "2" - actually recall the publication order.
+If you don't know the exact position, estimate based on the title's publication year relative to when the series started.
 
 Return ONLY valid JSON:
 {{
@@ -833,7 +1032,7 @@ Return ONLY valid JSON:
   "author": "author name",
   "narrator": "narrator name or null",
   "series": "series name or null",
-  "sequence": "book number or null",
+  "sequence": "number based on publication order",
   "genres": ["Genre1", "Genre2"],
   "publisher": "publisher or null",
   "year": "YYYY or null",
@@ -856,17 +1055,36 @@ JSON:"#,
         Ok(json_str) => {
             match serde_json::from_str::<BookMetadata>(&json_str) {
                 Ok(mut metadata) => {
+                    
+                    // Override with reliable data
                     if let Some(year) = reliable_year {
                         metadata.year = Some(year);
                     }
+                    
+                    // Normalize series name
+                    if let Some(ref series) = metadata.series {
+                        metadata.series = Some(normalize_series_name(series));
+                    }
+                    
+                    // CRITICAL: Use Audible's sequence if available - it's authoritative!
+                    if let Some((ref audible_series_name, ref audible_position)) = audible_series {
+                        if let Some(ref pos) = audible_position {
+                            metadata.sequence = Some(pos.clone());
+                        }
+                        // Also use Audible's series name if GPT didn't find one
+                        if metadata.series.is_none() {
+                            metadata.series = Some(normalize_series_name(audible_series_name));
+                        }
+                    }
+                    
                     metadata
                 }
-                Err(_) => {
+                Err(e) => {
                     fallback_metadata(extracted_title, extracted_author, google_data, audible_data, reliable_year)
                 }
             }
         }
-        Err(_) => {
+        Err(e) => {
             fallback_metadata(extracted_title, extracted_author, google_data, audible_data, reliable_year)
         }
     }
@@ -886,7 +1104,7 @@ fn fallback_metadata(
         narrator: audible_data.as_ref()
             .and_then(|d| d.narrators.first().cloned()),
         series: audible_data.as_ref()
-            .and_then(|d| d.series.first().map(|s| s.name.clone())),
+            .and_then(|d| d.series.first().map(|s| normalize_series_name(&s.name))),
         sequence: audible_data.as_ref()
             .and_then(|d| d.series.first().and_then(|s| s.position.clone())),
         genres: google_data.as_ref()
@@ -912,10 +1130,29 @@ async fn call_gpt_api(
     max_tokens: u32
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::new();
-    let response = client
-        .post("https://api.openai.com/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&serde_json::json!({
+    
+    // GPT-5 models require temperature=1 or omitted
+    let is_gpt5 = model.starts_with("gpt-5");
+    
+    let body = if is_gpt5 {
+        // GPT-5 models: no temperature, use max_completion_tokens, add reasoning_effort
+        serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You extract audiobook metadata. Return ONLY valid JSON, no markdown."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_completion_tokens": max_tokens + 2000,
+            "reasoning_effort": "high"
+        })
+    } else {
+        serde_json::json!({
             "model": model,
             "messages": [
                 {
@@ -929,13 +1166,22 @@ async fn call_gpt_api(
             ],
             "temperature": 0.3,
             "max_tokens": max_tokens
-        }))
+        })
+    };
+    
+    let response = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
         .send()
         .await?;
     
     if !response.status().is_success() {
-        return Err(format!("GPT API error: {}", response.status()).into());
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("GPT API error: {}", error_text).into());
     }
+    
+    let response_text = response.text().await?;
     
     #[derive(serde::Deserialize)]
     struct Response {
@@ -952,7 +1198,13 @@ async fn call_gpt_api(
         content: String,
     }
     
-    let result: Response = response.json().await?;
+    let result: Response = match serde_json::from_str(&response_text) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(format!("Parse error: {}", e).into());
+        }
+    };
+    
     let content = result.choices.first()
         .ok_or("No GPT response")?
         .message.content.trim();
@@ -982,14 +1234,26 @@ async fn fetch_google_books_data(
 ) -> Result<Option<GoogleBookData>, Box<dyn std::error::Error + Send + Sync>> {
     
     let query = format!("intitle:{} inauthor:{}", title, author);
+    // Simple URL encoding without external crate
+    let encoded_query = query
+        .replace(' ', "+")
+        .replace('&', "%26")
+        .replace('\'', "%27")
+        .replace(':', "%3A");
     let url = format!(
         "https://www.googleapis.com/books/v1/volumes?q={}&key={}",
-        urlencoding::encode(&query),
+        encoded_query,
         api_key
     );
     
+    
     let client = reqwest::Client::new();
-    let response = client.get(&url).send().await?;
+    let response = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(None);
+        }
+    };
     
     if !response.status().is_success() {
         return Ok(None);
@@ -1026,7 +1290,12 @@ async fn fetch_google_books_data(
         identifier: String,
     }
     
-    let books: Response = response.json().await?;
+    let books: Response = match response.json().await {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(None);
+        }
+    };
     
     if let Some(book) = books.items.first() {
         let vi = &book.volume_info;
@@ -1034,6 +1303,7 @@ async fn fetch_google_books_data(
         let isbn = vi.industry_identifiers.iter()
             .find(|id| id.id_type == "ISBN_13" || id.id_type == "ISBN_10")
             .map(|id| id.identifier.clone());
+        
         
         Ok(Some(GoogleBookData {
             subtitle: vi.subtitle.clone(),
