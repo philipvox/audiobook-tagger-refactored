@@ -40,6 +40,49 @@ pub async fn get_cover_for_group(group_id: String) -> Result<Option<CoverData>, 
     }
 }
 
+fn get_image_dimensions(data: &[u8]) -> (Option<u32>, Option<u32>) {
+    // Check for JPEG
+    if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
+        // Simple JPEG dimension extraction - look for SOF0 marker
+        let mut i = 2;
+        while i < data.len() - 9 {
+            if data[i] == 0xFF {
+                let marker = data[i + 1];
+                // SOF0, SOF1, SOF2 markers contain dimensions
+                if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 {
+                    let height = ((data[i + 5] as u32) << 8) | (data[i + 6] as u32);
+                    let width = ((data[i + 7] as u32) << 8) | (data[i + 8] as u32);
+                    return (Some(width), Some(height));
+                }
+                // Skip to next marker
+                if marker != 0x00 && marker != 0xFF {
+                    let len = ((data[i + 2] as usize) << 8) | (data[i + 3] as usize);
+                    i += len + 2;
+                } else {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+    
+    // Check for PNG
+    if data.len() >= 24 && data[0] == 0x89 && data[1] == 0x50 {
+        let width = ((data[16] as u32) << 24) 
+            | ((data[17] as u32) << 16) 
+            | ((data[18] as u32) << 8) 
+            | (data[19] as u32);
+        let height = ((data[20] as u32) << 24) 
+            | ((data[21] as u32) << 16) 
+            | ((data[22] as u32) << 8) 
+            | (data[23] as u32);
+        return (Some(width), Some(height));
+    }
+    
+    (None, None)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CoverOption {
     pub url: String,
@@ -53,7 +96,7 @@ pub struct CoverOption {
 pub async fn search_cover_options(
     title: String,
     author: String,
-    isbn: Option<String>,
+    _isbn: Option<String>, // Kept for API compatibility, unused
     asin: Option<String>,
 ) -> Result<Vec<CoverOption>, String> {
     let mut options = Vec::new();
@@ -86,22 +129,57 @@ pub async fn search_cover_options(
         options.extend(audible_options);
     }
     
-    // PRIORITY 3: Try Open Library if ISBN available
-    if let Some(ref isbn_str) = isbn {
-        if let Some(option) = try_open_library_options(isbn_str).await {
-            options.push(option);
-        }
-    }
-    
-    // PRIORITY 4: Try Open Library by search if no ISBN
-    if isbn.is_none() {
-        if let Some(ol_options) = try_open_library_search(&title, &author).await {
-            options.extend(ol_options);
-        }
-    }
-    
     Ok(options)
 }
+
+async fn try_itunes_options(title: &str, author: &str) -> Option<Vec<CoverOption>> {
+    let search_query = format!("{} {}", title, author);
+    let search_url = format!(
+        "https://itunes.apple.com/search?term={}&media=audiobook&entity=audiobook&limit=3",
+        urlencoding::encode(&search_query)
+    );
+    
+    let client = reqwest::Client::new();
+    match client.get(&search_url).send().await {
+        Ok(response) if response.status().is_success() => {
+            if let Ok(json) = response.json::<serde_json::Value>().await {
+                if let Some(results) = json["results"].as_array() {
+                    let mut options = Vec::new();
+                    
+                    for result in results.iter().take(3) {
+                        if let Some(artwork_url) = result["artworkUrl100"].as_str() {
+                            let high_res_url = artwork_url
+                                .replace("100x100", "2048x2048")
+                                .replace("100x100bb", "2048x2048bb");
+                            
+                            // Get the book title from the result for better identification
+                            let book_name = result["collectionName"]
+                                .as_str()
+                                .unwrap_or("Unknown")
+                                .to_string();
+                            
+                            options.push(CoverOption {
+                                url: high_res_url,
+                                source: format!("iTunes: {}", book_name),
+                                width: 2048,
+                                height: 2048,
+                                size_estimate: "High Resolution".to_string(),
+                            });
+                        }
+                    }
+                    
+                    if !options.is_empty() {
+                        return Some(options);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    
+    None
+}
+
 #[tauri::command]
 pub async fn download_cover_from_url(
     group_id: String,
@@ -109,12 +187,27 @@ pub async fn download_cover_from_url(
 ) -> Result<CoverResult, String> {
     println!("📥 Downloading cover from: {}", url);
     
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    
     match client.get(&url).send().await {
         Ok(response) if response.status().is_success() => {
             if let Ok(bytes) = response.bytes().await {
                 let data = bytes.to_vec();
-                let mime_type = "image/jpeg".to_string();
+                
+                // Determine mime type from magic bytes
+                let mime_type = if data.len() >= 8 
+                    && data[0] == 0x89 
+                    && data[1] == 0x50 
+                    && data[2] == 0x4E 
+                    && data[3] == 0x47 
+                {
+                    "image/png".to_string()
+                } else {
+                    "image/jpeg".to_string()
+                };
                 
                 let cache_key = format!("cover_{}", group_id);
                 crate::cache::set(&cache_key, &(data, mime_type))
@@ -128,7 +221,8 @@ pub async fn download_cover_from_url(
                 Err("Failed to read image data".to_string())
             }
         }
-        _ => Err("Failed to download image".to_string()),
+        Ok(response) => Err(format!("HTTP error: {}", response.status())),
+        Err(e) => Err(format!("Request failed: {}", e)),
     }
 }
 
@@ -163,121 +257,4 @@ pub async fn set_cover_from_file(
         success: true,
         message: "Cover uploaded successfully".to_string(),
     })
-}
-
-async fn try_open_library_options(isbn: &str) -> Option<CoverOption> {
-    let url = format!("https://covers.openlibrary.org/b/isbn/{}-L.jpg", isbn);
-    
-    // Try to fetch and get dimensions
-    let client = reqwest::Client::new();
-    if let Ok(response) = client.head(&url).send().await {
-        if response.status().is_success() {
-            return Some(CoverOption {
-                url,
-                source: "Open Library".to_string(),
-                width: 0,
-                height: 0,
-                size_estimate: "Large (High Quality)".to_string(),
-            });
-        }
-    }
-    
-    None
-}
-
-async fn try_itunes_options(title: &str, author: &str) -> Option<Vec<CoverOption>> {
-    let search_query = format!("{} {}", title, author);
-    let search_url = format!(
-        "https://itunes.apple.com/search?term={}&media=audiobook&entity=audiobook&limit=3",
-        urlencoding::encode(&search_query)
-    );
-    
-    let client = reqwest::Client::new();
-    match client.get(&search_url).send().await {
-        Ok(response) if response.status().is_success() => {
-            if let Ok(json) = response.json::<serde_json::Value>().await {
-                if let Some(results) = json["results"].as_array() {
-                    let mut options = Vec::new();
-                    
-                    for result in results.iter().take(3) {
-                        if let Some(artwork_url) = result["artworkUrl100"].as_str() {
-                            let high_res_url = artwork_url
-                                .replace("100x100", "2048x2048")
-                                .replace("100x100bb", "2048x2048bb");
-                            
-                            options.push(CoverOption {
-                                url: high_res_url,
-                                source: "iTunes/Apple Books".to_string(),
-                                width: 2048,
-                                height: 2048,
-                                size_estimate: "High Resolution".to_string(),
-                            });
-                        }
-                    }
-                    
-                    if !options.is_empty() {
-                        return Some(options);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    
-    None
-}
-
-async fn try_open_library_search(title: &str, author: &str) -> Option<Vec<CoverOption>> {
-    let search_query = format!("{} {}", title, author);
-    let search_url = format!(
-        "https://openlibrary.org/search.json?q={}&limit=3",
-        urlencoding::encode(&search_query)
-    );
-    
-    let client = reqwest::Client::new();
-    match client.get(&search_url).send().await {
-        Ok(response) if response.status().is_success() => {
-            if let Ok(json) = response.json::<serde_json::Value>().await {
-                if let Some(docs) = json["docs"].as_array() {
-                    let mut options = Vec::new();
-                    
-                    for doc in docs.iter().take(3) {
-                        if let Some(cover_id) = doc["cover_i"].as_i64() {
-                            options.push(CoverOption {
-                                url: format!("https://covers.openlibrary.org/b/id/{}-L.jpg", cover_id),
-                                source: "Open Library".to_string(),
-                                width: 0,
-                                height: 0,
-                                size_estimate: "Large".to_string(),
-                            });
-                        }
-                    }
-                    
-                    if !options.is_empty() {
-                        return Some(options);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    
-    None
-}
-
-fn get_image_dimensions(data: &[u8]) -> (Option<u32>, Option<u32>) {
-    if data.len() < 24 {
-        return (None, None);
-    }
-    
-    // Check for PNG
-    if &data[0..8] == b"\x89PNG\r\n\x1a\n" {
-        if data.len() >= 24 {
-            let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
-            let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
-            return (Some(width), Some(height));
-        }
-    }
-    
-    (None, None)
 }
