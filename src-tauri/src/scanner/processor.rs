@@ -84,7 +84,7 @@ pub async fn process_all_groups(
 ) -> Result<Vec<BookGroup>, Box<dyn std::error::Error + Send + Sync>> {
     
     // ✅ 10 workers - balanced for speed vs rate limiting on APIs
-    let max_workers = 10;
+    let max_workers = 50;
     let total = groups.len();
     
     println!("⚡ TURBO SCAN: {} books, {} workers (parallel metadata, then covers)", total, max_workers);
