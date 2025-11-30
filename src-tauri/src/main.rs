@@ -37,6 +37,7 @@ fn main() {
             commands::tags::inspect_file_tags,
             commands::rename::preview_rename,
             commands::rename::rename_files,
+            commands::rename::get_rename_templates,
             commands::abs::test_abs_connection,
             commands::abs::push_abs_updates,
             commands::abs::force_abs_rescan,
@@ -52,7 +53,10 @@ fn main() {
             commands::covers::download_cover_from_url,
             commands::covers::set_cover_from_file,
             commands::abs::clear_abs_library_cache,
-
+            commands::export::export_to_csv,
+            commands::export::export_to_json,
+            commands::export::import_from_csv,
+            commands::export::import_from_json,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
