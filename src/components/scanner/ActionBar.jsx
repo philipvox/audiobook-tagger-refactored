@@ -1,13 +1,15 @@
-import { CheckCircle, RefreshCw, Save, FileType, UploadCloud } from 'lucide-react';
+import { CheckCircle, RefreshCw, Save, FileType, UploadCloud, Edit3 } from 'lucide-react';
 
-export function ActionBar({ 
-  selectedFiles, 
+export function ActionBar({
+  selectedFiles,
   groups,
   fileStatuses,
+  selectedGroupCount = 0,
   onRescan,
   onWrite,
   onRename,
   onPush,
+  onBulkEdit,
   onClearSelection,
   writing,
   pushing,
@@ -96,13 +98,23 @@ export function ActionBar({
               )}
               
               {selectedGroups.size === 1 && (
-                <button 
-                  onClick={onRename} 
-                  disabled={writing} 
+                <button
+                  onClick={onRename}
+                  disabled={writing}
                   className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors font-medium flex items-center gap-2"
                 >
                   <FileType className="w-4 h-4" />
                   Rename {selectedFiles.size === 1 ? 'File' : 'Files'}
+                </button>
+              )}
+
+              {selectedGroupCount > 1 && onBulkEdit && (
+                <button
+                  onClick={onBulkEdit}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors font-medium flex items-center gap-2"
+                >
+                  <Edit3 className="w-4 h-4" />
+                  Bulk Edit {selectedGroupCount} Books
                 </button>
               )}
             </div>

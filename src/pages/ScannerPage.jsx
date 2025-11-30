@@ -4,6 +4,7 @@ import { MetadataPanel } from '../components/scanner/MetadataPanel';
 import { ActionBar } from '../components/scanner/ActionBar';
 import { ProgressBar } from '../components/scanner/ProgressBar';
 import { EditMetadataModal } from '../components/EditMetadataModal';
+import { BulkEditModal } from '../components/BulkEditModal';
 import { RenamePreviewModal } from '../components/RenamePreviewModal';
 import { useScan } from '../hooks/useScan';
 import { useFileSelection } from '../hooks/useFileSelection';
@@ -18,6 +19,7 @@ export function ScannerPage({ onActionsReady }) {
   const [showEditModal, setShowEditModal] = useState(false);
   const [editingGroup, setEditingGroup] = useState(null);
   const [showRenameModal, setShowRenameModal] = useState(false);
+  const [showBulkEditModal, setShowBulkEditModal] = useState(false);
   
   const {
     scanning,
@@ -205,6 +207,98 @@ export function ScannerPage({ onActionsReady }) {
     setEditingGroup(null);
   };
 
+  // Get selected groups for bulk edit
+  const getSelectedGroups = () => {
+    return groups.filter(g => selectedGroupIds.has(g.id));
+  };
+
+  // Handle bulk edit save
+  const handleBulkSave = (updates) => {
+    if (selectedGroupIds.size === 0) return;
+
+    setGroups(prevGroups =>
+      prevGroups.map(group => {
+        if (!selectedGroupIds.has(group.id)) return group;
+
+        // Merge updates into metadata
+        const newMetadata = {
+          ...group.metadata,
+          ...updates,
+          // Mark source as manual for bulk edited fields
+          sources: {
+            ...group.metadata.sources,
+            ...(updates.author && { author: 'manual' }),
+            ...(updates.narrator && { narrator: 'manual' }),
+            ...(updates.genres && { genres: 'manual' }),
+            ...(updates.publisher && { publisher: 'manual' }),
+            ...(updates.language && { language: 'manual' }),
+            ...(updates.year && { year: 'manual' }),
+            ...(updates.series && { series: 'manual' }),
+          },
+        };
+
+        // Update file changes
+        const updatedFiles = group.files.map(file => {
+          const changes = { ...file.changes };
+
+          if (updates.author) {
+            const oldAuthor = file.changes.author?.old || '';
+            if (oldAuthor !== updates.author) {
+              changes.author = { old: oldAuthor, new: updates.author };
+            }
+          }
+
+          if (updates.narrator) {
+            const oldNarrator = file.changes.narrator?.old || '';
+            const newNarratorValue = `Narrated by ${updates.narrator}`;
+            if (oldNarrator !== newNarratorValue) {
+              changes.narrator = { old: oldNarrator, new: newNarratorValue };
+            }
+          }
+
+          if (updates.genres) {
+            const oldGenre = file.changes.genre?.old || '';
+            const newGenre = updates.genres.join(', ');
+            if (oldGenre !== newGenre) {
+              changes.genre = { old: oldGenre, new: newGenre };
+            }
+          }
+
+          if (updates.series !== undefined) {
+            changes.series = { old: '', new: updates.series || '' };
+          }
+
+          if (updates.sequence) {
+            changes.sequence = { old: '', new: updates.sequence };
+          }
+
+          if (updates.year) {
+            changes.year = { old: file.changes.year?.old || '', new: updates.year };
+          }
+
+          if (updates.publisher) {
+            changes.publisher = { old: '', new: updates.publisher };
+          }
+
+          return {
+            ...file,
+            changes,
+            status: Object.keys(changes).length > 0 ? 'changed' : 'unchanged'
+          };
+        });
+
+        return {
+          ...group,
+          metadata: newMetadata,
+          files: updatedFiles,
+          total_changes: updatedFiles.filter(f => Object.keys(f.changes).length > 0).length
+        };
+      })
+    );
+
+    console.log(`✅ Bulk updated ${selectedGroupIds.size} books`);
+  };
+
   // ✅ SIMPLIFIED - No popups, just write
   const handleWriteClick = async () => {
     if (selectedFiles.size === 0) {
@@ -292,10 +386,12 @@ export function ScannerPage({ onActionsReady }) {
         selectedFiles={selectedFiles}
         groups={groups}
         fileStatuses={fileStatuses}
+        selectedGroupCount={selectedGroupIds.size}
         onRescan={handleRescanClick}
         onWrite={handleWriteClick}
         onRename={handleRenameClick}
         onPush={handlePushClick}
+        onBulkEdit={() => setShowBulkEditModal(true)}
         onClearSelection={handleClearSelection}
         writing={writing}
         pushing={pushing}
@@ -349,7 +445,7 @@ export function ScannerPage({ onActionsReady }) {
         />
       )}
 
-      {/* Modals - only edit and rename remain */}
+      {/* Modals */}
       {showEditModal && editingGroup && (
         <EditMetadataModal
           isOpen={showEditModal}
@@ -360,6 +456,15 @@ export function ScannerPage({ onActionsReady }) {
           onSave={handleSaveMetadata}
           metadata={editingGroup.metadata}
           groupName={editingGroup.group_name}
+        />
+      )}
+
+      {showBulkEditModal && selectedGroupIds.size > 0 && (
+        <BulkEditModal
+          isOpen={showBulkEditModal}
+          onClose={() => setShowBulkEditModal(false)}
+          onSave={handleBulkSave}
+          selectedGroups={getSelectedGroups()}
         />
       )}
 

@@ -1,7 +1,37 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Book, Edit, Upload, RefreshCw, Download, X, Image as ImageIcon } from 'lucide-react';
+import { Book, Edit, Upload, RefreshCw, Download, X, Image as ImageIcon, Database, Folder, Bot, FileAudio, Globe, Music } from 'lucide-react';
+
+// Source badge configuration
+const SOURCE_CONFIG = {
+  audible: { label: 'Audible', color: 'bg-orange-100 text-orange-700 border-orange-200', icon: Music },
+  googlebooks: { label: 'Google', color: 'bg-blue-100 text-blue-700 border-blue-200', icon: Globe },
+  itunes: { label: 'iTunes', color: 'bg-pink-100 text-pink-700 border-pink-200', icon: Music },
+  gpt: { label: 'AI', color: 'bg-purple-100 text-purple-700 border-purple-200', icon: Bot },
+  filetag: { label: 'File', color: 'bg-gray-100 text-gray-700 border-gray-200', icon: FileAudio },
+  folder: { label: 'Folder', color: 'bg-green-100 text-green-700 border-green-200', icon: Folder },
+  manual: { label: 'Manual', color: 'bg-teal-100 text-teal-700 border-teal-200', icon: Edit },
+  unknown: { label: '?', color: 'bg-gray-100 text-gray-500 border-gray-200', icon: Database },
+};
+
+// Small badge showing data source
+function SourceBadge({ source }) {
+  if (!source) return null;
+
+  const config = SOURCE_CONFIG[source.toLowerCase()] || SOURCE_CONFIG.unknown;
+  const Icon = config.icon;
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded border ${config.color}`}
+      title={`Source: ${config.label}`}
+    >
+      <Icon className="w-2.5 h-2.5" />
+      {config.label}
+    </span>
+  );
+}
 
 export function MetadataPanel({ group, onEdit }) {
   const [coverData, setCoverData] = useState(null);
@@ -162,11 +192,17 @@ export function MetadataPanel({ group, onEdit }) {
           <div className="px-8 pt-8 pb-6 border-b border-gray-100 bg-gradient-to-r from-blue-50 to-indigo-50">
             <div className="flex items-start justify-between">
               <div className="flex-1">
-                <h1 className="text-4xl font-bold text-gray-900 leading-tight mb-2">
-                  {metadata.title || 'Untitled'}
-                </h1>
+                <div className="flex items-center gap-2 mb-2">
+                  <h1 className="text-4xl font-bold text-gray-900 leading-tight">
+                    {metadata.title || 'Untitled'}
+                  </h1>
+                  <SourceBadge source={metadata.sources?.title} />
+                </div>
                 {metadata.subtitle && (
-                  <p className="text-xl text-gray-600 mt-2">{metadata.subtitle}</p>
+                  <div className="flex items-center gap-2 mt-2">
+                    <p className="text-xl text-gray-600">{metadata.subtitle}</p>
+                    <SourceBadge source={metadata.sources?.subtitle} />
+                  </div>
                 )}
               </div>
               {onEdit && (
@@ -187,14 +223,18 @@ export function MetadataPanel({ group, onEdit }) {
             <div className="lg:col-span-2 space-y-8">
               {/* Author and Year */}
               <div className="flex flex-wrap items-center gap-4 text-base">
-                <div>
+                <div className="flex items-center gap-1.5">
                   <span className="text-gray-500">by </span>
                   <span className="font-semibold text-gray-900">{metadata.author || 'Unknown Author'}</span>
+                  <SourceBadge source={metadata.sources?.author} />
                 </div>
                 {metadata.year && (
-                  <span className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm font-medium">
-                    {metadata.year}
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm font-medium">
+                      {metadata.year}
+                    </span>
+                    <SourceBadge source={metadata.sources?.year} />
+                  </div>
                 )}
                 {group && (
                   <span className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-sm font-medium">
@@ -206,7 +246,10 @@ export function MetadataPanel({ group, onEdit }) {
               {/* Series */}
               {metadata.series && (
                 <div className="space-y-3">
-                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Series</div>
+                  <div className="flex items-center gap-2">
+                    <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Series</div>
+                    <SourceBadge source={metadata.sources?.series} />
+                  </div>
                   <div className="inline-flex items-center gap-2 px-5 py-3 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl border border-indigo-200">
                     <Book className="w-5 h-5 text-indigo-600" />
                     <span className="font-semibold text-gray-900 text-lg">{metadata.series}</span>
@@ -222,13 +265,16 @@ export function MetadataPanel({ group, onEdit }) {
               {/* Narrator(s) - Support multiple narrators */}
               {(metadata.narrators?.length > 0 || metadata.narrator) && (
                 <div className="space-y-3">
-                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-                    Narrated by
-                    {metadata.narrators?.length > 1 && (
-                      <span className="ml-2 px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded text-[10px]">
-                        {metadata.narrators.length}
-                      </span>
-                    )}
+                  <div className="flex items-center gap-2">
+                    <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                      Narrated by
+                      {metadata.narrators?.length > 1 && (
+                        <span className="ml-2 px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded text-[10px]">
+                          {metadata.narrators.length}
+                        </span>
+                      )}
+                    </div>
+                    <SourceBadge source={metadata.sources?.narrator} />
                   </div>
                   <p className="text-lg font-medium text-gray-900">
                     {metadata.narrators?.length > 0
@@ -241,7 +287,10 @@ export function MetadataPanel({ group, onEdit }) {
               {/* Genres */}
               {metadata.genres && metadata.genres.length > 0 && (
                 <div className="space-y-3">
-                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Genres</div>
+                  <div className="flex items-center gap-2">
+                    <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Genres</div>
+                    <SourceBadge source={metadata.sources?.genres} />
+                  </div>
                   <div className="flex flex-wrap gap-2">
                     {metadata.genres.map((genre, idx) => (
                       <span key={idx} className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-gray-800 to-gray-900 text-white text-sm font-semibold rounded-full shadow-sm hover:shadow-md transition-shadow">
@@ -255,7 +304,10 @@ export function MetadataPanel({ group, onEdit }) {
               {/* Description */}
               {metadata.description && (
                 <div className="space-y-3">
-                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">About</div>
+                  <div className="flex items-center gap-2">
+                    <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">About</div>
+                    <SourceBadge source={metadata.sources?.description} />
+                  </div>
                   <div className="prose prose-sm max-w-none">
                     <p className="text-gray-700 leading-relaxed whitespace-pre-wrap">
                       {metadata.description}
@@ -270,31 +322,46 @@ export function MetadataPanel({ group, onEdit }) {
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-6">
                     {metadata.publisher && (
                       <div className="space-y-1">
-                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Publisher</div>
+                        <div className="flex items-center gap-1.5">
+                          <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Publisher</div>
+                          <SourceBadge source={metadata.sources?.publisher} />
+                        </div>
                         <div className="text-gray-900 font-medium">{metadata.publisher}</div>
                       </div>
                     )}
                     {metadata.isbn && (
                       <div className="space-y-1">
-                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">ISBN</div>
+                        <div className="flex items-center gap-1.5">
+                          <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">ISBN</div>
+                          <SourceBadge source={metadata.sources?.isbn} />
+                        </div>
                         <div className="text-gray-900 font-mono text-sm">{metadata.isbn}</div>
                       </div>
                     )}
                     {metadata.asin && (
                       <div className="space-y-1">
-                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">ASIN</div>
+                        <div className="flex items-center gap-1.5">
+                          <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">ASIN</div>
+                          <SourceBadge source={metadata.sources?.asin} />
+                        </div>
                         <div className="text-gray-900 font-mono text-sm">{metadata.asin}</div>
                       </div>
                     )}
                     {metadata.language && (
                       <div className="space-y-1">
-                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Language</div>
+                        <div className="flex items-center gap-1.5">
+                          <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Language</div>
+                          <SourceBadge source={metadata.sources?.language} />
+                        </div>
                         <div className="text-gray-900 font-medium uppercase">{metadata.language}</div>
                       </div>
                     )}
                     {metadata.runtime_minutes && (
                       <div className="space-y-1">
-                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Runtime</div>
+                        <div className="flex items-center gap-1.5">
+                          <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Runtime</div>
+                          <SourceBadge source={metadata.sources?.runtime} />
+                        </div>
                         <div className="text-gray-900 font-medium">
                           {Math.floor(metadata.runtime_minutes / 60)}h {metadata.runtime_minutes % 60}m
                         </div>
