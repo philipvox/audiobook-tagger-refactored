@@ -571,6 +571,144 @@ pub async fn fetch_openlibrary_cover(isbn: &str) -> Option<CoverCandidate> {
     Some(candidate)
 }
 
+/// Fetch cover from LibraryThing using ISBN and dev key
+/// URL: https://covers.librarything.com/devkey/{KEY}/large/isbn/{ISBN}
+/// Requires free developer key from LibraryThing
+pub async fn fetch_librarything_cover(isbn: &str, dev_key: &str) -> Option<CoverCandidate> {
+    println!("   📚 Trying LibraryThing cover (ISBN: {})...", isbn);
+
+    if dev_key.is_empty() {
+        println!("   ⚠️  No LibraryThing dev key configured");
+        return None;
+    }
+
+    // Clean ISBN
+    let clean_isbn = isbn.replace(['-', ' '], "");
+    if clean_isbn.is_empty() {
+        return None;
+    }
+
+    // Try large size
+    let url = format!(
+        "https://covers.librarything.com/devkey/{}/large/isbn/{}",
+        dev_key, clean_isbn
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    // HEAD request to check if image exists
+    let response = client.head(&url).send().await.ok()?;
+
+    if !response.status().is_success() {
+        println!("   ⚠️  No LibraryThing cover found");
+        return None;
+    }
+
+    // Check content-length - LibraryThing returns a small placeholder for missing covers
+    let content_length = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    if content_length < 1000 {
+        println!("   ⚠️  LibraryThing returned placeholder image");
+        return None;
+    }
+
+    let mut candidate = CoverCandidate::new(url, CoverSource::LibraryThing)
+        .with_dimensions(500, 750); // Approximate large size
+    candidate.file_size = content_length;
+    candidate.calculate_score();
+
+    println!("   ✅ LibraryThing cover found");
+    Some(candidate)
+}
+
+// ============================================================================
+// COVER CACHING BY ISBN/ASIN
+// ============================================================================
+
+/// Cache key for cover by ISBN
+pub fn cover_cache_key_isbn(isbn: &str) -> String {
+    let clean = isbn.replace(['-', ' '], "");
+    format!("cover_isbn_{}", clean)
+}
+
+/// Cache key for cover by ASIN
+pub fn cover_cache_key_asin(asin: &str) -> String {
+    format!("cover_asin_{}", asin)
+}
+
+/// Get cached cover by ISBN
+pub fn get_cached_cover_by_isbn(isbn: &str) -> Option<(Vec<u8>, String)> {
+    let key = cover_cache_key_isbn(isbn);
+    crate::cache::get::<(Vec<u8>, String)>(&key)
+}
+
+/// Get cached cover by ASIN
+pub fn get_cached_cover_by_asin(asin: &str) -> Option<(Vec<u8>, String)> {
+    let key = cover_cache_key_asin(asin);
+    crate::cache::get::<(Vec<u8>, String)>(&key)
+}
+
+/// Cache cover by ISBN
+pub fn cache_cover_by_isbn(isbn: &str, data: &[u8], mime_type: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let key = cover_cache_key_isbn(isbn);
+    crate::cache::set(&key, &(data.to_vec(), mime_type.to_string()))
+}
+
+/// Cache cover by ASIN
+pub fn cache_cover_by_asin(asin: &str, data: &[u8], mime_type: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let key = cover_cache_key_asin(asin);
+    crate::cache::set(&key, &(data.to_vec(), mime_type.to_string()))
+}
+
+/// Try to get cover from cache first, then download if not found
+pub async fn get_or_download_cover(
+    title: &str,
+    author: &str,
+    isbn: Option<&str>,
+    asin: Option<&str>,
+) -> Option<(Vec<u8>, String)> {
+    // Try cache first
+    if let Some(isbn_str) = isbn {
+        if let Some(cached) = get_cached_cover_by_isbn(isbn_str) {
+            println!("   ✅ Cover found in cache (ISBN: {})", isbn_str);
+            return Some(cached);
+        }
+    }
+    if let Some(asin_str) = asin {
+        if let Some(cached) = get_cached_cover_by_asin(asin_str) {
+            println!("   ✅ Cover found in cache (ASIN: {})", asin_str);
+            return Some(cached);
+        }
+    }
+
+    // Search for cover
+    let result = search_all_cover_sources(title, author, isbn, asin).await;
+
+    if let Some(best) = result.best_candidate {
+        // Download the best cover
+        if let Ok((data, mime, _w, _h)) = download_and_validate_cover(&best.url).await {
+            // Cache it
+            if let Some(isbn_str) = isbn {
+                let _ = cache_cover_by_isbn(isbn_str, &data, &mime);
+            }
+            if let Some(asin_str) = asin {
+                let _ = cache_cover_by_asin(asin_str, &data, &mime);
+            }
+            return Some((data, mime));
+        }
+    }
+
+    None
+}
+
 /// Build Amazon direct image URL from ASIN
 /// URL patterns: https://images-na.ssl-images-amazon.com/images/P/{ASIN}.01._SCLZZZZZZZ_.jpg
 /// Sizes: SL500 (500px), SL1500 (1500px), SL2400 (2400px)
@@ -701,12 +839,28 @@ pub async fn search_all_cover_sources(
     isbn: Option<&str>,
     asin: Option<&str>,
 ) -> CoverSearchResult {
+    // Try to load LibraryThing dev key from config
+    let librarything_key = crate::config::load_config()
+        .ok()
+        .and_then(|c| c.librarything_dev_key);
+
+    search_all_cover_sources_with_key(title, author, isbn, asin, librarything_key.as_deref()).await
+}
+
+/// Multi-source cover search with explicit LibraryThing key
+pub async fn search_all_cover_sources_with_key(
+    title: &str,
+    author: &str,
+    isbn: Option<&str>,
+    asin: Option<&str>,
+    librarything_key: Option<&str>,
+) -> CoverSearchResult {
     println!("   🖼️  Searching all cover sources...");
 
     let mut candidates = Vec::new();
 
     // Use tokio::join! for parallel fetching
-    let (itunes_result, audible_result, google_result, openlibrary_result) = tokio::join!(
+    let (itunes_result, audible_result, google_result, openlibrary_result, librarything_result) = tokio::join!(
         fetch_itunes_candidates(title, author),
         async {
             if let Some(asin_str) = asin {
@@ -722,6 +876,13 @@ pub async fn search_all_cover_sources(
             } else {
                 None
             }
+        },
+        async {
+            if let (Some(isbn_str), Some(key)) = (isbn, librarything_key) {
+                fetch_librarything_cover(isbn_str, key).await
+            } else {
+                None
+            }
         }
     );
 
@@ -733,6 +894,9 @@ pub async fn search_all_cover_sources(
     }
     if let Some(openlibrary) = openlibrary_result {
         candidates.push(openlibrary);
+    }
+    if let Some(librarything) = librarything_result {
+        candidates.push(librarything);
     }
 
     // Add Amazon direct URLs if we have ASIN
