@@ -179,7 +179,7 @@ pub async fn process_all_groups(
                 result
             }
         })
-        .buffer_unordered(10)
+        .buffer_unordered(20)  // Increased concurrency for better throughput
         .filter_map(|r| async { r.ok() })
         .collect()
         .await;
@@ -306,15 +306,27 @@ async fn process_book_group(
     };
     
     let needs_gpt_enrichment = google_data.is_none() && audible_data.is_none();
-    
+
+    // PERFORMANCE: Check if Audible data is complete enough to skip GPT entirely
+    let audible_is_complete = audible_data.as_ref().map(|d| {
+        d.title.is_some() &&
+        !d.authors.is_empty() &&
+        !d.narrators.is_empty() &&
+        d.description.as_ref().map(|desc| desc.len() > 50).unwrap_or(false)
+    }).unwrap_or(false);
+
     if let Some(ref flag) = cancel_flag {
         if flag.load(Ordering::Relaxed) {
             return Ok(group);
         }
     }
-    
+
     // Merge metadata with IMPROVED series handling
-    let mut final_metadata = if needs_gpt_enrichment {
+    let mut final_metadata = if audible_is_complete && config.openai_api_key.is_none() {
+        // FAST PATH: Audible has complete data and no GPT key, skip entirely
+        println!("   ⚡ Fast path: Complete Audible data, no GPT needed");
+        create_metadata_from_audible(&extracted_title, &extracted_author, audible_data.unwrap(), google_data)
+    } else if needs_gpt_enrichment {
         enrich_with_gpt(
             &group.group_name,
             &extracted_title,
@@ -785,7 +797,7 @@ JSON:"#,
 // SUPPORTING FUNCTIONS (mostly unchanged)
 // ============================================================================
 
-#[derive(serde::Deserialize, Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 struct AudibleMetadata {
     asin: Option<String>,
     title: Option<String>,
@@ -803,12 +815,13 @@ struct AudibleMetadata {
     abridged: Option<bool>,
 }
 
-#[derive(serde::Deserialize, Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 struct AudibleSeries {
     name: String,
     position: Option<String>,
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 struct GoogleBookData {
     subtitle: Option<String>,
     description: Option<String>,
@@ -971,6 +984,147 @@ fn fallback_metadata(
         publish_date: audible_data.as_ref().and_then(|d| d.release_date.clone()),
         sources: Some(sources),
     }
+}
+
+/// PERFORMANCE: Create metadata directly from Audible without GPT
+/// Used when Audible data is complete enough to skip GPT entirely
+fn create_metadata_from_audible(
+    extracted_title: &str,
+    extracted_author: &str,
+    audible_data: AudibleMetadata,
+    google_data: Option<GoogleBookData>,
+) -> BookMetadata {
+    let mut sources = MetadataSources::default();
+
+    // Title from Audible or extracted
+    let title = audible_data.title.clone().unwrap_or_else(|| extracted_title.to_string());
+    sources.title = Some(MetadataSource::Audible);
+
+    // Author from Audible
+    let author = audible_data.authors.first()
+        .cloned()
+        .unwrap_or_else(|| extracted_author.to_string());
+    let authors = if !audible_data.authors.is_empty() {
+        sources.author = Some(MetadataSource::Audible);
+        audible_data.authors.clone()
+    } else {
+        split_authors(extracted_author)
+    };
+
+    // Narrators from Audible
+    let narrators = audible_data.narrators.clone();
+    let narrator = narrators.first().cloned();
+    if !narrators.is_empty() {
+        sources.narrator = Some(MetadataSource::Audible);
+    }
+
+    // Series from Audible
+    let (series, sequence) = audible_data.series.first()
+        .map(|s| {
+            if is_valid_series(&s.name, &title) {
+                sources.series = Some(MetadataSource::Audible);
+                sources.sequence = Some(MetadataSource::Audible);
+                (Some(normalize_series_name(&s.name)), s.position.clone())
+            } else {
+                (None, None)
+            }
+        })
+        .unwrap_or((None, None));
+
+    // Year from Audible release date
+    let year = audible_data.release_date.as_ref()
+        .and_then(|date| date.split('-').next().map(|s| s.to_string()));
+    if year.is_some() {
+        sources.year = Some(MetadataSource::Audible);
+    }
+
+    // Description from Audible
+    let description = audible_data.description.clone();
+    if description.is_some() {
+        sources.description = Some(MetadataSource::Audible);
+    }
+
+    // Publisher from Audible or Google
+    let publisher = audible_data.publisher.clone()
+        .map(|p| { sources.publisher = Some(MetadataSource::Audible); p })
+        .or_else(|| google_data.as_ref().and_then(|d| {
+            d.publisher.clone().map(|p| { sources.publisher = Some(MetadataSource::GoogleBooks); p })
+        }));
+
+    // Genres from Google (Audible doesn't have genres)
+    let mut genres = google_data.as_ref()
+        .map(|d| {
+            if !d.genres.is_empty() {
+                sources.genres = Some(MetadataSource::GoogleBooks);
+            }
+            d.genres.clone()
+        })
+        .unwrap_or_default();
+
+    // Enforce age-specific children's genres
+    if !genres.is_empty() {
+        crate::genres::enforce_children_age_genres(
+            &mut genres,
+            &title,
+            series.as_deref(),
+            authors.first().map(|s| s.as_str()),
+        );
+    }
+
+    // ISBN from Google
+    let isbn = google_data.as_ref().and_then(|d| {
+        if d.isbn.is_some() {
+            sources.isbn = Some(MetadataSource::GoogleBooks);
+        }
+        d.isbn.clone()
+    });
+
+    // ASIN from Audible
+    let asin = audible_data.asin.clone();
+    if asin.is_some() {
+        sources.asin = Some(MetadataSource::Audible);
+    }
+
+    // Language and runtime from Audible
+    if audible_data.language.is_some() {
+        sources.language = Some(MetadataSource::Audible);
+    }
+    if audible_data.runtime_minutes.is_some() {
+        sources.runtime = Some(MetadataSource::Audible);
+    }
+
+    // Subtitle from Google
+    let subtitle = google_data.as_ref().and_then(|d| {
+        if d.subtitle.is_some() {
+            sources.subtitle = Some(MetadataSource::GoogleBooks);
+        }
+        d.subtitle.clone()
+    });
+
+    normalize_metadata(BookMetadata {
+        title,
+        subtitle,
+        author,
+        narrator,
+        series,
+        sequence,
+        genres,
+        publisher,
+        year,
+        description,
+        isbn,
+        asin,
+        cover_mime: None,
+        cover_url: None,
+        authors,
+        narrators,
+        language: audible_data.language,
+        abridged: audible_data.abridged,
+        runtime_minutes: audible_data.runtime_minutes,
+        explicit: None,
+        publish_date: audible_data.release_date,
+        sources: Some(sources),
+    })
 }
 
 /// Split author string into multiple authors
@@ -1472,18 +1626,25 @@ async fn fetch_google_books_data(
     author: &str,
     api_key: &str,
 ) -> Result<Option<GoogleBookData>, Box<dyn std::error::Error + Send + Sync>> {
+    // PERFORMANCE: Cache Google Books lookups by title+author
+    let cache_key = format!("google_{}_{}", title.to_lowercase().replace(' ', "_"), author.to_lowercase().replace(' ', "_"));
+    if let Some(cached) = cache::get::<Option<GoogleBookData>>(&cache_key) {
+        println!("   ⚡ Google Books cache hit for '{}'", title);
+        return Ok(cached);
+    }
+
     let query = format!("intitle:{} inauthor:{}", title, author);
     let encoded_query = query
         .replace(' ', "+")
         .replace('&', "%26")
         .replace('\'', "%27")
         .replace(':', "%3A");
-    
+
     let url = format!(
         "https://www.googleapis.com/books/v1/volumes?q={}&key={}&maxResults=1",
         encoded_query, api_key
     );
-    
+
     let client = reqwest::Client::new();
     let response = client.get(&url).send().await?;
     
@@ -1499,8 +1660,8 @@ async fn fetch_google_books_data(
     };
     
     let volume_info = &item["volumeInfo"];
-    
-    Ok(Some(GoogleBookData {
+
+    let result = GoogleBookData {
         subtitle: volume_info["subtitle"].as_str().map(|s| s.to_string()),
         description: volume_info["description"].as_str().map(|s| s.to_string()),
         publisher: volume_info["publisher"].as_str().map(|s| s.to_string()),
@@ -1518,10 +1679,21 @@ async fn fetch_google_books_data(
                     .or_else(|| arr.iter().find(|id| id["type"].as_str() == Some("ISBN_10")))
                     .and_then(|id| id["identifier"].as_str().map(|s| s.to_string()))
             }),
-    }))
+    };
+
+    // Cache the result for future lookups
+    let _ = cache::set(&cache_key, &Some(result.clone()));
+    Ok(Some(result))
 }
 
 async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMetadata> {
+    // PERFORMANCE: Cache Audible lookups by title+author
+    let cache_key = format!("audible_{}_{}", title.to_lowercase().replace(' ', "_"), author.to_lowercase().replace(' ', "_"));
+    if let Some(cached) = cache::get::<Option<AudibleMetadata>>(&cache_key) {
+        println!("   ⚡ Audible cache hit for '{}'", title);
+        return cached;
+    }
+
     let search_query = format!("{} {}", title, author);
     let encoded_query = search_query
         .replace(' ', "+")
@@ -1623,7 +1795,7 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
         vec![]
     };
 
-    Some(AudibleMetadata {
+    let result = AudibleMetadata {
         asin: Some(asin),
         title: extracted_title,
         authors: extracted_authors,
@@ -1635,7 +1807,11 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
         language,
         runtime_minutes,
         abridged,
-    })
+    };
+
+    // Cache the result for future lookups
+    let _ = cache::set(&cache_key, &Some(result.clone()));
+    Some(result)
 }
 
 /// Extract description from Audible page JSON-LD or HTML
@@ -1789,11 +1965,58 @@ fn extract_book_number_from_folder(folder: &str) -> Option<String> {
     }
 }
 
+/// Check if file tags are already clean (no GPT extraction needed)
+fn tags_are_clean(title: Option<&str>, artist: Option<&str>) -> bool {
+    let title = match title {
+        Some(t) if !t.is_empty() => t.to_lowercase(),
+        _ => return false,
+    };
+
+    let artist = match artist {
+        Some(a) if !a.is_empty() => a.to_lowercase(),
+        _ => return false,
+    };
+
+    // Reject generic/track-like titles
+    let bad_patterns = [
+        "track", "chapter", "part 0", "part 1", "part 2", "part 3",
+        "disc ", "cd ", "untitled", "unknown", "audio", ".mp3", ".m4b"
+    ];
+
+    for pattern in bad_patterns {
+        if title.contains(pattern) {
+            return false;
+        }
+    }
+
+    // Reject if title is just numbers
+    if title.chars().all(|c| c.is_numeric() || c.is_whitespace() || c == '-') {
+        return false;
+    }
+
+    // Reject if artist looks like a placeholder
+    if artist == "unknown" || artist == "various" || artist == "artist" {
+        return false;
+    }
+
+    // Must have at least 3 chars and look like real names
+    title.len() >= 3 && artist.len() >= 3
+}
+
 async fn extract_book_info_with_gpt(
     sample_file: &RawFileData,
     folder_name: &str,
     api_key: Option<&str>
 ) -> (String, String) {
+    // PERFORMANCE: Skip GPT if tags are already clean
+    if let (Some(title), Some(artist)) = (&sample_file.tags.title, &sample_file.tags.artist) {
+        let clean_title = title.replace(" - Part 1", "").replace(" - Part 2", "").trim().to_string();
+        if tags_are_clean(Some(&clean_title), Some(artist)) {
+            println!("   ⚡ Fast path: clean tags for '{}'", clean_title);
+            return (clean_title, artist.clone());
+        }
+    }
+
     let api_key = match api_key {
         Some(key) if !key.is_empty() => key,
         _ => {
@@ -1803,7 +2026,7 @@ async fn extract_book_info_with_gpt(
             );
         }
     };
-    
+
     let clean_title = sample_file.tags.title.as_ref()
         .map(|t| t.replace(" - Part 1", "").replace(" - Part 2", "").trim().to_string());
     let clean_artist = sample_file.tags.artist.as_ref().map(|a| a.to_string());
