@@ -14,7 +14,8 @@ mod genre_cache;
 mod file_rename;
 mod tag_inspector;
 mod commands;
-mod cover_art;  // ADD THIS
+mod cover_art;
+mod normalize;  // Text normalization utilities
 
 // use tauri::Manager;
 

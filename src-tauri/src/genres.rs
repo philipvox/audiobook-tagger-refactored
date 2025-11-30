@@ -1,16 +1,121 @@
 use serde::{Serialize, Deserialize};
 use anyhow::Result;
+use std::collections::HashMap;
 
+/// Primary approved genres for audiobook categorization
+/// These are the genres that will be written to file tags
 pub const APPROVED_GENRES: &[&str] = &[
-    "Action", "Adventure", "Anthology", "Arts", "Biography", "Business",
-    "Children's", "Classic", "Collection", "Comedy", "Comics", "Coming of Age",
-    "Cooking", "Crime", "Drama", "Dystopian", "Essays", "Fantasy", "Fiction",
-    "Gardening", "Health", "Historical Fiction", "History", "Horror", "Humor",
-    "LGBTQ+", "Magic", "Mystery", "Non-Fiction", "Paranormal", "Philosophy",
-    "Poetry", "Reference", "Religion", "Romance", "Satire", "Science",
-    "Science Fiction", "Self-Help", "Short Stories", "Social Science", "Sports",
-    "Spirituality", "Thriller", "Time Travel", "Travel", "True Crime", "Young Adult"
+    // Fiction Genres
+    "Action", "Adventure", "Anthology", "Chick Lit", "Classic", "Collection",
+    "Comedy", "Coming of Age", "Contemporary", "Crime", "Drama", "Dystopian",
+    "Erotica", "Family Saga", "Fantasy", "Fiction", "Gothic", "Historical Fiction",
+    "Horror", "Humor", "Legal Thriller", "Literary Fiction", "Magic", "Military",
+    "Mystery", "Mythology", "Paranormal", "Political Thriller", "Post-Apocalyptic",
+    "Psychological Thriller", "Romance", "Satire", "Science Fiction", "Short Stories",
+    "Spy", "Supernatural", "Suspense", "Techno-Thriller", "Thriller", "Time Travel",
+    "Urban Fantasy", "War", "Western", "Women's Fiction",
+
+    // Non-Fiction Genres
+    "Arts", "Autobiography", "Biography", "Business", "Cooking", "Current Events",
+    "Economics", "Education", "Essays", "Gardening", "Health", "History", "Humor",
+    "Journalism", "LGBTQ+", "Memoir", "Music", "Nature", "Non-Fiction", "Parenting",
+    "Philosophy", "Photography", "Poetry", "Politics", "Psychology", "Reference",
+    "Religion", "Science", "Self-Help", "Social Science", "Spirituality", "Sports",
+    "Technology", "Travel", "True Crime",
+
+    // Age Categories
+    "Children's", "Middle Grade", "Teen", "Young Adult", "Adult", "New Adult",
+
+    // Format/Style
+    "Graphic Novel", "Comics", "Manga",
 ];
+
+/// Genre aliases - maps alternative names to approved genres
+fn get_genre_aliases() -> HashMap<&'static str, &'static str> {
+    let mut map = HashMap::new();
+
+    // Common aliases
+    map.insert("sci-fi", "Science Fiction");
+    map.insert("scifi", "Science Fiction");
+    map.insert("sf", "Science Fiction");
+    map.insert("personal development", "Self-Help");
+    map.insert("self improvement", "Self-Help");
+    map.insert("literary fiction", "Literary Fiction");
+    map.insert("literary", "Literary Fiction");
+    map.insert("ya", "Young Adult");
+    map.insert("young-adult", "Young Adult");
+    map.insert("ya fiction", "Young Adult");
+    map.insert("children", "Children's");
+    map.insert("kids", "Children's");
+    map.insert("juvenile", "Children's");
+    map.insert("nonfiction", "Non-Fiction");
+    map.insert("non fiction", "Non-Fiction");
+    map.insert("bio", "Biography");
+    map.insert("autobio", "Autobiography");
+    map.insert("auto-biography", "Autobiography");
+    map.insert("memoir", "Memoir");
+    map.insert("memoirs", "Memoir");
+
+    // Fantasy subgenres
+    map.insert("epic fantasy", "Fantasy");
+    map.insert("high fantasy", "Fantasy");
+    map.insert("dark fantasy", "Fantasy");
+    map.insert("sword and sorcery", "Fantasy");
+    map.insert("fairytale", "Fantasy");
+    map.insert("fairy tale", "Fantasy");
+
+    // Science Fiction subgenres
+    map.insert("space opera", "Science Fiction");
+    map.insert("hard sci-fi", "Science Fiction");
+    map.insert("cyberpunk", "Science Fiction");
+    map.insert("steampunk", "Science Fiction");
+    map.insert("military sci-fi", "Science Fiction");
+
+    // Thriller subgenres
+    map.insert("suspense thriller", "Thriller");
+    map.insert("action thriller", "Thriller");
+    map.insert("medical thriller", "Thriller");
+
+    // Romance subgenres
+    map.insert("romantic suspense", "Romance");
+    map.insert("contemporary romance", "Romance");
+    map.insert("historical romance", "Romance");
+    map.insert("paranormal romance", "Paranormal");
+    map.insert("romantic comedy", "Romance");
+
+    // Mystery subgenres
+    map.insert("cozy mystery", "Mystery");
+    map.insert("detective", "Mystery");
+    map.insert("police procedural", "Mystery");
+    map.insert("whodunit", "Mystery");
+    map.insert("noir", "Mystery");
+
+    // Horror subgenres
+    map.insert("supernatural horror", "Horror");
+    map.insert("psychological horror", "Horror");
+    map.insert("dark fiction", "Horror");
+    map.insert("ghost story", "Horror");
+
+    // Other mappings
+    map.insert("general fiction", "Fiction");
+    map.insert("general", "Fiction");
+    map.insert("audiobook", "Fiction"); // Shouldn't be a genre
+    map.insert("unabridged", "Fiction"); // Shouldn't be a genre
+    map.insert("adult fiction", "Fiction");
+    map.insert("inspirational", "Spirituality");
+    map.insert("faith", "Religion");
+    map.insert("christian", "Religion");
+    map.insert("cooking & food", "Cooking");
+    map.insert("food & drink", "Cooking");
+    map.insert("health & fitness", "Health");
+    map.insert("health & wellness", "Health");
+    map.insert("mind body spirit", "Spirituality");
+    map.insert("new age", "Spirituality");
+    map.insert("true story", "Non-Fiction");
+    map.insert("based on true story", "Non-Fiction");
+
+    map
+}
 
 #[derive(Debug, Deserialize)]
 struct OpenAIResponse {
@@ -148,29 +253,156 @@ JSON:"#,
     }
 }
 
+/// Map a genre string to an approved genre
+///
+/// Uses exact matching first, then tries aliases, then fuzzy matching
 pub fn map_genre_basic(genre: &str) -> Option<String> {
     let normalized = genre.trim().to_lowercase();
+
+    // Skip empty or obviously bad values
+    if normalized.is_empty() ||
+       normalized == "audiobook" ||
+       normalized == "audio book" ||
+       normalized == "unabridged" {
+        return None;
+    }
+
+    // Exact match (case-insensitive)
     for approved in APPROVED_GENRES {
         if approved.to_lowercase() == normalized {
             return Some(approved.to_string());
         }
     }
-    match normalized.as_str() {
-        "personal development" => Some("Self-Help".to_string()),
-        "literary fiction" => Some("Fiction".to_string()),
-        "sci-fi" | "scifi" => Some("Science Fiction".to_string()),
-        _ => None
+
+    // Try aliases
+    let aliases = get_genre_aliases();
+    if let Some(&mapped) = aliases.get(normalized.as_str()) {
+        return Some(mapped.to_string());
     }
+
+    // Partial match - if the genre contains an approved genre
+    for approved in APPROVED_GENRES {
+        let approved_lower = approved.to_lowercase();
+        if normalized.contains(&approved_lower) || approved_lower.contains(&normalized) {
+            return Some(approved.to_string());
+        }
+    }
+
+    // No match found
+    None
 }
 
-pub fn enforce_genre_policy_basic(genres: &[String]) -> Vec<String> {
-    let mut approved = Vec::new();
-    for genre in genres {
-        if let Some(mapped) = map_genre_basic(genre) {
-            if !approved.contains(&mapped) { approved.push(mapped); }
+/// Map a genre with sub-genre information
+///
+/// Returns (primary_genre, sub_genre) tuple for hierarchical categorization
+pub fn map_genre_hierarchical(genre: &str) -> (Option<String>, Option<String>) {
+    let normalized = genre.trim().to_lowercase();
+
+    // Check for subgenre patterns like "Fiction > Fantasy > Epic Fantasy"
+    if normalized.contains(" > ") {
+        let parts: Vec<&str> = normalized.split(" > ").collect();
+        if parts.len() >= 2 {
+            let primary = map_genre_basic(parts.last().unwrap_or(&""));
+            let sub = if parts.len() >= 2 {
+                map_genre_basic(parts.get(parts.len() - 2).unwrap_or(&""))
+            } else {
+                None
+            };
+            return (primary, sub);
         }
-        if approved.len() >= 3 { break; }
     }
-    if approved.is_empty() { approved.push("Fiction".to_string()); }
-    approved
+
+    // Check for subgenre patterns like "Epic Fantasy"
+    let fantasy_subs = ["epic fantasy", "high fantasy", "dark fantasy", "urban fantasy", "sword and sorcery"];
+    let scifi_subs = ["space opera", "hard sci-fi", "cyberpunk", "steampunk", "military sci-fi"];
+    let romance_subs = ["contemporary romance", "historical romance", "paranormal romance", "romantic suspense"];
+    let mystery_subs = ["cozy mystery", "police procedural", "noir", "detective"];
+    let thriller_subs = ["psychological thriller", "legal thriller", "techno-thriller", "political thriller"];
+
+    for sub in fantasy_subs {
+        if normalized.contains(sub) {
+            return (Some("Fantasy".to_string()), Some(sub.to_string()));
+        }
+    }
+    for sub in scifi_subs {
+        if normalized.contains(sub) {
+            return (Some("Science Fiction".to_string()), Some(sub.to_string()));
+        }
+    }
+    for sub in romance_subs {
+        if normalized.contains(sub) {
+            return (Some("Romance".to_string()), Some(sub.to_string()));
+        }
+    }
+    for sub in mystery_subs {
+        if normalized.contains(sub) {
+            return (Some("Mystery".to_string()), Some(sub.to_string()));
+        }
+    }
+    for sub in thriller_subs {
+        if normalized.contains(sub) {
+            return (Some("Thriller".to_string()), Some(sub.to_string()));
+        }
+    }
+
+    (map_genre_basic(genre), None)
+}
+
+/// Enforce genre policy: max 3 genres, prioritized, no duplicates
+///
+/// Priority order:
+/// 1. Specific genres (Mystery, Thriller, Fantasy, etc.)
+/// 2. Age categories (Young Adult, Children's)
+/// 3. Broad categories (Fiction, Non-Fiction)
+pub fn enforce_genre_policy_basic(genres: &[String]) -> Vec<String> {
+    let mut mapped: Vec<String> = genres
+        .iter()
+        .filter_map(|g| map_genre_basic(g))
+        .collect();
+
+    // Remove duplicates while preserving order
+    let mut seen = std::collections::HashSet::new();
+    mapped.retain(|g| seen.insert(g.clone()));
+
+    // Priority sorting: specific genres first
+    let broad_genres = ["Fiction", "Non-Fiction", "Adult"];
+    let age_genres = ["Children's", "Young Adult", "Teen", "Middle Grade", "New Adult"];
+
+    mapped.sort_by(|a, b| {
+        let a_is_broad = broad_genres.contains(&a.as_str());
+        let b_is_broad = broad_genres.contains(&b.as_str());
+        let a_is_age = age_genres.contains(&a.as_str());
+        let b_is_age = age_genres.contains(&b.as_str());
+
+        // Broad genres go last
+        if a_is_broad && !b_is_broad { return std::cmp::Ordering::Greater; }
+        if b_is_broad && !a_is_broad { return std::cmp::Ordering::Less; }
+
+        // Age genres go second-to-last
+        if a_is_age && !b_is_age && !b_is_broad { return std::cmp::Ordering::Greater; }
+        if b_is_age && !a_is_age && !a_is_broad { return std::cmp::Ordering::Less; }
+
+        std::cmp::Ordering::Equal
+    });
+
+    // Take top 3
+    mapped.truncate(3);
+
+    // If empty, default to Fiction
+    if mapped.is_empty() {
+        mapped.push("Fiction".to_string());
+    }
+
+    // Don't have both Fiction and a specific fiction genre
+    if mapped.len() > 1 && mapped.contains(&"Fiction".to_string()) {
+        // Remove "Fiction" if we have a more specific genre
+        let has_specific = mapped.iter().any(|g| {
+            !broad_genres.contains(&g.as_str()) && !age_genres.contains(&g.as_str())
+        });
+        if has_specific {
+            mapped.retain(|g| g != "Fiction");
+        }
+    }
+
+    mapped
 }
