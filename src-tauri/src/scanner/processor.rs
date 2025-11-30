@@ -622,9 +622,36 @@ JSON:"#,
         Ok(json_str) => {
             match serde_json::from_str::<BookMetadata>(&json_str) {
                 Ok(mut metadata) => {
+                    // Initialize sources tracking
+                    let mut sources = MetadataSources::default();
+
+                    // GPT cleaned/enhanced the basic fields
+                    sources.title = Some(MetadataSource::Gpt);
+                    sources.author = Some(MetadataSource::Gpt);
+                    if metadata.subtitle.is_some() {
+                        sources.subtitle = if google_data.is_some() { Some(MetadataSource::GoogleBooks) } else { Some(MetadataSource::Gpt) };
+                    }
+                    if metadata.narrator.is_some() {
+                        sources.narrator = Some(MetadataSource::Gpt);
+                    }
+                    if !metadata.genres.is_empty() {
+                        sources.genres = Some(MetadataSource::Gpt);
+                    }
+                    if metadata.publisher.is_some() {
+                        sources.publisher = if google_data.is_some() { Some(MetadataSource::GoogleBooks) } else if audible_data.is_some() { Some(MetadataSource::Audible) } else { Some(MetadataSource::Gpt) };
+                    }
+                    if metadata.description.is_some() {
+                        sources.description = Some(MetadataSource::Gpt);
+                    }
+
                     // Override with reliable year
                     if let Some(year) = reliable_year.clone() {
                         metadata.year = Some(year);
+                        sources.year = if audible_data.as_ref().and_then(|d| d.release_date.clone()).is_some() {
+                            Some(MetadataSource::Audible)
+                        } else {
+                            Some(MetadataSource::GoogleBooks)
+                        };
                     }
 
                     // VALIDATE series - reject if it matches title or looks wrong
@@ -635,6 +662,10 @@ JSON:"#,
                             metadata.sequence = None;
                         } else {
                             metadata.series = Some(normalize_series_name(series));
+                            sources.series = Some(MetadataSource::Gpt);
+                            if metadata.sequence.is_some() {
+                                sources.sequence = Some(MetadataSource::Gpt);
+                            }
                         }
                     }
 
@@ -643,22 +674,28 @@ JSON:"#,
                         if is_valid_series(series_name, &metadata.title) {
                             // Use Audible series name (might be more accurate)
                             metadata.series = Some(normalize_series_name(series_name));
+                            sources.series = Some(MetadataSource::Audible);
                             // ALWAYS use Audible's sequence if provided - it's authoritative!
                             if let Some(ref pos) = position {
                                 println!("   ✅ Using Audible sequence: {} #{}", series_name, pos);
                                 metadata.sequence = Some(pos.clone());
+                                sources.sequence = Some(MetadataSource::Audible);
                             }
                         }
                     }
 
                     // Set ASIN from Audible
                     metadata.asin = audible_data.as_ref().and_then(|d| d.asin.clone());
+                    if metadata.asin.is_some() {
+                        sources.asin = Some(MetadataSource::Audible);
+                    }
 
                     // SET NEW FIELDS from Audible data (authoritative source)
                     if let Some(ref aud) = audible_data {
                         // Multiple authors (prefer Audible, fallback to splitting extracted)
                         if !aud.authors.is_empty() {
                             metadata.authors = aud.authors.clone();
+                            sources.author = Some(MetadataSource::Audible);
                         } else {
                             metadata.authors = split_authors(extracted_author);
                         }
@@ -666,6 +703,7 @@ JSON:"#,
                         // Multiple narrators (Audible is authoritative)
                         if !aud.narrators.is_empty() {
                             metadata.narrators = aud.narrators.clone();
+                            sources.narrator = Some(MetadataSource::Audible);
                             // Also set legacy narrator field
                             if metadata.narrator.is_none() {
                                 metadata.narrator = aud.narrators.first().cloned();
@@ -674,9 +712,15 @@ JSON:"#,
 
                         // Language
                         metadata.language = aud.language.clone();
+                        if metadata.language.is_some() {
+                            sources.language = Some(MetadataSource::Audible);
+                        }
 
                         // Runtime
                         metadata.runtime_minutes = aud.runtime_minutes;
+                        if metadata.runtime_minutes.is_some() {
+                            sources.runtime = Some(MetadataSource::Audible);
+                        }
 
                         // Abridged status
                         metadata.abridged = aud.abridged;
@@ -689,6 +733,7 @@ JSON:"#,
                             if let Some(ref desc) = aud.description {
                                 if desc.len() >= 50 {
                                     metadata.description = Some(desc.clone());
+                                    sources.description = Some(MetadataSource::Audible);
                                 }
                             }
                         }
@@ -701,6 +746,12 @@ JSON:"#,
                     if metadata.isbn.is_none() {
                         metadata.isbn = google_data.as_ref().and_then(|d| d.isbn.clone());
                     }
+                    if metadata.isbn.is_some() {
+                        sources.isbn = Some(MetadataSource::GoogleBooks);
+                    }
+
+                    // Set sources
+                    metadata.sources = Some(sources);
 
                     // Apply normalization before returning
                     normalize_metadata(metadata)
@@ -762,11 +813,16 @@ fn fallback_metadata(
     audible_data: Option<AudibleMetadata>,
     reliable_year: Option<String>
 ) -> BookMetadata {
+    // Track sources for each field
+    let mut sources = MetadataSources::default();
+
     // Get series from Audible but validate it
     let (series, sequence) = audible_data.as_ref()
         .and_then(|d| d.series.first())
         .map(|s| {
             if is_valid_series(&s.name, extracted_title) {
+                sources.series = Some(MetadataSource::Audible);
+                sources.sequence = Some(MetadataSource::Audible);
                 (Some(normalize_series_name(&s.name)), s.position.clone())
             } else {
                 (None, None)
@@ -776,31 +832,111 @@ fn fallback_metadata(
 
     // Get all narrators, use first for legacy narrator field
     let narrators = audible_data.as_ref()
-        .map(|d| d.narrators.clone())
+        .map(|d| {
+            if !d.narrators.is_empty() {
+                sources.narrator = Some(MetadataSource::Audible);
+            }
+            d.narrators.clone()
+        })
         .unwrap_or_default();
     let narrator = narrators.first().cloned();
 
     // Get all authors, split if contains "&" or "and"
     let authors = audible_data.as_ref()
-        .map(|d| d.authors.clone())
-        .unwrap_or_else(|| split_authors(extracted_author));
+        .map(|d| {
+            if !d.authors.is_empty() {
+                sources.author = Some(MetadataSource::Audible);
+            }
+            d.authors.clone()
+        })
+        .unwrap_or_else(|| {
+            sources.author = Some(MetadataSource::Folder);
+            split_authors(extracted_author)
+        });
+
+    // Track title source
+    sources.title = Some(MetadataSource::Folder);
+
+    // Track other sources based on availability
+    let subtitle = google_data.as_ref().and_then(|d| {
+        if d.subtitle.is_some() {
+            sources.subtitle = Some(MetadataSource::GoogleBooks);
+        }
+        d.subtitle.clone()
+    });
+
+    let genres = google_data.as_ref().map(|d| {
+        if !d.genres.is_empty() {
+            sources.genres = Some(MetadataSource::GoogleBooks);
+        }
+        d.genres.clone()
+    }).unwrap_or_default();
+
+    let publisher = google_data.as_ref().and_then(|d| d.publisher.clone())
+        .map(|p| {
+            sources.publisher = Some(MetadataSource::GoogleBooks);
+            p
+        })
+        .or_else(|| audible_data.as_ref().and_then(|d| d.publisher.clone()).map(|p| {
+            sources.publisher = Some(MetadataSource::Audible);
+            p
+        }));
+
+    let description = google_data.as_ref().and_then(|d| d.description.clone())
+        .map(|d| {
+            sources.description = Some(MetadataSource::GoogleBooks);
+            d
+        })
+        .or_else(|| audible_data.as_ref().and_then(|d| d.description.clone()).map(|d| {
+            sources.description = Some(MetadataSource::Audible);
+            d
+        }));
+
+    let isbn = google_data.as_ref().and_then(|d| {
+        if d.isbn.is_some() {
+            sources.isbn = Some(MetadataSource::GoogleBooks);
+        }
+        d.isbn.clone()
+    });
+
+    let asin = audible_data.as_ref().and_then(|d| {
+        if d.asin.is_some() {
+            sources.asin = Some(MetadataSource::Audible);
+        }
+        d.asin.clone()
+    });
+
+    // Track year source
+    if reliable_year.is_some() {
+        sources.year = if audible_data.as_ref().and_then(|d| d.release_date.clone()).is_some() {
+            Some(MetadataSource::Audible)
+        } else {
+            Some(MetadataSource::GoogleBooks)
+        };
+    }
+
+    // Track language/runtime sources
+    if audible_data.as_ref().and_then(|d| d.language.clone()).is_some() {
+        sources.language = Some(MetadataSource::Audible);
+    }
+    if audible_data.as_ref().and_then(|d| d.runtime_minutes).is_some() {
+        sources.runtime = Some(MetadataSource::Audible);
+    }
 
     // Note: normalize_metadata is called by the callers of fallback_metadata
     BookMetadata {
         title: extracted_title.to_string(),
-        subtitle: google_data.as_ref().and_then(|d| d.subtitle.clone()),
+        subtitle,
         author: extracted_author.to_string(),
         narrator,
         series,
         sequence,
-        genres: google_data.as_ref().map(|d| d.genres.clone()).unwrap_or_default(),
-        publisher: google_data.as_ref().and_then(|d| d.publisher.clone())
-            .or_else(|| audible_data.as_ref().and_then(|d| d.publisher.clone())),
+        genres,
+        publisher,
         year: reliable_year.clone(),
-        description: google_data.as_ref().and_then(|d| d.description.clone())
-            .or_else(|| audible_data.as_ref().and_then(|d| d.description.clone())),
-        isbn: google_data.as_ref().and_then(|d| d.isbn.clone()),
-        asin: audible_data.as_ref().and_then(|d| d.asin.clone()),
+        description,
+        isbn,
+        asin,
         cover_mime: None,
         cover_url: None,
         // NEW FIELDS
@@ -811,6 +947,7 @@ fn fallback_metadata(
         runtime_minutes: audible_data.as_ref().and_then(|d| d.runtime_minutes),
         explicit: None,
         publish_date: audible_data.as_ref().and_then(|d| d.release_date.clone()),
+        sources: Some(sources),
     }
 }
 
@@ -934,13 +1071,25 @@ pub async fn enrich_with_gpt(
     let api_key = match api_key {
         Some(key) if !key.is_empty() => key,
         _ => {
+            // No GPT available - use folder info only
+            let (series, sequence) = extract_series_from_folder(folder_name);
+            let mut sources = MetadataSources::default();
+            sources.title = Some(MetadataSource::Folder);
+            sources.author = Some(MetadataSource::Folder);
+            if series.is_some() {
+                sources.series = Some(MetadataSource::Folder);
+            }
+            if sequence.is_some() {
+                sources.sequence = Some(MetadataSource::Folder);
+            }
+
             return BookMetadata {
                 title: extracted_title.to_string(),
                 author: extracted_author.to_string(),
                 subtitle: None,
                 narrator: None,
-                series: extract_series_from_folder(folder_name).0.map(|s| normalize_series_name(&s)),
-                sequence: extract_series_from_folder(folder_name).1,
+                series: series.map(|s| normalize_series_name(&s)),
+                sequence,
                 genres: vec![],
                 publisher: None,
                 year: None,
@@ -957,6 +1106,7 @@ pub async fn enrich_with_gpt(
                 runtime_minutes: None,
                 explicit: None,
                 publish_date: None,
+                sources: Some(sources),
             };
         }
     };
@@ -1061,7 +1211,7 @@ JSON:"#,
                     // Get and VALIDATE series
                     let raw_series = json.get("series").and_then(get_string);
                     let sequence = json.get("sequence").and_then(get_string);
-                    
+
                     let (series, sequence) = if let Some(ref s) = raw_series {
                         if is_valid_series(s, extracted_title) {
                             (Some(normalize_series_name(s)), sequence)
@@ -1072,11 +1222,41 @@ JSON:"#,
                     } else {
                         (None, None)
                     };
-                    
+
                     // Get genres
                     let genres = json.get("genres").map(get_string_array).unwrap_or_default();
-                    
+
                     let narrator = json.get("narrator").and_then(get_string);
+                    let publisher = json.get("publisher").and_then(get_string);
+                    let year = json.get("year").and_then(get_string);
+                    let description = json.get("description").and_then(get_string);
+
+                    // Build sources tracking
+                    let mut sources = MetadataSources::default();
+                    sources.title = Some(MetadataSource::Folder);
+                    sources.author = Some(MetadataSource::Folder);
+                    if narrator.is_some() {
+                        sources.narrator = Some(MetadataSource::Gpt);
+                    }
+                    if series.is_some() {
+                        sources.series = Some(MetadataSource::Gpt);
+                    }
+                    if sequence.is_some() {
+                        sources.sequence = Some(MetadataSource::Gpt);
+                    }
+                    if !genres.is_empty() {
+                        sources.genres = Some(MetadataSource::Gpt);
+                    }
+                    if publisher.is_some() {
+                        sources.publisher = Some(MetadataSource::Gpt);
+                    }
+                    if year.is_some() {
+                        sources.year = Some(MetadataSource::Gpt);
+                    }
+                    if description.is_some() {
+                        sources.description = Some(MetadataSource::Gpt);
+                    }
+
                     normalize_metadata(BookMetadata {
                         title: extracted_title.to_string(),
                         author: extracted_author.to_string(),
@@ -1085,9 +1265,9 @@ JSON:"#,
                         series,
                         sequence,
                         genres,
-                        publisher: json.get("publisher").and_then(get_string),
-                        year: json.get("year").and_then(get_string),
-                        description: json.get("description").and_then(get_string),
+                        publisher,
+                        year,
+                        description,
                         isbn: None,
                         asin: None,
                         cover_mime: None,
@@ -1100,17 +1280,28 @@ JSON:"#,
                         runtime_minutes: None,
                         explicit: None,
                         publish_date: None,
+                        sources: Some(sources),
                     })
                 }
                 Err(e) => {
                     println!("   ❌ GPT parse error: {}", e);
+                    let (series, sequence) = extract_series_from_folder(folder_name);
+                    let mut sources = MetadataSources::default();
+                    sources.title = Some(MetadataSource::Folder);
+                    sources.author = Some(MetadataSource::Folder);
+                    if series.is_some() {
+                        sources.series = Some(MetadataSource::Folder);
+                    }
+                    if sequence.is_some() {
+                        sources.sequence = Some(MetadataSource::Folder);
+                    }
                     normalize_metadata(BookMetadata {
                         title: extracted_title.to_string(),
                         author: extracted_author.to_string(),
                         subtitle: None,
                         narrator: None,
-                        series: extract_series_from_folder(folder_name).0.map(|s| normalize_series_name(&s)),
-                        sequence: extract_series_from_folder(folder_name).1,
+                        series: series.map(|s| normalize_series_name(&s)),
+                        sequence,
                         genres: vec![],
                         publisher: None,
                         year: None,
@@ -1127,18 +1318,29 @@ JSON:"#,
                         runtime_minutes: None,
                         explicit: None,
                         publish_date: None,
+                        sources: Some(sources),
                     })
                 }
             }
         }
         Err(_) => {
+            let (series, sequence) = extract_series_from_folder(folder_name);
+            let mut sources = MetadataSources::default();
+            sources.title = Some(MetadataSource::Folder);
+            sources.author = Some(MetadataSource::Folder);
+            if series.is_some() {
+                sources.series = Some(MetadataSource::Folder);
+            }
+            if sequence.is_some() {
+                sources.sequence = Some(MetadataSource::Folder);
+            }
             normalize_metadata(BookMetadata {
                 title: extracted_title.to_string(),
                 author: extracted_author.to_string(),
                 subtitle: None,
                 narrator: None,
-                series: extract_series_from_folder(folder_name).0.map(|s| normalize_series_name(&s)),
-                sequence: extract_series_from_folder(folder_name).1,
+                series: series.map(|s| normalize_series_name(&s)),
+                sequence,
                 genres: vec![],
                 publisher: None,
                 year: None,
@@ -1155,6 +1357,7 @@ JSON:"#,
                 runtime_minutes: None,
                 explicit: None,
                 publish_date: None,
+                sources: Some(sources),
             })
         }
     }

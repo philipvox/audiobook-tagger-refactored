@@ -2,6 +2,69 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Metadata source - where did this piece of data come from?
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MetadataSource {
+    /// Extracted from existing file tags (ID3, M4A atoms, etc.)
+    FileTag,
+    /// Inferred from folder structure/naming
+    Folder,
+    /// Scraped from Audible
+    Audible,
+    /// Retrieved from Google Books API
+    GoogleBooks,
+    /// Retrieved from iTunes/Apple Books API
+    ITunes,
+    /// Cleaned/enhanced by GPT
+    Gpt,
+    /// Manually entered by user
+    Manual,
+    /// Unknown/default source
+    Unknown,
+}
+
+impl Default for MetadataSource {
+    fn default() -> Self {
+        MetadataSource::Unknown
+    }
+}
+
+/// Tracks the source of each metadata field
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MetadataSources {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrator: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub genres: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isbn: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asin: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<MetadataSource>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanResult {
     pub groups: Vec<BookGroup>,
@@ -80,6 +143,10 @@ pub struct BookMetadata {
     /// Full publish date in YYYY-MM-DD format
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_date: Option<String>,
+
+    /// Source tracking - where each metadata field came from
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<MetadataSources>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
