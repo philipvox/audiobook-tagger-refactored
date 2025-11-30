@@ -577,10 +577,15 @@ OUTPUT FIELDS:
   - "Dungeon Crawler Carl" for all books in that series
   The series name should be the UMBRELLA name for all books, not this specific book's title.
 * sequence: Book number in series. Use Audible's position if provided.
-* genres: Select 1-3 from the approved list. IMPORTANT:
-  - "Children's" is for ages 0-8 (picture books, early readers)
-  - "Young Adult" is for ages 12-18 (Harry Potter, Hunger Games, etc.)
-  - Do NOT use "Children's" for YA fantasy like Harry Potter, Throne of Glass, etc.
+* genres: Select 1-3 from the approved list. CRITICAL AGE CLASSIFICATION:
+  For children's/youth books, you MUST use age-specific genres:
+  - "Children's 0-2": Baby/toddler books (Goodnight Moon, board books)
+  - "Children's 3-5": Preschool/kindergarten (Dr. Seuss, Peppa Pig, Curious George)
+  - "Children's 6-8": Early chapter books (Magic Tree House, Junie B. Jones, Dog Man, Diary of a Wimpy Kid)
+  - "Children's 9-12": Middle grade (Harry Potter, Percy Jackson, Narnia, Goosebumps, Roald Dahl)
+  - "Teen 13-17": Young adult (Hunger Games, Divergent, Twilight, Throne of Glass, Sarah J. Maas)
+  NEVER use generic "Children's", "Young Adult", "Middle Grade" - ALWAYS use the age range version!
+  NEVER use "Children's" for teen/YA books like Hunger Games or Throne of Glass.
 * publisher: Prefer Google Books or Audible.
 * {}
 * description: Short description from sources, minimum 200 characters.
@@ -635,6 +640,13 @@ JSON:"#,
                         sources.narrator = Some(MetadataSource::Gpt);
                     }
                     if !metadata.genres.is_empty() {
+                        // Enforce age-specific children's genres
+                        crate::genres::enforce_children_age_genres(
+                            &mut metadata.genres,
+                            &metadata.title,
+                            metadata.series.as_deref(),
+                            Some(&metadata.author),
+                        );
                         sources.genres = Some(MetadataSource::Gpt);
                     }
                     if metadata.publisher.is_some() {
@@ -865,12 +877,22 @@ fn fallback_metadata(
         d.subtitle.clone()
     });
 
-    let genres = google_data.as_ref().map(|d| {
+    let mut genres = google_data.as_ref().map(|d| {
         if !d.genres.is_empty() {
             sources.genres = Some(MetadataSource::GoogleBooks);
         }
         d.genres.clone()
     }).unwrap_or_default();
+
+    // Enforce age-specific children's genres
+    if !genres.is_empty() {
+        crate::genres::enforce_children_age_genres(
+            &mut genres,
+            extracted_title,
+            series.as_deref(),
+            authors.first().map(|s| s.as_str()),
+        );
+    }
 
     let publisher = google_data.as_ref().and_then(|d| d.publisher.clone())
         .map(|p| {

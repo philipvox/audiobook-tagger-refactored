@@ -23,12 +23,215 @@ pub const APPROVED_GENRES: &[&str] = &[
     "Religion", "Science", "Self-Help", "Social Science", "Spirituality", "Sports",
     "Technology", "Travel", "True Crime",
 
-    // Age Categories
+    // Children's Age Categories (IMPORTANT - these are mutually exclusive)
+    "Children's 0-2",      // Baby/Toddler books
+    "Children's 3-5",      // Preschool/Kindergarten
+    "Children's 6-8",      // Early Reader/Chapter Books
+    "Children's 9-12",     // Middle Grade
+    "Teen 13-17",          // Young Adult / Teen
+
+    // Legacy age categories (for backwards compatibility)
     "Children's", "Middle Grade", "Teen", "Young Adult", "Adult", "New Adult",
 
     // Format/Style
     "Graphic Novel", "Comics", "Manga",
 ];
+
+/// Children's series with known age ranges
+pub fn get_children_series_ages() -> std::collections::HashMap<&'static str, &'static str> {
+    let mut map = std::collections::HashMap::new();
+
+    // Ages 0-2 (Baby/Toddler)
+    map.insert("goodnight moon", "Children's 0-2");
+    map.insert("pat the bunny", "Children's 0-2");
+    map.insert("brown bear", "Children's 0-2");
+    map.insert("eric carle", "Children's 0-2");
+    map.insert("sandra boynton", "Children's 0-2");
+
+    // Ages 3-5 (Preschool)
+    map.insert("curious george", "Children's 3-5");
+    map.insert("peppa pig", "Children's 3-5");
+    map.insert("paw patrol", "Children's 3-5");
+    map.insert("llama llama", "Children's 3-5");
+    map.insert("pete the cat", "Children's 3-5");
+    map.insert("elephant and piggie", "Children's 3-5");
+    map.insert("mo willems", "Children's 3-5");
+    map.insert("dr. seuss", "Children's 3-5");
+    map.insert("dr seuss", "Children's 3-5");
+    map.insert("clifford", "Children's 3-5");
+    map.insert("berenstain bears", "Children's 3-5");
+    map.insert("arthur", "Children's 3-5");
+    map.insert("disney princess", "Children's 3-5");
+    map.insert("disney frozen", "Children's 3-5");
+
+    // Ages 6-8 (Early Reader/Chapter Books)
+    map.insert("magic tree house", "Children's 6-8");
+    map.insert("junie b. jones", "Children's 6-8");
+    map.insert("ivy + bean", "Children's 6-8");
+    map.insert("dogman", "Children's 6-8");
+    map.insert("dog man", "Children's 6-8");
+    map.insert("captain underpants", "Children's 6-8");
+    map.insert("dork diaries", "Children's 6-8");
+    map.insert("diary of a wimpy kid", "Children's 6-8");
+    map.insert("bad guys", "Children's 6-8");
+    map.insert("geronimo stilton", "Children's 6-8");
+    map.insert("cam jansen", "Children's 6-8");
+    map.insert("nate the great", "Children's 6-8");
+    map.insert("a to z mysteries", "Children's 6-8");
+    map.insert("flat stanley", "Children's 6-8");
+    map.insert("rainbow magic", "Children's 6-8");
+    map.insert("fancy nancy", "Children's 6-8");
+    map.insert("fly guy", "Children's 6-8");
+    map.insert("wings of fire", "Children's 6-8");
+    map.insert("babysitters club", "Children's 6-8");
+
+    // Ages 9-12 (Middle Grade)
+    map.insert("percy jackson", "Children's 9-12");
+    map.insert("heroes of olympus", "Children's 9-12");
+    map.insert("kane chronicles", "Children's 9-12");
+    map.insert("rick riordan", "Children's 9-12");
+    map.insert("harry potter", "Children's 9-12");
+    map.insert("narnia", "Children's 9-12");
+    map.insert("chronicles of narnia", "Children's 9-12");
+    map.insert("land of stories", "Children's 9-12");
+    map.insert("keeper of the lost cities", "Children's 9-12");
+    map.insert("nevermoor", "Children's 9-12");
+    map.insert("rangers apprentice", "Children's 9-12");
+    map.insert("ranger's apprentice", "Children's 9-12");
+    map.insert("warriors", "Children's 9-12"); // Warrior Cats
+    map.insert("warrior cats", "Children's 9-12");
+    map.insert("redwall", "Children's 9-12");
+    map.insert("spiderwick", "Children's 9-12");
+    map.insert("how to train your dragon", "Children's 9-12");
+    map.insert("eragon", "Children's 9-12");
+    map.insert("inheritance cycle", "Children's 9-12");
+    map.insert("artemis fowl", "Children's 9-12");
+    map.insert("fablehaven", "Children's 9-12");
+    map.insert("alex rider", "Children's 9-12");
+    map.insert("goosebumps", "Children's 9-12");
+    map.insert("animorphs", "Children's 9-12");
+    map.insert("hatchet", "Children's 9-12");
+    map.insert("holes", "Children's 9-12");
+    map.insert("wonder", "Children's 9-12");
+    map.insert("matilda", "Children's 9-12");
+    map.insert("roald dahl", "Children's 9-12");
+    map.insert("charlie and the chocolate factory", "Children's 9-12");
+    map.insert("bfg", "Children's 9-12");
+    map.insert("lemony snicket", "Children's 9-12");
+    map.insert("series of unfortunate events", "Children's 9-12");
+
+    // Ages 13-17 (Teen/Young Adult)
+    map.insert("hunger games", "Teen 13-17");
+    map.insert("divergent", "Teen 13-17");
+    map.insert("maze runner", "Teen 13-17");
+    map.insert("twilight", "Teen 13-17");
+    map.insert("throne of glass", "Teen 13-17");
+    map.insert("sarah j maas", "Teen 13-17");
+    map.insert("court of thorns and roses", "Teen 13-17");
+    map.insert("acotar", "Teen 13-17");
+    map.insert("six of crows", "Teen 13-17");
+    map.insert("shadow and bone", "Teen 13-17");
+    map.insert("leigh bardugo", "Teen 13-17");
+    map.insert("mortal instruments", "Teen 13-17");
+    map.insert("cassandra clare", "Teen 13-17");
+    map.insert("shadowhunters", "Teen 13-17");
+    map.insert("red queen", "Teen 13-17");
+    map.insert("the fault in our stars", "Teen 13-17");
+    map.insert("john green", "Teen 13-17");
+    map.insert("looking for alaska", "Teen 13-17");
+    map.insert("perks of being a wallflower", "Teen 13-17");
+    map.insert("to all the boys", "Teen 13-17");
+    map.insert("hate u give", "Teen 13-17");
+    map.insert("children of blood and bone", "Teen 13-17");
+    map.insert("legendborn", "Teen 13-17");
+    map.insert("daughter of the moon goddess", "Teen 13-17");
+    map.insert("house of salt and sorrows", "Teen 13-17");
+    map.insert("shatter me", "Teen 13-17");
+    map.insert("cinder", "Teen 13-17");
+    map.insert("lunar chronicles", "Teen 13-17");
+    map.insert("vampire academy", "Teen 13-17");
+
+    map
+}
+
+/// Detect the appropriate age category from title, series, or author
+pub fn detect_children_age_category(title: &str, series: Option<&str>, author: Option<&str>) -> Option<String> {
+    let series_ages = get_children_series_ages();
+
+    // Combine all text to search
+    let search_text = format!(
+        "{} {} {}",
+        title.to_lowercase(),
+        series.unwrap_or("").to_lowercase(),
+        author.unwrap_or("").to_lowercase()
+    );
+
+    // Check against known series/authors
+    for (keyword, age_category) in series_ages.iter() {
+        if search_text.contains(keyword) {
+            return Some(age_category.to_string());
+        }
+    }
+
+    None
+}
+
+/// Ensure children's books have proper age-specific genres
+/// This should be called after GPT processing to enforce age categories
+pub fn enforce_children_age_genres(
+    genres: &mut Vec<String>,
+    title: &str,
+    series: Option<&str>,
+    author: Option<&str>,
+) {
+    // Check if we can detect the age category
+    if let Some(age_genre) = detect_children_age_category(title, series, author) {
+        // Remove generic children's/ya/middle grade tags and replace with specific age
+        genres.retain(|g| {
+            let lower = g.to_lowercase();
+            !lower.contains("children") &&
+            !lower.contains("middle grade") &&
+            lower != "young adult" &&
+            lower != "teen" &&
+            lower != "ya"
+        });
+
+        // Add the specific age genre if not already present
+        if !genres.iter().any(|g| g == &age_genre) {
+            // Insert at beginning for priority
+            genres.insert(0, age_genre);
+        }
+
+        // Limit to 3 genres
+        genres.truncate(3);
+    }
+}
+
+/// Map legacy age categories to new age-specific ones based on context
+pub fn upgrade_legacy_age_genre(genre: &str, title: &str, series: Option<&str>) -> String {
+    let lower = genre.to_lowercase();
+
+    // If already specific, return as-is
+    if lower.starts_with("children's ") && lower.chars().any(|c| c.is_ascii_digit()) {
+        return genre.to_string();
+    }
+    if lower.starts_with("teen ") && lower.chars().any(|c| c.is_ascii_digit()) {
+        return genre.to_string();
+    }
+
+    // Try to detect specific age
+    if let Some(specific) = detect_children_age_category(title, series, None) {
+        return specific;
+    }
+
+    // Default mappings for generic categories
+    match lower.as_str() {
+        "children's" | "children" | "kids" => "Children's 6-8".to_string(), // Safe default
+        "middle grade" => "Children's 9-12".to_string(),
+        "young adult" | "ya" | "teen" => "Teen 13-17".to_string(),
+        _ => genre.to_string(),
+    }
+}
 
 /// Genre aliases - maps alternative names to approved genres
 fn get_genre_aliases() -> HashMap<&'static str, &'static str> {
@@ -42,12 +245,27 @@ fn get_genre_aliases() -> HashMap<&'static str, &'static str> {
     map.insert("self improvement", "Self-Help");
     map.insert("literary fiction", "Literary Fiction");
     map.insert("literary", "Literary Fiction");
-    map.insert("ya", "Young Adult");
-    map.insert("young-adult", "Young Adult");
-    map.insert("ya fiction", "Young Adult");
-    map.insert("children", "Children's");
-    map.insert("kids", "Children's");
-    map.insert("juvenile", "Children's");
+
+    // Age-specific mappings
+    map.insert("ya", "Teen 13-17");
+    map.insert("young-adult", "Teen 13-17");
+    map.insert("ya fiction", "Teen 13-17");
+    map.insert("young adult", "Teen 13-17");
+    map.insert("teen fiction", "Teen 13-17");
+    map.insert("children", "Children's 6-8");
+    map.insert("kids", "Children's 6-8");
+    map.insert("juvenile", "Children's 6-8");
+    map.insert("juvenile fiction", "Children's 6-8");
+    map.insert("picture book", "Children's 3-5");
+    map.insert("picture books", "Children's 3-5");
+    map.insert("early reader", "Children's 6-8");
+    map.insert("early readers", "Children's 6-8");
+    map.insert("chapter book", "Children's 6-8");
+    map.insert("chapter books", "Children's 6-8");
+    map.insert("middle grade", "Children's 9-12");
+    map.insert("middle-grade", "Children's 9-12");
+    map.insert("mg", "Children's 9-12");
+
     map.insert("nonfiction", "Non-Fiction");
     map.insert("non fiction", "Non-Fiction");
     map.insert("bio", "Biography");
