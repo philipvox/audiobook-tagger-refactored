@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use anyhow::{Result, Context};
 use serde::{Serialize, Deserialize};
+use regex::Regex;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RenameResult {
@@ -18,7 +19,12 @@ pub struct BookMetadata {
     pub series: Option<String>,
     pub sequence: Option<String>,
     pub year: Option<String>,
+    pub narrator: Option<String>,
 }
+
+/// Default rename templates
+pub const DEFAULT_FILE_TEMPLATE: &str = "{author} - {[series #sequence] }{title}{ (year)}";
+pub const DEFAULT_FOLDER_TEMPLATE: &str = "{author}/{series|title}";
 
 /// Sanitize a string for use in a filename
 fn sanitize_filename(s: &str) -> String {
@@ -33,34 +39,104 @@ fn sanitize_filename(s: &str) -> String {
         .to_string()
 }
 
-/// Generate a new filename based on metadata
-pub fn generate_filename(metadata: &BookMetadata, original_extension: &str) -> String {
-    let mut parts = Vec::new();
-    
-    // Add author
-    if !metadata.author.is_empty() {
-        parts.push(sanitize_filename(&metadata.author));
-    }
-    
-    // Add series and sequence if present
-    if let Some(series) = &metadata.series {
-        let mut series_part = format!("[{}]", sanitize_filename(series));
-        if let Some(seq) = &metadata.sequence {
-            series_part = format!("[{} #{}]", sanitize_filename(series), seq);
+/// Apply a template to generate a filename
+///
+/// Template syntax:
+/// - {author} - Replaced with author name
+/// - {title} - Replaced with title
+/// - {series} - Replaced with series name (empty if none)
+/// - {sequence} - Replaced with book number (empty if none)
+/// - {year} - Replaced with year (empty if none)
+/// - {narrator} - Replaced with narrator (empty if none)
+/// - {[prefix text] } - Include prefix only if following variable exists
+/// - { (suffix)} - Include suffix only if preceding variable exists
+/// - {var1|var2} - Fallback: use var1 if available, otherwise var2
+pub fn apply_template(template: &str, metadata: &BookMetadata) -> String {
+    let mut result = template.to_string();
+
+    // First, handle conditional sections with {[prefix]variable} pattern
+    // e.g., {[series #sequence] } becomes "[Series #1] " if series exists, "" otherwise
+    let conditional_re = Regex::new(r"\{(\[[^\]]+\])([a-z]+)\s*\}").unwrap();
+    result = conditional_re.replace_all(&result, |caps: &regex::Captures| {
+        let prefix = &caps[1];
+        let var_name = &caps[2];
+        let value = get_metadata_value(metadata, var_name);
+        if value.is_empty() {
+            String::new()
+        } else {
+            // Replace placeholders in prefix
+            let mut expanded = prefix.to_string();
+            expanded = expanded.replace("series", &get_metadata_value(metadata, "series"));
+            expanded = expanded.replace("sequence", &get_metadata_value(metadata, "sequence"));
+            format!("{} ", expanded)
         }
-        parts.push(series_part);
+    }).to_string();
+
+    // Handle suffix conditionals like { (year)}
+    let suffix_re = Regex::new(r"\{\s*\(([a-z]+)\)\}").unwrap();
+    result = suffix_re.replace_all(&result, |caps: &regex::Captures| {
+        let var_name = &caps[1];
+        let value = get_metadata_value(metadata, var_name);
+        if value.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", value)
+        }
+    }).to_string();
+
+    // Handle fallback syntax {var1|var2}
+    let fallback_re = Regex::new(r"\{([a-z]+)\|([a-z]+)\}").unwrap();
+    result = fallback_re.replace_all(&result, |caps: &regex::Captures| {
+        let var1 = get_metadata_value(metadata, &caps[1]);
+        let var2 = get_metadata_value(metadata, &caps[2]);
+        if !var1.is_empty() {
+            var1
+        } else {
+            var2
+        }
+    }).to_string();
+
+    // Handle simple variable replacements {author}, {title}, etc.
+    let simple_re = Regex::new(r"\{([a-z]+)\}").unwrap();
+    result = simple_re.replace_all(&result, |caps: &regex::Captures| {
+        get_metadata_value(metadata, &caps[1])
+    }).to_string();
+
+    // Clean up multiple spaces and trim
+    let multi_space_re = Regex::new(r"\s{2,}").unwrap();
+    result = multi_space_re.replace_all(&result, " ").trim().to_string();
+
+    // Remove trailing dashes or hyphens from empty sections
+    let trailing_dash_re = Regex::new(r"\s*-\s*$").unwrap();
+    result = trailing_dash_re.replace_all(&result, "").to_string();
+    let leading_dash_re = Regex::new(r"^\s*-\s*").unwrap();
+    result = leading_dash_re.replace_all(&result, "").to_string();
+    let double_dash_re = Regex::new(r"\s*-\s*-\s*").unwrap();
+    result = double_dash_re.replace_all(&result, " - ").to_string();
+
+    sanitize_filename(&result)
+}
+
+fn get_metadata_value(metadata: &BookMetadata, var_name: &str) -> String {
+    match var_name {
+        "author" => metadata.author.clone(),
+        "title" => metadata.title.clone(),
+        "series" => metadata.series.clone().unwrap_or_default(),
+        "sequence" => metadata.sequence.clone().unwrap_or_default(),
+        "year" => metadata.year.clone().unwrap_or_default(),
+        "narrator" => metadata.narrator.clone().unwrap_or_default(),
+        _ => String::new(),
     }
-    
-    // Add title
-    parts.push(sanitize_filename(&metadata.title));
-    
-    // Add year if present
-    if let Some(year) = &metadata.year {
-        parts.push(format!("({})", year));
-    }
-    
-    // Join parts and add extension
-    let filename = parts.join(" - ");
+}
+
+/// Generate a new filename based on metadata (uses default template)
+pub fn generate_filename(metadata: &BookMetadata, original_extension: &str) -> String {
+    generate_filename_with_template(metadata, original_extension, DEFAULT_FILE_TEMPLATE)
+}
+
+/// Generate a new filename based on metadata and a custom template
+pub fn generate_filename_with_template(metadata: &BookMetadata, original_extension: &str, template: &str) -> String {
+    let filename = apply_template(template, metadata);
     format!("{}.{}", filename, original_extension)
 }
 
@@ -88,9 +164,10 @@ pub async fn rename_and_reorganize_file(
     metadata: &BookMetadata,
     reorganize: bool,
     library_root: Option<&str>,
+    template: Option<&str>,
 ) -> Result<RenameResult> {
     let old_path = Path::new(file_path);
-    
+
     if !old_path.exists() {
         return Ok(RenameResult {
             old_path: file_path.to_string(),
@@ -99,14 +176,17 @@ pub async fn rename_and_reorganize_file(
             error: Some("File does not exist".to_string()),
         });
     }
-    
+
     let extension = old_path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("m4b");
-    
+
     // Generate new filename
-    let new_filename = generate_filename(metadata, extension);
+    let new_filename = match template {
+        Some(t) => generate_filename_with_template(metadata, extension, t),
+        None => generate_filename(metadata, extension),
+    };
     
     // Determine new path
     let new_path = if reorganize && library_root.is_some() {
@@ -157,27 +237,29 @@ pub async fn rename_book_group(
     metadata: &BookMetadata,
     reorganize: bool,
     library_root: Option<&str>,
+    template: Option<&str>,
 ) -> Result<Vec<RenameResult>> {
     let mut results = Vec::new();
-    
+
     for (idx, file_path) in files.iter().enumerate() {
         let old_path = Path::new(file_path);
         let _extension = old_path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("m4b");
-        
+
         // For multi-file books, add part number
         let mut file_metadata = metadata.clone();
         if files.len() > 1 {
             file_metadata.title = format!("{} - Part {}", metadata.title, idx + 1);
         }
-        
+
         let result = rename_and_reorganize_file(
             file_path,
             &file_metadata,
             reorganize,
             library_root,
+            template,
         ).await;
         
         match result {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, Filter, X } from 'lucide-react';
+import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, Filter, X, Download } from 'lucide-react';
 
 // Virtualized item height (approximate)
 const ITEM_HEIGHT = 140;
@@ -20,7 +20,8 @@ export function BookList({
   onScan,
   scanning,
   onSelectAll,
-  onClearSelection
+  onClearSelection,
+  onExport
 }) {
   const [coverCache, setCoverCache] = useState({});
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 30 });
@@ -284,6 +285,15 @@ export function BookList({
               Filters
               {hasActiveFilters && <span className="w-1.5 h-1.5 bg-blue-600 rounded-full" />}
             </button>
+            {onExport && (
+              <button
+                onClick={onExport}
+                className="px-2 py-1 text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-md transition-colors flex items-center gap-1"
+              >
+                <Download className="w-3 h-3" />
+                Export
+              </button>
+            )}
             <button
               onClick={onSelectAll}
               className="px-2 py-1 text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-md transition-colors"
