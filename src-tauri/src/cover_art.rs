@@ -1,10 +1,205 @@
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverArt {
     pub url: Option<String>,
     pub data: Option<Vec<u8>>,
     pub mime_type: Option<String>,
+}
+
+/// Embed cover art into an audio file
+pub fn embed_cover_in_file(
+    audio_path: &str,
+    cover_data: &[u8],
+    mime_type: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let path = Path::new(audio_path);
+    let ext = path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "m4a" | "m4b" => embed_cover_m4a(audio_path, cover_data, mime_type),
+        "mp3" => embed_cover_mp3(audio_path, cover_data, mime_type),
+        "flac" => embed_cover_flac(audio_path, cover_data, mime_type),
+        "ogg" | "opus" => embed_cover_vorbis(audio_path, cover_data, mime_type),
+        _ => Err(format!("Unsupported format for cover embedding: {}", ext).into())
+    }
+}
+
+/// Embed cover art in M4A/M4B files
+fn embed_cover_m4a(
+    audio_path: &str,
+    cover_data: &[u8],
+    mime_type: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use mp4ameta::{Tag, Data, Fourcc};
+
+    let mut tag = Tag::read_from_path(audio_path)
+        .unwrap_or_else(|_| Tag::default());
+
+    // Remove existing cover art
+    tag.remove_data_of(&Fourcc(*b"covr"));
+
+    // Add new cover art (use Png or Jpeg based on mime type)
+    let cover_data_vec = cover_data.to_vec();
+    if mime_type.contains("png") {
+        tag.add_data(Fourcc(*b"covr"), Data::Png(cover_data_vec));
+    } else {
+        tag.add_data(Fourcc(*b"covr"), Data::Jpeg(cover_data_vec));
+    }
+
+    tag.write_to_path(audio_path)?;
+    println!("   ✅ Cover embedded in M4A/M4B file");
+    Ok(())
+}
+
+/// Embed cover art in MP3 files using ID3v2
+fn embed_cover_mp3(
+    audio_path: &str,
+    cover_data: &[u8],
+    mime_type: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use lofty::prelude::*;
+    use lofty::probe::Probe;
+    use lofty::picture::{Picture, PictureType, MimeType};
+
+    let mut tagged_file = Probe::open(audio_path)?.read()?;
+
+    let tag = if let Some(t) = tagged_file.primary_tag_mut() {
+        t
+    } else {
+        let tag_type = tagged_file.primary_tag_type();
+        tagged_file.insert_tag(lofty::tag::Tag::new(tag_type));
+        tagged_file.primary_tag_mut().unwrap()
+    };
+
+    // Create picture
+    let mime = if mime_type.contains("png") {
+        MimeType::Png
+    } else {
+        MimeType::Jpeg
+    };
+
+    let picture = Picture::new_unchecked(
+        PictureType::CoverFront,
+        Some(mime),
+        None,
+        cover_data.to_vec()
+    );
+
+    // Remove existing pictures
+    tag.remove_picture_type(PictureType::CoverFront);
+
+    // Add new picture
+    tag.push_picture(picture);
+
+    tagged_file.save_to_path(audio_path, lofty::config::WriteOptions::default())?;
+    println!("   ✅ Cover embedded in MP3 file");
+    Ok(())
+}
+
+/// Embed cover art in FLAC files
+fn embed_cover_flac(
+    audio_path: &str,
+    cover_data: &[u8],
+    mime_type: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use lofty::prelude::*;
+    use lofty::probe::Probe;
+    use lofty::picture::{Picture, PictureType, MimeType};
+
+    let mut tagged_file = Probe::open(audio_path)?.read()?;
+
+    let tag = if let Some(t) = tagged_file.primary_tag_mut() {
+        t
+    } else {
+        let tag_type = tagged_file.primary_tag_type();
+        tagged_file.insert_tag(lofty::tag::Tag::new(tag_type));
+        tagged_file.primary_tag_mut().unwrap()
+    };
+
+    let mime = if mime_type.contains("png") {
+        MimeType::Png
+    } else {
+        MimeType::Jpeg
+    };
+
+    let picture = Picture::new_unchecked(
+        PictureType::CoverFront,
+        Some(mime),
+        None,
+        cover_data.to_vec()
+    );
+
+    tag.remove_picture_type(PictureType::CoverFront);
+    tag.push_picture(picture);
+
+    tagged_file.save_to_path(audio_path, lofty::config::WriteOptions::default())?;
+    println!("   ✅ Cover embedded in FLAC file");
+    Ok(())
+}
+
+/// Embed cover art in OGG/Opus files (Vorbis comments)
+fn embed_cover_vorbis(
+    audio_path: &str,
+    cover_data: &[u8],
+    mime_type: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use lofty::prelude::*;
+    use lofty::probe::Probe;
+    use lofty::picture::{Picture, PictureType, MimeType};
+
+    let mut tagged_file = Probe::open(audio_path)?.read()?;
+
+    let tag = if let Some(t) = tagged_file.primary_tag_mut() {
+        t
+    } else {
+        let tag_type = tagged_file.primary_tag_type();
+        tagged_file.insert_tag(lofty::tag::Tag::new(tag_type));
+        tagged_file.primary_tag_mut().unwrap()
+    };
+
+    let mime = if mime_type.contains("png") {
+        MimeType::Png
+    } else {
+        MimeType::Jpeg
+    };
+
+    let picture = Picture::new_unchecked(
+        PictureType::CoverFront,
+        Some(mime),
+        None,
+        cover_data.to_vec()
+    );
+
+    tag.remove_picture_type(PictureType::CoverFront);
+    tag.push_picture(picture);
+
+    tagged_file.save_to_path(audio_path, lofty::config::WriteOptions::default())?;
+    println!("   ✅ Cover embedded in OGG/Opus file");
+    Ok(())
+}
+
+/// Save cover art as folder.jpg in the audiobook folder
+pub fn save_cover_to_folder(
+    folder_path: &str,
+    cover_data: &[u8],
+    mime_type: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let folder = Path::new(folder_path);
+
+    // Determine extension based on mime type
+    let extension = if mime_type.contains("png") { "png" } else { "jpg" };
+    let cover_filename = format!("folder.{}", extension);
+    let cover_path = folder.join(&cover_filename);
+
+    std::fs::write(&cover_path, cover_data)?;
+    println!("   ✅ Cover saved to {}", cover_path.display());
+
+    Ok(cover_path.to_string_lossy().to_string())
 }
 
 pub async fn fetch_and_download_cover(
