@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Book, Edit, Upload, RefreshCw, Download, X, Image as ImageIcon, Database, Folder, Bot, FileAudio, Globe, Music } from 'lucide-react';
+import { Book, Edit, Upload, RefreshCw, Download, X, Image as ImageIcon, Database, Folder, Bot, FileAudio, Globe, Music, Scissors } from 'lucide-react';
+import { ChaptersModal } from '../ChaptersModal';
 
 // Source badge configuration
 const SOURCE_CONFIG = {
@@ -42,6 +43,7 @@ export function MetadataPanel({ group, onEdit }) {
   const [downloadingCover, setDownloadingCover] = useState(false);
   const [selectedUrl, setSelectedUrl] = useState(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [showChaptersModal, setShowChaptersModal] = useState(false);
   
   // Track blob URL for cleanup
   const blobUrlRef = useRef(null);
@@ -205,15 +207,25 @@ export function MetadataPanel({ group, onEdit }) {
                   </div>
                 )}
               </div>
-              {onEdit && (
+              <div className="flex items-center gap-2 ml-6">
                 <button
-                  onClick={() => onEdit(group)}
-                  className="ml-6 px-5 py-2.5 bg-white hover:bg-gray-50 text-gray-700 rounded-xl transition-all font-medium flex items-center gap-2 shadow-sm border border-gray-200 hover:shadow-md"
+                  onClick={() => setShowChaptersModal(true)}
+                  className="px-5 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white rounded-xl transition-all font-medium flex items-center gap-2 shadow-sm hover:shadow-md"
+                  title="Manage chapters and split audiobook"
                 >
-                  <Edit className="w-4 h-4" />
-                  Edit
+                  <Scissors className="w-4 h-4" />
+                  Chapters
                 </button>
-              )}
+                {onEdit && (
+                  <button
+                    onClick={() => onEdit(group)}
+                    className="px-5 py-2.5 bg-white hover:bg-gray-50 text-gray-700 rounded-xl transition-all font-medium flex items-center gap-2 shadow-sm border border-gray-200 hover:shadow-md"
+                  >
+                    <Edit className="w-4 h-4" />
+                    Edit
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
@@ -469,11 +481,11 @@ export function MetadataPanel({ group, onEdit }) {
                   <h2 className="text-2xl font-bold text-gray-900">Find Better Cover</h2>
                   <p className="text-sm text-gray-600 mt-1">{metadata.title}</p>
                 </div>
-                <button 
+                <button
                   onClick={() => {
                     setShowCoverSearch(false);
                     setCoverOptions([]);
-                  }} 
+                  }}
                   className="p-2 hover:bg-blue-100 rounded-lg transition-colors"
                 >
                   <X className="w-6 h-6 text-gray-600" />
@@ -491,8 +503,8 @@ export function MetadataPanel({ group, onEdit }) {
                 <div className="text-center py-12">
                   <ImageIcon className="w-16 h-16 text-gray-300 mx-auto mb-4" />
                   <p className="text-gray-600 mb-4">No covers found from online sources</p>
-                  <button 
-                    onClick={handleUploadCover} 
+                  <button
+                    onClick={handleUploadCover}
                     className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors flex items-center gap-2 mx-auto"
                   >
                     <Upload className="w-4 h-4" />
@@ -503,8 +515,8 @@ export function MetadataPanel({ group, onEdit }) {
                 <div className="space-y-6">
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                     {coverOptions.map((option, idx) => (
-                      <div 
-                        key={idx} 
+                      <div
+                        key={idx}
                         className="group border border-gray-200 rounded-lg overflow-hidden hover:shadow-xl hover:border-blue-300 transition-all bg-white"
                       >
                         <div className="aspect-[2/3] bg-gray-100 relative overflow-hidden">
@@ -517,7 +529,7 @@ export function MetadataPanel({ group, onEdit }) {
                               e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="300"%3E%3Crect fill="%23ddd" width="200" height="300"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23999" font-size="14"%3ENo Image%3C/text%3E%3C/svg%3E';
                             }}
                           />
-                          
+
                           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center p-3">
                             <button
                               onClick={() => handleDownloadCover(option.url)}
@@ -538,7 +550,7 @@ export function MetadataPanel({ group, onEdit }) {
                             </button>
                           </div>
                         </div>
-                        
+
                         <div className="p-3 bg-white">
                           <div className="flex items-center justify-between mb-1">
                             <span className="text-xs font-semibold text-gray-900 truncate">
@@ -572,6 +584,16 @@ export function MetadataPanel({ group, onEdit }) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Chapters Modal */}
+      {showChaptersModal && group && (
+        <ChaptersModal
+          isOpen={showChaptersModal}
+          onClose={() => setShowChaptersModal(false)}
+          group={group}
+          coverData={coverData}
+        />
       )}
     </div>
   );

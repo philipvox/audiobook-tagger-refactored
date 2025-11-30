@@ -6,7 +6,7 @@ import {
   RefreshCw, FolderOpen, Settings, Check, Edit2, Save
 } from 'lucide-react';
 
-export function ChaptersModal({ isOpen, onClose, group }) {
+export function ChaptersModal({ isOpen, onClose, group, coverData }) {
   const [loading, setLoading] = useState(true);
   const [ffmpegInfo, setFfmpegInfo] = useState(null);
   const [chapterInfo, setChapterInfo] = useState(null);
@@ -135,6 +135,23 @@ export function ChaptersModal({ isOpen, onClose, group }) {
         selectedChapters.has(c.id)
       );
 
+      // Convert cover data to base64 if available
+      let coverBase64 = null;
+      let coverMimeType = null;
+      if (coverData && coverData.data) {
+        try {
+          // Convert Uint8Array to base64
+          const bytes = new Uint8Array(coverData.data);
+          let binary = '';
+          bytes.forEach(b => binary += String.fromCharCode(b));
+          coverBase64 = btoa(binary);
+          coverMimeType = coverData.mime_type || 'image/jpeg';
+          console.log('🖼️ Cover data prepared for embedding:', coverBase64.length, 'chars');
+        } catch (e) {
+          console.error('Failed to encode cover data:', e);
+        }
+      }
+
       const result = await invoke('split_audiobook_chapters', {
         request: {
           file_path: chapterInfo.file_path,
@@ -145,6 +162,8 @@ export function ChaptersModal({ isOpen, onClose, group }) {
           copy_metadata: true,
           embed_cover: true,
           create_playlist: true,
+          cover_data: coverBase64,
+          cover_mime_type: coverMimeType,
         }
       });
 
