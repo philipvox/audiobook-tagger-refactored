@@ -6,6 +6,7 @@ import { ProgressBar } from '../components/scanner/ProgressBar';
 import { EditMetadataModal } from '../components/EditMetadataModal';
 import { BulkEditModal } from '../components/BulkEditModal';
 import { RenamePreviewModal } from '../components/RenamePreviewModal';
+import { ExportImportModal } from '../components/ExportImportModal';
 import { useScan } from '../hooks/useScan';
 import { useFileSelection } from '../hooks/useFileSelection';
 import { useTagOperations } from '../hooks/useTagOperations';
@@ -20,6 +21,7 @@ export function ScannerPage({ onActionsReady }) {
   const [editingGroup, setEditingGroup] = useState(null);
   const [showRenameModal, setShowRenameModal] = useState(false);
   const [showBulkEditModal, setShowBulkEditModal] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
   
   const {
     scanning,
@@ -299,6 +301,83 @@ export function ScannerPage({ onActionsReady }) {
     console.log(`✅ Bulk updated ${selectedGroupIds.size} books`);
   };
 
+  // Handle import from CSV
+  const handleImport = (updates) => {
+    if (!updates || updates.length === 0) return;
+
+    // If updates is an array of BookGroups (from JSON import)
+    if (updates[0]?.files) {
+      // Full JSON import - replace groups
+      console.log(`📥 Imported ${updates.length} books from JSON`);
+      // For now just log - could merge or replace
+      return;
+    }
+
+    // CSV import - update matched groups
+    setGroups(prevGroups =>
+      prevGroups.map(group => {
+        const update = updates.find(u => u.group_id === group.id);
+        if (!update) return group;
+
+        const newMetadata = { ...group.metadata };
+        const meta = update.metadata;
+
+        if (meta.title) newMetadata.title = meta.title;
+        if (meta.subtitle) newMetadata.subtitle = meta.subtitle;
+        if (meta.author) newMetadata.author = meta.author;
+        if (meta.narrator) newMetadata.narrator = meta.narrator;
+        if (meta.series) newMetadata.series = meta.series;
+        if (meta.sequence) newMetadata.sequence = meta.sequence;
+        if (meta.genres) newMetadata.genres = meta.genres;
+        if (meta.publisher) newMetadata.publisher = meta.publisher;
+        if (meta.year) newMetadata.year = meta.year;
+        if (meta.language) newMetadata.language = meta.language;
+        if (meta.description) newMetadata.description = meta.description;
+        if (meta.isbn) newMetadata.isbn = meta.isbn;
+        if (meta.asin) newMetadata.asin = meta.asin;
+
+        // Mark source as manual for imported fields
+        newMetadata.sources = {
+          ...newMetadata.sources,
+          ...(meta.title && { title: 'manual' }),
+          ...(meta.author && { author: 'manual' }),
+          ...(meta.narrator && { narrator: 'manual' }),
+          ...(meta.series && { series: 'manual' }),
+          ...(meta.genres && { genres: 'manual' }),
+          ...(meta.publisher && { publisher: 'manual' }),
+          ...(meta.year && { year: 'manual' }),
+        };
+
+        // Update file changes
+        const updatedFiles = group.files.map(file => {
+          const changes = { ...file.changes };
+
+          if (meta.title && meta.title !== group.metadata.title) {
+            changes.title = { old: group.metadata.title, new: meta.title };
+          }
+          if (meta.author && meta.author !== group.metadata.author) {
+            changes.author = { old: group.metadata.author, new: meta.author };
+          }
+
+          return {
+            ...file,
+            changes,
+            status: Object.keys(changes).length > 0 ? 'changed' : 'unchanged'
+          };
+        });
+
+        return {
+          ...group,
+          metadata: newMetadata,
+          files: updatedFiles,
+          total_changes: updatedFiles.filter(f => Object.keys(f.changes).length > 0).length
+        };
+      })
+    );
+
+    console.log(`📥 Applied ${updates.length} updates from import`);
+  };
+
   // ✅ SIMPLIFIED - No popups, just write
   const handleWriteClick = async () => {
     if (selectedFiles.size === 0) {
@@ -419,6 +498,7 @@ export function ScannerPage({ onActionsReady }) {
           scanning={scanning}
           onSelectAll={handleSelectAll}
           onClearSelection={handleClearSelection}
+          onExport={() => setShowExportModal(true)}
         />
 
         <MetadataPanel
@@ -465,6 +545,15 @@ export function ScannerPage({ onActionsReady }) {
           onClose={() => setShowBulkEditModal(false)}
           onSave={handleBulkSave}
           selectedGroups={getSelectedGroups()}
+        />
+      )}
+
+      {showExportModal && (
+        <ExportImportModal
+          isOpen={showExportModal}
+          onClose={() => setShowExportModal(false)}
+          groups={groups}
+          onImport={handleImport}
         />
       )}
 
