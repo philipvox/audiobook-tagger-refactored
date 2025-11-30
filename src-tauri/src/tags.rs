@@ -52,10 +52,10 @@ fn write_m4a_tags_sync(
     changes: &std::collections::HashMap<String, crate::scanner::MetadataChange>,
 ) -> Result<()> {
     use mp4ameta::{Tag, Data, Fourcc};
-    
+
     let mut tag = Tag::read_from_path(file_path)
         .unwrap_or_else(|_| Tag::default());
-    
+
     for (field, change) in changes {
         match field.as_str() {
             "title" => {
@@ -74,7 +74,10 @@ fn write_m4a_tags_sync(
                     tag.add_data(Fourcc(*b"\xa9gen"), Data::Utf8(genre.to_string()));
                 }
             },
-            "narrator" => tag.set_composer(&change.new),
+            "narrator" | "narrators" => {
+                // Support multiple narrators separated by semicolon for ABS
+                tag.set_composer(&change.new);
+            },
             "description" | "comment" => {
                 if !change.new.to_lowercase().contains("narrated by") {
                     tag.set_comment(&change.new);
@@ -86,15 +89,39 @@ fn write_m4a_tags_sync(
                 }
             },
             "series" => {
+                // Remove existing series data first
+                tag.remove_data_of(&Fourcc(*b"seri"));
                 tag.add_data(Fourcc(*b"seri"), Data::Utf8(change.new.clone()));
             },
             "sequence" => {
+                // Remove existing sequence data first
+                tag.remove_data_of(&Fourcc(*b"sequ"));
                 tag.add_data(Fourcc(*b"sequ"), Data::Utf8(change.new.clone()));
+            },
+            // NEW FIELDS
+            "asin" => {
+                // Store ASIN in custom atom
+                tag.remove_data_of(&Fourcc(*b"ASIN"));
+                tag.add_data(Fourcc(*b"ASIN"), Data::Utf8(change.new.clone()));
+            },
+            "isbn" => {
+                // Store ISBN in custom atom
+                tag.remove_data_of(&Fourcc(*b"ISBN"));
+                tag.add_data(Fourcc(*b"ISBN"), Data::Utf8(change.new.clone()));
+            },
+            "language" => {
+                // Store language code
+                tag.remove_data_of(&Fourcc(*b"lang"));
+                tag.add_data(Fourcc(*b"lang"), Data::Utf8(change.new.clone()));
+            },
+            "publisher" => {
+                // Store publisher (copyright holder often used)
+                tag.set_copyright(&change.new);
             },
             _ => {}
         }
     }
-    
+
     tag.write_to_path(file_path)?;
     Ok(())
 }
@@ -107,9 +134,9 @@ fn write_standard_tags_sync(
     use lofty::prelude::*;
     use lofty::probe::Probe;
     use lofty::tag::{Accessor, ItemKey, Tag, TagItem, ItemValue};
-    
+
     let mut tagged_file = Probe::open(file_path)?.read()?;
-    
+
     let tag = if let Some(t) = tagged_file.primary_tag_mut() {
         t
     } else {
@@ -117,7 +144,7 @@ fn write_standard_tags_sync(
         tagged_file.insert_tag(Tag::new(tag_type));
         tagged_file.primary_tag_mut().unwrap()
     };
-    
+
     for (field, change) in changes {
         match field.as_str() {
             "title" => {
@@ -146,7 +173,8 @@ fn write_standard_tags_sync(
                     ));
                 }
             },
-            "narrator" => {
+            "narrator" | "narrators" => {
+                // Support multiple narrators separated by semicolon for ABS
                 tag.remove_key(&ItemKey::Composer);
                 tag.insert_text(ItemKey::Composer, change.new.clone());
             },
@@ -161,15 +189,40 @@ fn write_standard_tags_sync(
                 }
             },
             "series" => {
+                // Use TXXX frame for custom data (SERIES)
+                tag.remove_key(&ItemKey::Unknown("SERIES".to_string()));
                 tag.insert_text(ItemKey::Unknown("SERIES".to_string()), change.new.clone());
             },
             "sequence" => {
+                // Use TXXX frame for custom data (SERIES-PART)
+                tag.remove_key(&ItemKey::Unknown("SERIES-PART".to_string()));
                 tag.insert_text(ItemKey::Unknown("SERIES-PART".to_string()), change.new.clone());
+            },
+            // NEW FIELDS
+            "asin" => {
+                // Store ASIN in TXXX:ASIN frame (compatible with many players)
+                tag.remove_key(&ItemKey::Unknown("ASIN".to_string()));
+                tag.insert_text(ItemKey::Unknown("ASIN".to_string()), change.new.clone());
+            },
+            "isbn" => {
+                // Store ISBN in TXXX:ISBN frame
+                tag.remove_key(&ItemKey::Unknown("ISBN".to_string()));
+                tag.insert_text(ItemKey::Unknown("ISBN".to_string()), change.new.clone());
+            },
+            "language" => {
+                // Store language in TLAN frame (standard ID3v2)
+                tag.remove_key(&ItemKey::Language);
+                tag.insert_text(ItemKey::Language, change.new.clone());
+            },
+            "publisher" => {
+                // Store publisher in TPUB frame (standard ID3v2)
+                tag.remove_key(&ItemKey::Publisher);
+                tag.insert_text(ItemKey::Publisher, change.new.clone());
             },
             _ => {}
         }
     }
-    
+
     tagged_file.save_to_path(file_path, lofty::config::WriteOptions::default())?;
     Ok(())
 }

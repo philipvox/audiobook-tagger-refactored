@@ -150,15 +150,69 @@ export function EditMetadataModal({ isOpen, onClose, onSave, metadata, groupName
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">ISBN</label>
-              <input
-                type="text"
-                value={editedMetadata.isbn || ''}
-                onChange={(e) => updateField('isbn', e.target.value || null)}
-                placeholder="Optional"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              />
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">ISBN</label>
+                <input
+                  type="text"
+                  value={editedMetadata.isbn || ''}
+                  onChange={(e) => updateField('isbn', e.target.value || null)}
+                  placeholder="Optional"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">ASIN</label>
+                <input
+                  type="text"
+                  value={editedMetadata.asin || ''}
+                  onChange={(e) => updateField('asin', e.target.value || null)}
+                  placeholder="Optional"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Language</label>
+                <select
+                  value={editedMetadata.language || ''}
+                  onChange={(e) => updateField('language', e.target.value || null)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  <option value="">Select...</option>
+                  <option value="en">English</option>
+                  <option value="es">Spanish</option>
+                  <option value="fr">French</option>
+                  <option value="de">German</option>
+                  <option value="it">Italian</option>
+                  <option value="pt">Portuguese</option>
+                  <option value="ja">Japanese</option>
+                  <option value="zh">Chinese</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Runtime (min)</label>
+                <input
+                  type="number"
+                  value={editedMetadata.runtime_minutes || ''}
+                  onChange={(e) => updateField('runtime_minutes', e.target.value ? parseInt(e.target.value) : null)}
+                  placeholder="Minutes"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+              <div className="flex items-center pt-7">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editedMetadata.abridged === true}
+                    onChange={(e) => updateField('abridged', e.target.checked ? true : null)}
+                    className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                  />
+                  <span className="text-sm font-medium text-gray-700">Abridged</span>
+                </label>
+              </div>
             </div>
           </div>
         </div>
