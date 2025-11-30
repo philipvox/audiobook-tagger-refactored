@@ -10,6 +10,7 @@ pub mod maintenance;
 pub mod audible;
 pub mod covers;
 pub mod export;
+pub mod chapters;
 
 // Re-export all commands for easy access
 // pub use config::*;

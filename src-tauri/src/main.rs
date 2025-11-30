@@ -16,6 +16,7 @@ mod tag_inspector;
 mod commands;
 mod cover_art;
 mod normalize;  // Text normalization utilities
+mod chapters;   // Chapter detection and splitting
 
 // use tauri::Manager;
 
@@ -50,6 +51,7 @@ fn main() {
             commands::audible::check_audible_installed,
             commands::covers::get_cover_for_group,
             commands::covers::search_cover_options,
+            commands::covers::search_covers_multi_source,
             commands::covers::download_cover_from_url,
             commands::covers::set_cover_from_file,
             commands::abs::clear_abs_library_cache,
@@ -57,6 +59,17 @@ fn main() {
             commands::export::export_to_json,
             commands::export::import_from_csv,
             commands::export::import_from_json,
+            // Chapter commands
+            commands::chapters::check_ffmpeg,
+            commands::chapters::get_chapters,
+            commands::chapters::detect_chapters_silence,
+            commands::chapters::get_or_detect_chapters,
+            commands::chapters::split_audiobook_chapters,
+            commands::chapters::update_chapter_titles,
+            commands::chapters::get_audio_duration,
+            commands::chapters::create_chapters_from_files,
+            commands::chapters::merge_chapters,
+            commands::chapters::adjust_chapter_boundary,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
