@@ -1,10 +1,11 @@
 // src-tauri/src/scanner/processor.rs
-// IMPROVED VERSION - Smart Series Handling
+// IMPROVED VERSION - Smart Series Handling + Normalization
 // GPT validates/chooses from candidates instead of inventing series names
 
 use super::types::*;
 use crate::cache;
 use crate::config::Config;
+use crate::normalize;
 use futures::stream::{self, StreamExt};
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
@@ -701,17 +702,18 @@ JSON:"#,
                         metadata.isbn = google_data.as_ref().and_then(|d| d.isbn.clone());
                     }
 
-                    metadata
+                    // Apply normalization before returning
+                    normalize_metadata(metadata)
                 }
                 Err(e) => {
                     println!("   ❌ GPT parse error: {}", e);
-                    fallback_metadata(extracted_title, extracted_author, google_data, audible_data, reliable_year)
+                    normalize_metadata(fallback_metadata(extracted_title, extracted_author, google_data, audible_data, reliable_year))
                 }
             }
         }
         Err(e) => {
             println!("   ❌ GPT API error: {}", e);
-            fallback_metadata(extracted_title, extracted_author, google_data, audible_data, reliable_year)
+            normalize_metadata(fallback_metadata(extracted_title, extracted_author, google_data, audible_data, reliable_year))
         }
     }
 }
@@ -783,6 +785,7 @@ fn fallback_metadata(
         .map(|d| d.authors.clone())
         .unwrap_or_else(|| split_authors(extracted_author));
 
+    // Note: normalize_metadata is called by the callers of fallback_metadata
     BookMetadata {
         title: extracted_title.to_string(),
         subtitle: google_data.as_ref().and_then(|d| d.subtitle.clone()),
@@ -826,6 +829,99 @@ fn split_authors(author: &str) -> Vec<String> {
     }
 
     vec![author.to_string()]
+}
+
+/// Normalize all fields in a BookMetadata struct
+/// Applies title case, removes junk suffixes, cleans author/narrator names, etc.
+fn normalize_metadata(mut metadata: BookMetadata) -> BookMetadata {
+    // Normalize title
+    metadata.title = normalize::normalize_title(&metadata.title);
+
+    // Extract subtitle if not already set
+    if metadata.subtitle.is_none() {
+        let (clean_title, subtitle) = normalize::extract_subtitle(&metadata.title);
+        if subtitle.is_some() {
+            metadata.title = clean_title;
+            metadata.subtitle = subtitle;
+        }
+    } else {
+        // Also normalize the subtitle
+        metadata.subtitle = metadata.subtitle.map(|s| normalize::to_title_case(&s));
+    }
+
+    // Clean author name
+    if normalize::is_valid_author(&metadata.author) {
+        metadata.author = normalize::clean_author_name(&metadata.author);
+    }
+
+    // Clean all authors in the array
+    metadata.authors = metadata.authors
+        .into_iter()
+        .filter(|a| normalize::is_valid_author(a))
+        .map(|a| normalize::clean_author_name(&a))
+        .collect();
+
+    // If authors array is empty, populate from author field
+    if metadata.authors.is_empty() && normalize::is_valid_author(&metadata.author) {
+        metadata.authors = split_authors(&metadata.author)
+            .into_iter()
+            .map(|a| normalize::clean_author_name(&a))
+            .collect();
+    }
+
+    // Clean narrator name
+    if let Some(ref narrator) = metadata.narrator {
+        if normalize::is_valid_narrator(narrator) {
+            metadata.narrator = Some(normalize::clean_narrator_name(narrator));
+        } else {
+            metadata.narrator = None;
+        }
+    }
+
+    // Clean all narrators in the array
+    metadata.narrators = metadata.narrators
+        .into_iter()
+        .filter(|n| normalize::is_valid_narrator(n))
+        .map(|n| normalize::clean_narrator_name(&n))
+        .collect();
+
+    // If narrators array is empty, populate from narrator field
+    if metadata.narrators.is_empty() {
+        if let Some(ref narrator) = metadata.narrator {
+            if normalize::is_valid_narrator(narrator) {
+                metadata.narrators = vec![narrator.clone()];
+            }
+        }
+    }
+
+    // Validate and normalize year
+    if let Some(ref year) = metadata.year {
+        metadata.year = normalize::validate_year(year);
+    }
+
+    // Normalize description
+    if let Some(ref desc) = metadata.description {
+        metadata.description = Some(normalize::normalize_description(desc, Some(2000)));
+    }
+
+    // Normalize series name (already done by normalize_series_name, but double-check)
+    if let Some(ref series) = metadata.series {
+        let normalized = normalize_series_name(series);
+        // Apply title case
+        metadata.series = Some(normalize::to_title_case(&normalized));
+    }
+
+    // Normalize publisher
+    if let Some(ref publisher) = metadata.publisher {
+        let clean = publisher.trim();
+        if !clean.is_empty() && clean.to_lowercase() != "unknown" {
+            metadata.publisher = Some(normalize::to_title_case(clean));
+        } else {
+            metadata.publisher = None;
+        }
+    }
+
+    metadata
 }
 
 pub async fn enrich_with_gpt(
@@ -981,7 +1077,7 @@ JSON:"#,
                     let genres = json.get("genres").map(get_string_array).unwrap_or_default();
                     
                     let narrator = json.get("narrator").and_then(get_string);
-                    BookMetadata {
+                    normalize_metadata(BookMetadata {
                         title: extracted_title.to_string(),
                         author: extracted_author.to_string(),
                         subtitle: None,
@@ -1004,11 +1100,11 @@ JSON:"#,
                         runtime_minutes: None,
                         explicit: None,
                         publish_date: None,
-                    }
+                    })
                 }
                 Err(e) => {
                     println!("   ❌ GPT parse error: {}", e);
-                    BookMetadata {
+                    normalize_metadata(BookMetadata {
                         title: extracted_title.to_string(),
                         author: extracted_author.to_string(),
                         subtitle: None,
@@ -1031,12 +1127,12 @@ JSON:"#,
                         runtime_minutes: None,
                         explicit: None,
                         publish_date: None,
-                    }
+                    })
                 }
             }
         }
         Err(_) => {
-            BookMetadata {
+            normalize_metadata(BookMetadata {
                 title: extracted_title.to_string(),
                 author: extracted_author.to_string(),
                 subtitle: None,
@@ -1059,7 +1155,7 @@ JSON:"#,
                 runtime_minutes: None,
                 explicit: None,
                 publish_date: None,
-            }
+            })
         }
     }
 }
