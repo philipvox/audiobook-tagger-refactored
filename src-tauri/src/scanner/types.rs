@@ -57,6 +57,29 @@ pub struct BookMetadata {
     pub cover_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_mime: Option<String>,
+
+    // NEW FIELDS for complete metadata capture
+    /// Multiple authors support (for "Author1 & Author2" cases)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    /// Multiple narrators support (ABS supports multiple)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub narrators: Vec<String>,
+    /// ISO language code (e.g., "en", "es", "de")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Whether the audiobook is abridged
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abridged: Option<bool>,
+    /// Total runtime in minutes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_minutes: Option<u32>,
+    /// Content is explicit (contains mature content)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicit: Option<bool>,
+    /// Full publish date in YYYY-MM-DD format
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

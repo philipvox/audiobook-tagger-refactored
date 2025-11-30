@@ -622,10 +622,10 @@ JSON:"#,
             match serde_json::from_str::<BookMetadata>(&json_str) {
                 Ok(mut metadata) => {
                     // Override with reliable year
-                    if let Some(year) = reliable_year {
+                    if let Some(year) = reliable_year.clone() {
                         metadata.year = Some(year);
                     }
-                    
+
                     // VALIDATE series - reject if it matches title or looks wrong
                     if let Some(ref series) = metadata.series {
                         if !is_valid_series(series, &metadata.title) {
@@ -636,7 +636,7 @@ JSON:"#,
                             metadata.series = Some(normalize_series_name(series));
                         }
                     }
-                    
+
                     // ALWAYS prefer Audible's series and sequence if available
                     if let Some((ref series_name, ref position)) = authoritative_series {
                         if is_valid_series(series_name, &metadata.title) {
@@ -649,10 +649,58 @@ JSON:"#,
                             }
                         }
                     }
-                    
+
                     // Set ASIN from Audible
                     metadata.asin = audible_data.as_ref().and_then(|d| d.asin.clone());
-                    
+
+                    // SET NEW FIELDS from Audible data (authoritative source)
+                    if let Some(ref aud) = audible_data {
+                        // Multiple authors (prefer Audible, fallback to splitting extracted)
+                        if !aud.authors.is_empty() {
+                            metadata.authors = aud.authors.clone();
+                        } else {
+                            metadata.authors = split_authors(extracted_author);
+                        }
+
+                        // Multiple narrators (Audible is authoritative)
+                        if !aud.narrators.is_empty() {
+                            metadata.narrators = aud.narrators.clone();
+                            // Also set legacy narrator field
+                            if metadata.narrator.is_none() {
+                                metadata.narrator = aud.narrators.first().cloned();
+                            }
+                        }
+
+                        // Language
+                        metadata.language = aud.language.clone();
+
+                        // Runtime
+                        metadata.runtime_minutes = aud.runtime_minutes;
+
+                        // Abridged status
+                        metadata.abridged = aud.abridged;
+
+                        // Full publish date
+                        metadata.publish_date = aud.release_date.clone();
+
+                        // Prefer Audible description if GPT didn't provide one
+                        if metadata.description.is_none() || metadata.description.as_ref().map(|d| d.len() < 100).unwrap_or(true) {
+                            if let Some(ref desc) = aud.description {
+                                if desc.len() >= 50 {
+                                    metadata.description = Some(desc.clone());
+                                }
+                            }
+                        }
+                    } else {
+                        // No Audible data - use defaults
+                        metadata.authors = split_authors(extracted_author);
+                    }
+
+                    // ISBN from Google Books (more reliable for ISBN)
+                    if metadata.isbn.is_none() {
+                        metadata.isbn = google_data.as_ref().and_then(|d| d.isbn.clone());
+                    }
+
                     metadata
                 }
                 Err(e) => {
@@ -672,7 +720,7 @@ JSON:"#,
 // SUPPORTING FUNCTIONS (mostly unchanged)
 // ============================================================================
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, Debug, Clone)]
 struct AudibleMetadata {
     asin: Option<String>,
     title: Option<String>,
@@ -682,9 +730,15 @@ struct AudibleMetadata {
     publisher: Option<String>,
     release_date: Option<String>,
     description: Option<String>,
+    /// ISO language code (e.g., "en", "es")
+    language: Option<String>,
+    /// Runtime in minutes
+    runtime_minutes: Option<u32>,
+    /// Whether the audiobook is abridged
+    abridged: Option<bool>,
 }
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, Debug, Clone)]
 struct AudibleSeries {
     name: String,
     position: Option<String>,
@@ -717,25 +771,61 @@ fn fallback_metadata(
             }
         })
         .unwrap_or((None, None));
-    
+
+    // Get all narrators, use first for legacy narrator field
+    let narrators = audible_data.as_ref()
+        .map(|d| d.narrators.clone())
+        .unwrap_or_default();
+    let narrator = narrators.first().cloned();
+
+    // Get all authors, split if contains "&" or "and"
+    let authors = audible_data.as_ref()
+        .map(|d| d.authors.clone())
+        .unwrap_or_else(|| split_authors(extracted_author));
+
     BookMetadata {
         title: extracted_title.to_string(),
         subtitle: google_data.as_ref().and_then(|d| d.subtitle.clone()),
         author: extracted_author.to_string(),
-        narrator: audible_data.as_ref().and_then(|d| d.narrators.first().cloned()),
+        narrator,
         series,
         sequence,
         genres: google_data.as_ref().map(|d| d.genres.clone()).unwrap_or_default(),
         publisher: google_data.as_ref().and_then(|d| d.publisher.clone())
             .or_else(|| audible_data.as_ref().and_then(|d| d.publisher.clone())),
-        year: reliable_year,
+        year: reliable_year.clone(),
         description: google_data.as_ref().and_then(|d| d.description.clone())
             .or_else(|| audible_data.as_ref().and_then(|d| d.description.clone())),
         isbn: google_data.as_ref().and_then(|d| d.isbn.clone()),
         asin: audible_data.as_ref().and_then(|d| d.asin.clone()),
         cover_mime: None,
         cover_url: None,
+        // NEW FIELDS
+        authors,
+        narrators,
+        language: audible_data.as_ref().and_then(|d| d.language.clone()),
+        abridged: audible_data.as_ref().and_then(|d| d.abridged),
+        runtime_minutes: audible_data.as_ref().and_then(|d| d.runtime_minutes),
+        explicit: None,
+        publish_date: audible_data.as_ref().and_then(|d| d.release_date.clone()),
     }
+}
+
+/// Split author string into multiple authors
+fn split_authors(author: &str) -> Vec<String> {
+    // Common separators for multiple authors
+    let separators = [" & ", " and ", ", ", "; "];
+
+    for sep in &separators {
+        if author.contains(sep) {
+            return author.split(sep)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+
+    vec![author.to_string()]
 }
 
 pub async fn enrich_with_gpt(
@@ -763,6 +853,14 @@ pub async fn enrich_with_gpt(
                 asin: None,
                 cover_mime: None,
                 cover_url: None,
+                // NEW FIELDS
+                authors: split_authors(extracted_author),
+                narrators: vec![],
+                language: None,
+                abridged: None,
+                runtime_minutes: None,
+                explicit: None,
+                publish_date: None,
             };
         }
     };
@@ -882,11 +980,12 @@ JSON:"#,
                     // Get genres
                     let genres = json.get("genres").map(get_string_array).unwrap_or_default();
                     
+                    let narrator = json.get("narrator").and_then(get_string);
                     BookMetadata {
                         title: extracted_title.to_string(),
                         author: extracted_author.to_string(),
                         subtitle: None,
-                        narrator: json.get("narrator").and_then(get_string),
+                        narrator: narrator.clone(),
                         series,
                         sequence,
                         genres,
@@ -897,6 +996,14 @@ JSON:"#,
                         asin: None,
                         cover_mime: None,
                         cover_url: None,
+                        // NEW FIELDS
+                        authors: split_authors(extracted_author),
+                        narrators: narrator.map(|n| vec![n]).unwrap_or_default(),
+                        language: None,
+                        abridged: None,
+                        runtime_minutes: None,
+                        explicit: None,
+                        publish_date: None,
                     }
                 }
                 Err(e) => {
@@ -916,6 +1023,14 @@ JSON:"#,
                         asin: None,
                         cover_mime: None,
                         cover_url: None,
+                        // NEW FIELDS
+                        authors: split_authors(extracted_author),
+                        narrators: vec![],
+                        language: None,
+                        abridged: None,
+                        runtime_minutes: None,
+                        explicit: None,
+                        publish_date: None,
                     }
                 }
             }
@@ -936,6 +1051,14 @@ JSON:"#,
                 asin: None,
                 cover_mime: None,
                 cover_url: None,
+                // NEW FIELDS
+                authors: split_authors(extracted_author),
+                narrators: vec![],
+                language: None,
+                abridged: None,
+                runtime_minutes: None,
+                explicit: None,
+                publish_date: None,
             }
         }
     }
@@ -1083,46 +1206,53 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
         .replace(' ', "+")
         .replace('&', "%26")
         .replace('\'', "%27");
-    
+
     let search_url = format!("https://www.audible.com/search?keywords={}", encoded_query);
-    
+
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .timeout(std::time::Duration::from_secs(15))
         .build()
         .ok()?;
-    
+
     let response = client.get(&search_url).send().await.ok()?;
     let html = response.text().await.ok()?;
-    
+
     // Parse ASIN from search results
     let asin_regex = regex::Regex::new(r#"/pd/[^/]+/([A-Z0-9]{10})"#).ok()?;
     let asin = asin_regex.captures(&html)
         .and_then(|caps| caps.get(1))
         .map(|m| m.as_str().to_string())?;
-    
+
     // Fetch product page
     let product_url = format!("https://www.audible.com/pd/{}", asin);
     let product_response = client.get(&product_url).send().await.ok()?;
     let product_html = product_response.text().await.ok()?;
-    
+
     // Extract title
     let title_regex = regex::Regex::new(r#"<meta[^>]*property="og:title"[^>]*content="([^"]+)""#).ok()?;
     let extracted_title = title_regex.captures(&product_html)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().replace(" (Audiobook)", "").replace(" Audiobook", ""));
-    
-    // Extract author
+
+    // Extract ALL authors (not just first)
     let author_regex = regex::Regex::new(r#"/author/[^"]*"[^>]*>([^<]+)</a>"#).ok()?;
-    let extracted_author = author_regex.captures(&product_html)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().trim().to_string());
-    
-    // Extract narrator
+    let extracted_authors: Vec<String> = author_regex
+        .captures_iter(&product_html)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    // Extract ALL narrators (not just first)
     let narrator_regex = regex::Regex::new(r#"/narrator/[^"]*"[^>]*>([^<]+)</a>"#).ok()?;
-    let extracted_narrator = narrator_regex.captures(&product_html)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().trim().to_string());
-    
+    let extracted_narrators: Vec<String> = narrator_regex
+        .captures_iter(&product_html)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
     // Extract series - look for series link with book number
     let series_regex = regex::Regex::new(r#"/series/[^"]*"[^>]*>([^<]+)</a>[^<]*,?\s*Book\s*(\d+)"#).ok()?;
     let (series_name, series_position) = if let Some(caps) = series_regex.captures(&product_html) {
@@ -1138,19 +1268,31 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
             .map(|m| m.as_str().trim().to_string());
         (name, None)
     };
-    
+
     // Extract publisher
     let publisher_regex = regex::Regex::new(r#"/publisher/[^"]*"[^>]*>([^<]+)</a>"#).ok()?;
     let publisher = publisher_regex.captures(&product_html)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().trim().to_string());
-    
-    // Extract release date
+
+    // Extract release date from JSON-LD schema
     let date_regex = regex::Regex::new(r#""datePublished"\s*:\s*"([^"]+)""#).ok()?;
     let release_date = date_regex.captures(&product_html)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string());
-    
+
+    // NEW: Extract description from JSON-LD schema
+    let description = extract_audible_description(&product_html);
+
+    // NEW: Extract language from page (look for language meta or JSON-LD)
+    let language = extract_audible_language(&product_html);
+
+    // NEW: Extract runtime in minutes
+    let runtime_minutes = extract_audible_runtime(&product_html);
+
+    // NEW: Check if abridged
+    let abridged = detect_abridged(&product_html);
+
     let series_vec = if let Some(name) = series_name {
         vec![AudibleSeries {
             name,
@@ -1159,17 +1301,137 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
     } else {
         vec![]
     };
-    
+
     Some(AudibleMetadata {
         asin: Some(asin),
         title: extracted_title,
-        authors: extracted_author.map(|a| vec![a]).unwrap_or_default(),
-        narrators: extracted_narrator.map(|n| vec![n]).unwrap_or_default(),
+        authors: extracted_authors,
+        narrators: extracted_narrators,
         series: series_vec,
         publisher,
         release_date,
-        description: None,
+        description,
+        language,
+        runtime_minutes,
+        abridged,
     })
+}
+
+/// Extract description from Audible page JSON-LD or HTML
+fn extract_audible_description(html: &str) -> Option<String> {
+    // Try JSON-LD first (most reliable)
+    if let Ok(desc_regex) = regex::Regex::new(r#""description"\s*:\s*"([^"]+)""#) {
+        if let Some(caps) = desc_regex.captures(html) {
+            if let Some(desc) = caps.get(1) {
+                let description = desc.as_str()
+                    .replace("\\n", " ")
+                    .replace("\\r", "")
+                    .replace("\\\"", "\"")
+                    .replace("&amp;", "&")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&#39;", "'")
+                    .trim()
+                    .to_string();
+
+                // Skip if it's too short or looks like metadata
+                if description.len() > 50 && !description.starts_with("http") {
+                    return Some(description);
+                }
+            }
+        }
+    }
+
+    // Fallback: Try to get from publisher's summary section
+    if let Ok(summary_regex) = regex::Regex::new(r#"(?s)<div[^>]*class="[^"]*productPublisherSummary[^"]*"[^>]*>.*?<p[^>]*>(.*?)</p>"#) {
+        if let Some(caps) = summary_regex.captures(html) {
+            if let Some(desc) = caps.get(1) {
+                let clean_desc = desc.as_str()
+                    .replace("<br>", " ")
+                    .replace("<br/>", " ")
+                    .replace("<br />", " ");
+                // Strip remaining HTML tags
+                if let Ok(tag_regex) = regex::Regex::new(r"<[^>]+>") {
+                    let stripped = tag_regex.replace_all(&clean_desc, "").trim().to_string();
+                    if stripped.len() > 50 {
+                        return Some(stripped);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract language from Audible page
+fn extract_audible_language(html: &str) -> Option<String> {
+    // Look for language in JSON-LD
+    if let Ok(lang_regex) = regex::Regex::new(r#""inLanguage"\s*:\s*"([a-z]{2})""#) {
+        if let Some(caps) = lang_regex.captures(html) {
+            return caps.get(1).map(|m| m.as_str().to_string());
+        }
+    }
+
+    // Look for language in page content
+    if let Ok(lang_regex) = regex::Regex::new(r#"(?i)Language:\s*([A-Za-z]+)"#) {
+        if let Some(caps) = lang_regex.captures(html) {
+            let lang = caps.get(1)?.as_str().to_lowercase();
+            // Map common language names to ISO codes
+            return Some(match lang.as_str() {
+                "english" => "en",
+                "spanish" | "español" => "es",
+                "french" | "français" => "fr",
+                "german" | "deutsch" => "de",
+                "italian" | "italiano" => "it",
+                "portuguese" | "português" => "pt",
+                "japanese" | "日本語" => "ja",
+                "chinese" | "中文" => "zh",
+                _ => &lang,
+            }.to_string());
+        }
+    }
+
+    // Default to English for Audible.com
+    Some("en".to_string())
+}
+
+/// Extract runtime in minutes from Audible page
+fn extract_audible_runtime(html: &str) -> Option<u32> {
+    // Look for duration in various formats
+    // Format: "X hrs and Y mins" or "X hr Y min"
+    if let Ok(runtime_regex) = regex::Regex::new(r#"(?i)(\d+)\s*(?:hrs?|hours?)\s*(?:and\s*)?(\d+)?\s*(?:mins?|minutes?)?"#) {
+        if let Some(caps) = runtime_regex.captures(html) {
+            let hours: u32 = caps.get(1)?.as_str().parse().ok()?;
+            let minutes: u32 = caps.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+            return Some(hours * 60 + minutes);
+        }
+    }
+
+    // Format: "X minutes" (for short audiobooks)
+    if let Ok(mins_regex) = regex::Regex::new(r#"(?i)(\d+)\s*(?:mins?|minutes?)"#) {
+        if let Some(caps) = mins_regex.captures(html) {
+            return caps.get(1)?.as_str().parse().ok();
+        }
+    }
+
+    None
+}
+
+/// Detect if audiobook is abridged
+fn detect_abridged(html: &str) -> Option<bool> {
+    let html_lower = html.to_lowercase();
+
+    // Check for explicit abridged/unabridged markers
+    if html_lower.contains("unabridged") {
+        return Some(false);
+    }
+    if html_lower.contains("abridged") && !html_lower.contains("unabridged") {
+        return Some(true);
+    }
+
+    // Default to unabridged if not specified (most audiobooks are unabridged)
+    Some(false)
 }
 
 fn extract_series_from_folder(folder_name: &str) -> (Option<String>, Option<String>) {
@@ -1312,13 +1574,13 @@ JSON:"#,
 
 fn calculate_changes(group: &mut BookGroup) -> usize {
     let mut total_changes = 0;
-    
+
     for file in &mut group.files {
         file.changes.clear();
-        
+
         // Read current tags from file to compare
         let current = read_file_tags(&file.path);
-        
+
         // Compare and add changes
         if current.title.as_ref() != Some(&group.metadata.title) {
             file.changes.insert("title".to_string(), MetadataChange {
@@ -1327,7 +1589,7 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             });
             total_changes += 1;
         }
-        
+
         if current.artist.as_ref() != Some(&group.metadata.author) {
             file.changes.insert("author".to_string(), MetadataChange {
                 old: current.artist.unwrap_or_default(),
@@ -1335,7 +1597,7 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             });
             total_changes += 1;
         }
-        
+
         if current.album.as_ref() != Some(&group.metadata.title) {
             file.changes.insert("album".to_string(), MetadataChange {
                 old: current.album.unwrap_or_default(),
@@ -1343,15 +1605,23 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             });
             total_changes += 1;
         }
-        
-        if let Some(ref narrator) = group.metadata.narrator {
+
+        // Handle multiple narrators - join with semicolon for ABS compatibility
+        if !group.metadata.narrators.is_empty() {
+            let narrators_str = group.metadata.narrators.join("; ");
+            file.changes.insert("narrator".to_string(), MetadataChange {
+                old: String::new(),
+                new: narrators_str,
+            });
+            total_changes += 1;
+        } else if let Some(ref narrator) = group.metadata.narrator {
             file.changes.insert("narrator".to_string(), MetadataChange {
                 old: String::new(),
                 new: narrator.clone(),
             });
             total_changes += 1;
         }
-        
+
         if !group.metadata.genres.is_empty() {
             file.changes.insert("genre".to_string(), MetadataChange {
                 old: current.genre.unwrap_or_default(),
@@ -1359,7 +1629,7 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             });
             total_changes += 1;
         }
-        
+
         if let Some(ref series) = group.metadata.series {
             file.changes.insert("series".to_string(), MetadataChange {
                 old: String::new(),
@@ -1367,7 +1637,7 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             });
             total_changes += 1;
         }
-        
+
         if let Some(ref sequence) = group.metadata.sequence {
             file.changes.insert("sequence".to_string(), MetadataChange {
                 old: String::new(),
@@ -1375,7 +1645,7 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             });
             total_changes += 1;
         }
-        
+
         if let Some(ref description) = group.metadata.description {
             file.changes.insert("description".to_string(), MetadataChange {
                 old: current.comment.unwrap_or_default(),
@@ -1383,7 +1653,7 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             });
             total_changes += 1;
         }
-        
+
         if let Some(ref year) = group.metadata.year {
             if current.year.as_ref() != Some(year) {
                 file.changes.insert("year".to_string(), MetadataChange {
@@ -1393,7 +1663,40 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
                 total_changes += 1;
             }
         }
+
+        // NEW FIELDS - Add ASIN, ISBN, language, publisher to changes
+        if let Some(ref asin) = group.metadata.asin {
+            file.changes.insert("asin".to_string(), MetadataChange {
+                old: String::new(),
+                new: asin.clone(),
+            });
+            total_changes += 1;
+        }
+
+        if let Some(ref isbn) = group.metadata.isbn {
+            file.changes.insert("isbn".to_string(), MetadataChange {
+                old: String::new(),
+                new: isbn.clone(),
+            });
+            total_changes += 1;
+        }
+
+        if let Some(ref language) = group.metadata.language {
+            file.changes.insert("language".to_string(), MetadataChange {
+                old: String::new(),
+                new: language.clone(),
+            });
+            total_changes += 1;
+        }
+
+        if let Some(ref publisher) = group.metadata.publisher {
+            file.changes.insert("publisher".to_string(), MetadataChange {
+                old: String::new(),
+                new: publisher.clone(),
+            });
+            total_changes += 1;
+        }
     }
-    
+
     total_changes
 }

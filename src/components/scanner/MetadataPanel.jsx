@@ -219,11 +219,22 @@ export function MetadataPanel({ group, onEdit }) {
                 </div>
               )}
 
-              {/* Narrator */}
-              {metadata.narrator && (
+              {/* Narrator(s) - Support multiple narrators */}
+              {(metadata.narrators?.length > 0 || metadata.narrator) && (
                 <div className="space-y-3">
-                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Narrated by</div>
-                  <p className="text-lg font-medium text-gray-900">{metadata.narrator}</p>
+                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                    Narrated by
+                    {metadata.narrators?.length > 1 && (
+                      <span className="ml-2 px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded text-[10px]">
+                        {metadata.narrators.length}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-lg font-medium text-gray-900">
+                    {metadata.narrators?.length > 0
+                      ? metadata.narrators.join(', ')
+                      : metadata.narrator}
+                  </p>
                 </div>
               )}
 
@@ -253,10 +264,10 @@ export function MetadataPanel({ group, onEdit }) {
                 </div>
               )}
 
-              {/* Publisher & ISBN */}
-              {(metadata.publisher || metadata.isbn) && (
+              {/* Publisher & Identifiers Section */}
+              {(metadata.publisher || metadata.isbn || metadata.asin || metadata.language || metadata.runtime_minutes) && (
                 <div className="pt-6 border-t border-gray-200">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-6">
                     {metadata.publisher && (
                       <div className="space-y-1">
                         <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Publisher</div>
@@ -267,6 +278,34 @@ export function MetadataPanel({ group, onEdit }) {
                       <div className="space-y-1">
                         <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">ISBN</div>
                         <div className="text-gray-900 font-mono text-sm">{metadata.isbn}</div>
+                      </div>
+                    )}
+                    {metadata.asin && (
+                      <div className="space-y-1">
+                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">ASIN</div>
+                        <div className="text-gray-900 font-mono text-sm">{metadata.asin}</div>
+                      </div>
+                    )}
+                    {metadata.language && (
+                      <div className="space-y-1">
+                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Language</div>
+                        <div className="text-gray-900 font-medium uppercase">{metadata.language}</div>
+                      </div>
+                    )}
+                    {metadata.runtime_minutes && (
+                      <div className="space-y-1">
+                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Runtime</div>
+                        <div className="text-gray-900 font-medium">
+                          {Math.floor(metadata.runtime_minutes / 60)}h {metadata.runtime_minutes % 60}m
+                        </div>
+                      </div>
+                    )}
+                    {metadata.abridged !== null && metadata.abridged !== undefined && (
+                      <div className="space-y-1">
+                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Format</div>
+                        <div className={`font-medium ${metadata.abridged ? 'text-orange-600' : 'text-green-600'}`}>
+                          {metadata.abridged ? 'Abridged' : 'Unabridged'}
+                        </div>
                       </div>
                     )}
                   </div>
