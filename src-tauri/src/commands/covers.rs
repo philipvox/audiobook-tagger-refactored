@@ -2,6 +2,11 @@ use std::fs;
 use std::path::Path;
 use serde::{Serialize, Deserialize};
 use anyhow::Result;
+use crate::cover_art::{
+    CoverSource, CoverCandidate, CoverSearchResult,
+    search_all_cover_sources, download_and_validate_cover,
+    get_image_dimensions_from_data,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CoverResult {
@@ -16,24 +21,30 @@ pub struct CoverData {
     pub size_kb: usize,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    pub source: Option<String>,
 }
 
 #[tauri::command]
 pub async fn get_cover_for_group(group_id: String) -> Result<Option<CoverData>, String> {
     let cache_key = format!("cover_{}", group_id);
-    
+
     if let Some((cover_data, mime_type)) = crate::cache::get::<(Vec<u8>, String)>(&cache_key) {
         let size_kb = cover_data.len() / 1024;
-        
+
         // Try to get image dimensions
         let (width, height) = get_image_dimensions(&cover_data);
-        
+
+        // Try to get source from cache
+        let source_key = format!("cover_source_{}", group_id);
+        let source = crate::cache::get::<String>(&source_key);
+
         Ok(Some(CoverData {
             data: cover_data,
             mime_type,
             size_kb,
             width,
             height,
+            source,
         }))
     } else {
         Ok(None)
@@ -90,132 +101,139 @@ pub struct CoverOption {
     pub width: u32,
     pub height: u32,
     pub size_estimate: String,
+    pub quality_score: u8,
+    pub book_title: Option<String>,
+}
+
+impl From<CoverCandidate> for CoverOption {
+    fn from(candidate: CoverCandidate) -> Self {
+        let size_estimate = match candidate.width.min(candidate.height) {
+            2000.. => "Extra Large (Best Quality)".to_string(),
+            1500..=1999 => "Large".to_string(),
+            1000..=1499 => "Medium-Large".to_string(),
+            500..=999 => "Medium".to_string(),
+            _ => "Small".to_string(),
+        };
+
+        CoverOption {
+            url: candidate.url,
+            source: candidate.source.to_string(),
+            width: candidate.width,
+            height: candidate.height,
+            size_estimate,
+            quality_score: candidate.quality_score,
+            book_title: candidate.book_title,
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn search_cover_options(
     title: String,
     author: String,
-    _isbn: Option<String>, // Kept for API compatibility, unused
+    isbn: Option<String>,
     asin: Option<String>,
 ) -> Result<Vec<CoverOption>, String> {
-    let mut options = Vec::new();
-    
-    println!("🎨 Searching for cover options: {} by {}", title, author);
-    
-    // PRIORITY 1: Try iTunes/Apple Books FIRST (best quality and most reliable)
-    if let Some(itunes_options) = try_itunes_options(&title, &author).await {
-        options.extend(itunes_options);
-    }
-    
-    // PRIORITY 2: Try Audible if ASIN available (also excellent quality)
-    if let Some(ref asin_str) = asin {
-        let audible_options = vec![
-            CoverOption {
-                url: format!("https://m.media-amazon.com/images/I/{}_SL2400_.jpg", asin_str),
-                source: "Audible".to_string(),
-                width: 2400,
-                height: 2400,
-                size_estimate: "Extra Large (Best Quality)".to_string(),
-            },
-            CoverOption {
-                url: format!("https://m.media-amazon.com/images/I/{}_SL1500_.jpg", asin_str),
-                source: "Audible".to_string(),
-                width: 1500,
-                height: 1500,
-                size_estimate: "Large".to_string(),
-            },
-        ];
-        options.extend(audible_options);
-    }
-    
+    println!("🎨 Searching all cover sources: {} by {}", title, author);
+
+    // Use the new multi-source search
+    let result = search_all_cover_sources(
+        &title,
+        &author,
+        isbn.as_deref(),
+        asin.as_deref(),
+    ).await;
+
+    // Convert candidates to CoverOptions
+    let options: Vec<CoverOption> = result.candidates
+        .into_iter()
+        .map(CoverOption::from)
+        .collect();
+
+    println!("🎨 Found {} cover options", options.len());
     Ok(options)
 }
 
-async fn try_itunes_options(title: &str, author: &str) -> Option<Vec<CoverOption>> {
-    let search_query = format!("{} {}", title, author);
-    let search_url = format!(
-        "https://itunes.apple.com/search?term={}&media=audiobook&entity=audiobook&limit=3",
-        urlencoding::encode(&search_query)
-    );
-    
-    let client = reqwest::Client::new();
-    match client.get(&search_url).send().await {
-        Ok(response) if response.status().is_success() => {
-            if let Ok(json) = response.json::<serde_json::Value>().await {
-                if let Some(results) = json["results"].as_array() {
-                    let mut options = Vec::new();
-                    
-                    for result in results.iter().take(3) {
-                        if let Some(artwork_url) = result["artworkUrl100"].as_str() {
-                            let high_res_url = artwork_url
-                                .replace("100x100", "2048x2048")
-                                .replace("100x100bb", "2048x2048bb");
-                            
-                            // Get the book title from the result for better identification
-                            let book_name = result["collectionName"]
-                                .as_str()
-                                .unwrap_or("Unknown")
-                                .to_string();
-                            
-                            options.push(CoverOption {
-                                url: high_res_url,
-                                source: format!("iTunes: {}", book_name),
-                                width: 2048,
-                                height: 2048,
-                                size_estimate: "High Resolution".to_string(),
-                            });
-                        }
-                    }
-                    
-                    if !options.is_empty() {
-                        return Some(options);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    
-    None
+/// Search covers from all sources and return detailed results
+#[tauri::command]
+pub async fn search_covers_multi_source(
+    title: String,
+    author: String,
+    isbn: Option<String>,
+    asin: Option<String>,
+) -> Result<CoverSearchResult, String> {
+    println!("🎨 Multi-source cover search: {} by {}", title, author);
+
+    let result = search_all_cover_sources(
+        &title,
+        &author,
+        isbn.as_deref(),
+        asin.as_deref(),
+    ).await;
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn download_cover_from_url(
     group_id: String,
     url: String,
+    source: Option<String>,
 ) -> Result<CoverResult, String> {
     println!("📥 Downloading cover from: {}", url);
-    
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
         .build()
         .map_err(|e| e.to_string())?;
-    
+
     match client.get(&url).send().await {
         Ok(response) if response.status().is_success() => {
             if let Ok(bytes) = response.bytes().await {
                 let data = bytes.to_vec();
-                
+
+                // Validate it's a real image
+                if data.len() < 100 {
+                    return Err("Downloaded file too small - may be a placeholder".to_string());
+                }
+
                 // Determine mime type from magic bytes
-                let mime_type = if data.len() >= 8 
-                    && data[0] == 0x89 
-                    && data[1] == 0x50 
-                    && data[2] == 0x4E 
-                    && data[3] == 0x47 
-                {
+                let is_png = data.len() >= 8
+                    && data[0] == 0x89
+                    && data[1] == 0x50
+                    && data[2] == 0x4E
+                    && data[3] == 0x47;
+                let is_jpeg = data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8;
+
+                if !is_png && !is_jpeg {
+                    return Err("Downloaded file is not a valid image".to_string());
+                }
+
+                let mime_type = if is_png {
                     "image/png".to_string()
                 } else {
                     "image/jpeg".to_string()
                 };
-                
+
+                // Get dimensions for logging
+                let (width, height) = get_image_dimensions_from_data(&data);
+                let size_kb = data.len() / 1024;
+                println!("   ✅ Downloaded: {}x{} ({} KB)", width, height, size_kb);
+
                 let cache_key = format!("cover_{}", group_id);
                 crate::cache::set(&cache_key, &(data, mime_type))
                     .map_err(|e| e.to_string())?;
-                
+
+                // Also cache the source if provided
+                if let Some(src) = source {
+                    let source_key = format!("cover_source_{}", group_id);
+                    let _ = crate::cache::set(&source_key, &src);
+                }
+
                 Ok(CoverResult {
                     success: true,
-                    message: "Cover downloaded successfully".to_string(),
+                    message: format!("Cover downloaded successfully ({}x{}, {} KB)", width, height, size_kb),
                 })
             } else {
                 Err("Failed to read image data".to_string())
