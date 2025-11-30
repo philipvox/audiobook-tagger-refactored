@@ -120,6 +120,10 @@ pub struct SplitRequest {
     pub copy_metadata: Option<bool>,
     pub embed_cover: Option<bool>,
     pub create_playlist: Option<bool>,
+    /// Base64-encoded cover image data
+    pub cover_data: Option<String>,
+    /// MIME type of cover image (e.g., "image/jpeg", "image/png")
+    pub cover_mime_type: Option<String>,
 }
 
 /// Split an audiobook by chapters
@@ -154,8 +158,35 @@ pub async fn split_audiobook_chapters(request: SplitRequest) -> Result<SplitResu
         track_number_width: 2,
     };
 
-    chapters::split_by_chapters(&request.file_path, &request.chapters, &options, None)
-        .map_err(|e| e.to_string())
+    // Parse cover data if provided
+    let cover = match (&request.cover_data, &request.cover_mime_type) {
+        (Some(data_base64), Some(mime_type)) => {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(data_base64) {
+                Ok(data) => {
+                    println!("   🖼️  Cover data provided ({} bytes)", data.len());
+                    Some(chapters::CoverData {
+                        data,
+                        mime_type: mime_type.clone(),
+                    })
+                }
+                Err(e) => {
+                    eprintln!("   ⚠️  Failed to decode cover data: {}", e);
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
+    chapters::split_by_chapters_with_cover(
+        &request.file_path,
+        &request.chapters,
+        &options,
+        None,
+        cover.as_ref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Update chapter titles

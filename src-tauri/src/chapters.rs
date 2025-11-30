@@ -504,12 +504,29 @@ fn create_chapters_from_silence(
 // CHAPTER SPLITTING
 // ============================================================================
 
+/// Cover data for embedding in split files
+pub struct CoverData {
+    pub data: Vec<u8>,
+    pub mime_type: String,
+}
+
 /// Split an audio file by chapters
 pub fn split_by_chapters(
     file_path: &str,
     chapters: &[Chapter],
     options: &SplitOptions,
     progress_callback: Option<Box<dyn Fn(SplitProgress) + Send>>,
+) -> Result<SplitResult> {
+    split_by_chapters_with_cover(file_path, chapters, options, progress_callback, None)
+}
+
+/// Split an audio file by chapters with optional cover embedding
+pub fn split_by_chapters_with_cover(
+    file_path: &str,
+    chapters: &[Chapter],
+    options: &SplitOptions,
+    progress_callback: Option<Box<dyn Fn(SplitProgress) + Send>>,
+    cover: Option<&CoverData>,
 ) -> Result<SplitResult> {
     let path = Path::new(file_path);
     if !path.exists() {
@@ -617,6 +634,26 @@ pub fn split_by_chapters(
 
         output_files.push(output_path.to_string_lossy().to_string());
         println!("   ✅ Created: {}", output_path.display());
+
+        // Embed cover art if provided and requested
+        if options.embed_cover {
+            if let Some(cover_data) = cover {
+                let output_path_str = output_path.to_string_lossy().to_string();
+                match crate::cover_art::embed_cover_in_file(
+                    &output_path_str,
+                    &cover_data.data,
+                    &cover_data.mime_type,
+                ) {
+                    Ok(_) => {
+                        println!("   🖼️  Cover embedded in chapter {}", idx + 1);
+                    }
+                    Err(e) => {
+                        // Log but don't fail - cover embedding is optional
+                        eprintln!("   ⚠️  Failed to embed cover in chapter {}: {}", idx + 1, e);
+                    }
+                }
+            }
+        }
     }
 
     // Create M3U playlist if requested
