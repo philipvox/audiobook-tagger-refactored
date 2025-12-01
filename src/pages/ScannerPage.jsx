@@ -302,8 +302,8 @@ export function ScannerPage({ onActionsReady }) {
     console.log(`✅ Bulk updated ${selectedGroupIds.size} books`);
   };
 
-  // Handle import from CSV
-  const handleImport = (updates) => {
+  // Handle import from CSV/JSON
+  const handleDataImport = (updates) => {
     if (!updates || updates.length === 0) return;
 
     // If updates is an array of BookGroups (from JSON import)
@@ -555,7 +555,7 @@ export function ScannerPage({ onActionsReady }) {
           isOpen={showExportModal}
           onClose={() => setShowExportModal(false)}
           groups={groups}
-          onImport={handleImport}
+          onImport={handleDataImport}
         />
       )}
 
