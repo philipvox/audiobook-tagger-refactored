@@ -80,6 +80,13 @@ pub struct BookGroup {
     pub metadata: BookMetadata,
     pub files: Vec<AudioFile>,
     pub total_changes: usize,
+    /// Indicates how metadata was obtained (loaded from file vs new scan)
+    #[serde(default = "default_scan_status")]
+    pub scan_status: ScanStatus,
+}
+
+fn default_scan_status() -> ScanStatus {
+    ScanStatus::NotScanned
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +95,18 @@ pub enum GroupType {
     Single,
     Chapters,
     MultiPart,
+}
+
+/// Indicates how metadata was obtained for this book
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanStatus {
+    /// Metadata was loaded from existing metadata.json file (no API calls needed)
+    LoadedFromFile,
+    /// Metadata was fetched fresh from APIs (new scan)
+    NewScan,
+    /// Book was imported but not yet scanned
+    NotScanned,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

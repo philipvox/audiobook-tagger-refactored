@@ -2,7 +2,7 @@
 // IMPROVED VERSION - Smart Series Handling + Normalization
 // GPT validates/chooses from candidates instead of inventing series names
 
-use super::types::*;
+use super::types::{AudioFile, BookGroup, BookMetadata, MetadataChange, MetadataSource, MetadataSources, ScanStatus};
 use crate::cache;
 use crate::config::Config;
 use crate::normalize;
@@ -200,18 +200,26 @@ async fn process_book_group(
     cancel_flag: Option<Arc<AtomicBool>>,
     covers_found: Arc<AtomicUsize>,
 ) -> Result<BookGroup, Box<dyn std::error::Error + Send + Sync>> {
-    
+
     if let Some(ref flag) = cancel_flag {
         if flag.load(Ordering::Relaxed) {
             return Ok(group);
         }
     }
-    
+
+    // SKIP API CALLS if metadata was loaded from existing metadata.json
+    if group.scan_status == ScanStatus::LoadedFromFile {
+        println!("   ⚡ Skipping API calls for '{}' (metadata.json exists)", group.metadata.title);
+        group.total_changes = calculate_changes(&mut group);
+        return Ok(group);
+    }
+
     let cache_key = format!("book_{}", group.group_name);
-    
+
     // Check cache first
     if let Some(cached_metadata) = cache::get::<BookMetadata>(&cache_key) {
         group.metadata = cached_metadata;
+        group.scan_status = ScanStatus::NewScan; // Mark as scanned (from cache)
         group.total_changes = calculate_changes(&mut group);
         return Ok(group);
     }
@@ -353,13 +361,16 @@ async fn process_book_group(
     }
     
     group.metadata = final_metadata;
-    
+
     // Cache the result
     let _ = cache::set(&cache_key, &group.metadata);
-    
+
+    // Mark as newly scanned
+    group.scan_status = ScanStatus::NewScan;
+
     // Calculate changes
     group.total_changes = calculate_changes(&mut group);
-    
+
     Ok(group)
 }
 
