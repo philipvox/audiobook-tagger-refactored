@@ -1,5 +1,6 @@
 // src-tauri/src/commands/scan.rs
 use crate::scanner;
+use crate::scanner::ScanMode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use once_cell::sync::Lazy;
@@ -36,29 +37,47 @@ pub async fn import_folders(paths: Vec<String>) -> Result<scanner::ScanResult, S
     Ok(result)
 }
 
+/// Scan library with configurable scan mode
+/// - scan_mode: "normal", "refresh_metadata", "force_fresh", or "selective_refresh"
+/// - force: Legacy parameter, if true uses force_fresh mode
 #[tauri::command]
-pub async fn scan_library(paths: Vec<String>, force: Option<bool>) -> Result<scanner::ScanResult, String> {
-    let force = force.unwrap_or(false);
-    println!("🔍 scan_library called with {} paths (force={})", paths.len(), force);
+pub async fn scan_library(
+    paths: Vec<String>,
+    force: Option<bool>,
+    scan_mode: Option<String>
+) -> Result<scanner::ScanResult, String> {
+    // Determine scan mode from parameters
+    let mode = if let Some(mode_str) = scan_mode {
+        match mode_str.as_str() {
+            "normal" => ScanMode::Normal,
+            "refresh_metadata" => ScanMode::RefreshMetadata,
+            "force_fresh" => ScanMode::ForceFresh,
+            "selective_refresh" => ScanMode::SelectiveRefresh,
+            _ => {
+                println!("⚠️ Unknown scan mode '{}', using normal", mode_str);
+                ScanMode::Normal
+            }
+        }
+    } else if force.unwrap_or(false) {
+        // Legacy force=true maps to ForceFresh
+        ScanMode::ForceFresh
+    } else {
+        ScanMode::Normal
+    };
+
+    println!("🔍 scan_library called with {} paths (mode={:?})", paths.len(), mode);
 
     CANCEL_FLAG.store(false, Ordering::SeqCst);
 
-    // FORCE cache clear every time to prevent stale data issues
-    if let Err(e) = crate::cache::clear() {
-        println!("⚠️ Cache clear failed: {}", e);
-    } else {
-        println!("🗑️ Cache cleared successfully");
-    }
-
-    let result = scanner::scan_directories(&paths, Some(CANCEL_FLAG.clone()), force)
+    let result = scanner::scan_directories(&paths, Some(CANCEL_FLAG.clone()), mode)
         .await
         .map_err(|e| {
             println!("❌ Scan error: {}", e);
             e.to_string()
         })?;
-    
+
     println!("📊 Scan complete: {} groups, {} files", result.groups.len(), result.total_files);
-    
+
     // DEBUG: Try to serialize to check for cycles
     match serde_json::to_string(&result) {
         Ok(json) => {
@@ -79,7 +98,7 @@ pub async fn scan_library(paths: Vec<String>, force: Option<bool>) -> Result<sca
             return Err(format!("Serialization error: {}", e));
         }
     }
-    
+
     Ok(result)
 }
 

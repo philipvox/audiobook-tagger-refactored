@@ -232,21 +232,27 @@ export function useScan() {
     }
   }, [setGroups]);
 
-  const handleRescan = useCallback(async (selectedFiles, groups) => {
+  /**
+   * Rescan selected files with configurable scan mode
+   * @param {Set} selectedFiles - Set of selected file IDs
+   * @param {Array} groups - Array of book groups
+   * @param {string} scanMode - Scan mode: 'normal', 'refresh_metadata', 'force_fresh', 'selective_refresh'
+   */
+  const handleRescan = useCallback(async (selectedFiles, groups, scanMode = 'force_fresh') => {
     if (progressIntervalRef.current) {
       clearInterval(progressIntervalRef.current);
       progressIntervalRef.current = null;
     }
-    
+
     if (resetTimeoutRef.current) {
       clearTimeout(resetTimeoutRef.current);
       resetTimeoutRef.current = null;
     }
-    
+
     try {
       const selectedFilePaths = new Set();
       const pathsToScan = new Set();
-      
+
       groups.forEach(group => {
         group.files.forEach(file => {
           if (selectedFiles.has(file.id)) {
@@ -258,13 +264,13 @@ export function useScan() {
           }
         });
       });
-      
+
       const paths = Array.from(pathsToScan);
-      
+
       if (paths.length === 0) {
         return { success: false, count: 0 };
       }
-      
+
       setScanning(true);
       const startTime = Date.now();
       setScanProgress({
@@ -275,14 +281,14 @@ export function useScan() {
         filesPerSecond: 0,
         covers_found: 0,
       });
-      
+
       progressIntervalRef.current = setInterval(async () => {
         try {
           const progress = await invoke('get_scan_progress');
           const now = Date.now();
           const elapsed = (now - startTime) / 1000;
           const rate = progress.current > 0 && elapsed > 0 ? progress.current / elapsed : 0;
-          
+
           setScanProgress({
             current: progress.current,
             total: progress.total,
@@ -295,13 +301,16 @@ export function useScan() {
           // Ignore
         }
       }, 500);
-      
+
       try {
         let allNewGroups = [];
         for (const path of paths) {
           try {
-            // Pass force: true to rescan even if metadata.json exists
-            const result = await invoke('scan_library', { paths: [path], force: true });
+            // Pass scan_mode parameter for configurable rescan behavior
+            const result = await invoke('scan_library', {
+              paths: [path],
+              scanMode: scanMode
+            });
             if (result && result.groups) {
               allNewGroups.push(...result.groups);
             }
@@ -309,28 +318,28 @@ export function useScan() {
             console.error(`Failed to scan ${path}:`, error);
           }
         }
-        
+
         setGroups(prevGroups => {
           const filtered = prevGroups.filter(group => {
-            const hasSelectedFile = group.files.some(file => 
+            const hasSelectedFile = group.files.some(file =>
               selectedFilePaths.has(file.path)
             );
             return !hasSelectedFile;
           });
-          
+
           return [...filtered, ...allNewGroups];
         });
-        
+
         return { success: true, count: allNewGroups.length };
-        
+
       } finally {
         if (progressIntervalRef.current) {
           clearInterval(progressIntervalRef.current);
           progressIntervalRef.current = null;
         }
-        
+
         setScanning(false);
-        
+
         resetTimeoutRef.current = setTimeout(() => {
           setScanProgress({
             current: 0,
@@ -345,17 +354,17 @@ export function useScan() {
       }
     } catch (error) {
       console.error('Rescan failed:', error);
-      
+
       if (progressIntervalRef.current) {
         clearInterval(progressIntervalRef.current);
         progressIntervalRef.current = null;
       }
-      
+
       if (resetTimeoutRef.current) {
         clearTimeout(resetTimeoutRef.current);
         resetTimeoutRef.current = null;
       }
-      
+
       setScanning(false);
       throw error;
     }

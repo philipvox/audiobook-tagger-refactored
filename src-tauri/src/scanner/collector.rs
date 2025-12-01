@@ -117,6 +117,9 @@ fn load_metadata_json(folder_path: &str) -> (Option<BookMetadata>, bool) {
         explicit: None,
         publish_date: None,
         sources: None,
+        // Collection fields - detected later in processing
+        is_collection: false,
+        collection_books: vec![],
     }), true)
 }
 
@@ -281,6 +284,9 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                     explicit: None,
                     publish_date: None,
                     sources: None,
+                    // Collection fields - detected later in processing
+                    is_collection: false,
+                    collection_books: vec![],
                 }, ScanStatus::NotScanned)
             };
 
