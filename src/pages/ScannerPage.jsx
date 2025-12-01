@@ -28,6 +28,7 @@ export function ScannerPage({ onActionsReady }) {
     scanProgress,
     calculateETA,
     handleScan,
+    handleImport,
     handleRescan,
     cancelScan
   } = useScan();
@@ -495,6 +496,7 @@ export function ScannerPage({ onActionsReady }) {
           onSelectGroup={handleSelectGroup}
           onSelectFile={handleGroupClick}
           onScan={handleScan}
+          onImport={handleImport}
           scanning={scanning}
           onSelectAll={handleSelectAll}
           onClearSelection={handleClearSelection}
