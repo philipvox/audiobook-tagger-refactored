@@ -102,23 +102,9 @@ pub async fn clear_all_genres() -> Result<String, String> {
         return Ok("No unused genres found - all genres are assigned to at least one book".to_string());
     }
 
-    // Trigger a library rescan to refresh the genre list and clear stale entries
-    let scan_url = format!("{}/api/libraries/{}/scan", config.abs_base_url, config.abs_library_id);
-    let scan_response = client
-        .post(&scan_url)
-        .header("Authorization", format!("Bearer {}", config.abs_api_token))
-        .send()
-        .await;
-
-    let scan_status = match scan_response {
-        Ok(resp) if resp.status().is_success() => "Library rescan triggered to clear stale data",
-        _ => "Note: Could not trigger library rescan",
-    };
-
-    Ok(format!("Found {} unused genres: {}. {}",
+    Ok(format!("Found {} unused genres: {}",
         unused_genres.len(),
-        unused_genres.join(", "),
-        scan_status
+        unused_genres.join(", ")
     ))
 }
 
