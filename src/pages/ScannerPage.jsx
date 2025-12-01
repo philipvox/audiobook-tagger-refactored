@@ -42,11 +42,17 @@ export function ScannerPage({ onActionsReady }) {
   const {
     selectedFiles,
     setSelectedFiles,
+    allSelected,
+    setAllSelected,
     lastSelectedIndex,
     setLastSelectedIndex,
     selectAllInGroup,
     clearSelection,
     selectAll,
+    isFileSelected,
+    isGroupSelected,
+    getSelectedFileIds,
+    getSelectedCount,
     getSuccessCount,
     getFilesWithChanges
   } = useFileSelection();
@@ -66,33 +72,38 @@ export function ScannerPage({ onActionsReady }) {
     }
 
     setSelectedGroup(group);
-    
+
+    // Cancel "all selected" mode when clicking individual groups
+    if (allSelected) {
+      setAllSelected(false);
+    }
+
     if (event.shiftKey && lastSelectedIndex !== null) {
       const start = Math.min(lastSelectedIndex, index);
       const end = Math.max(lastSelectedIndex, index);
-      
+
       const newSelectedFiles = new Set(selectedFiles);
       const newSelectedGroupIds = new Set(selectedGroupIds);
-      
+
       for (let i = start; i <= end; i++) {
         const g = groups[i];
         newSelectedGroupIds.add(g.id);
         g.files.forEach(f => newSelectedFiles.add(f.id));
       }
-      
+
       setSelectedFiles(newSelectedFiles);
       setSelectedGroupIds(newSelectedGroupIds);
     } else if (!event.shiftKey && !event.metaKey && !event.ctrlKey) {
       const newSelectedFiles = new Set();
       const newSelectedGroupIds = new Set();
-      
+
       newSelectedGroupIds.add(group.id);
       group.files.forEach(f => newSelectedFiles.add(f.id));
-      
+
       setSelectedFiles(newSelectedFiles);
       setSelectedGroupIds(newSelectedGroupIds);
     }
-    
+
     setLastSelectedIndex(index);
   };
 
@@ -110,17 +121,10 @@ export function ScannerPage({ onActionsReady }) {
     });
   };
 
+  // Optimized: use allSelected flag instead of building huge Sets
   const handleSelectAll = () => {
-    const allFiles = new Set();
-    const allGroupIds = new Set();
-    
-    groups.forEach(group => {
-      allGroupIds.add(group.id);
-      group.files.forEach(file => allFiles.add(file.id));
-    });
-    
-    setSelectedFiles(allFiles);
-    setSelectedGroupIds(allGroupIds);
+    selectAll(groups);
+    setSelectedGroupIds(new Set()); // Clear - we use allSelected flag
   };
 
   const handleClearSelection = () => {
@@ -212,16 +216,17 @@ export function ScannerPage({ onActionsReady }) {
 
   // Get selected groups for bulk edit
   const getSelectedGroups = () => {
+    if (allSelected) return groups;
     return groups.filter(g => selectedGroupIds.has(g.id));
   };
 
   // Handle bulk edit save
   const handleBulkSave = (updates) => {
-    if (selectedGroupIds.size === 0) return;
+    if (selectedGroupIds.size === 0 && !allSelected) return;
 
     setGroups(prevGroups =>
       prevGroups.map(group => {
-        if (!selectedGroupIds.has(group.id)) return group;
+        if (!allSelected && !selectedGroupIds.has(group.id)) return group;
 
         // Merge updates into metadata
         const newMetadata = {
@@ -381,7 +386,8 @@ export function ScannerPage({ onActionsReady }) {
 
   // ✅ SIMPLIFIED - No popups, just write
   const handleWriteClick = async () => {
-    if (selectedFiles.size === 0) {
+    const selectedCount = getSelectedCount(groups);
+    if (selectedCount === 0 && !allSelected) {
       console.log('No files selected');
       return;
     }
@@ -394,9 +400,10 @@ export function ScannerPage({ onActionsReady }) {
 
     try {
       console.log(`🚀 Writing ${filesWithChanges.length} files...`);
-      const result = await writeSelectedTags(selectedFiles, false); // false = no backup for speed
+      const actualSelectedFiles = getSelectedFileIds(groups);
+      const result = await writeSelectedTags(actualSelectedFiles, false); // false = no backup for speed
       console.log(`✅ Wrote ${result.success} files, ${result.failed} failed`);
-      
+
       if (result.success > 0) {
         handleClearSelection();
       }
@@ -407,17 +414,20 @@ export function ScannerPage({ onActionsReady }) {
 
   // ✅ SIMPLIFIED - No popup
   const handleRenameClick = () => {
-    if (selectedFiles.size === 0) return;
+    const selectedCount = getSelectedCount(groups);
+    if (selectedCount === 0 && !allSelected) return;
     setShowRenameModal(true);
   };
 
   // ✅ SIMPLIFIED - No popup, just rescan
   const handleRescanClick = async () => {
-    if (selectedFiles.size === 0) return;
+    const selectedCount = getSelectedCount(groups);
+    if (selectedCount === 0 && !allSelected) return;
 
     try {
-      console.log(`🔄 Rescanning ${selectedFiles.size} files...`);
-      const result = await handleRescan(selectedFiles, groups);
+      console.log(`🔄 Rescanning ${selectedCount} files...`);
+      const actualSelectedFiles = getSelectedFileIds(groups);
+      const result = await handleRescan(actualSelectedFiles, groups);
       console.log(`✅ Rescanned ${result.count} books`);
       handleClearSelection();
       clearFileStatuses();
@@ -428,16 +438,18 @@ export function ScannerPage({ onActionsReady }) {
 
   // ✅ Push all selected files (including non-rescanned/imported ones)
   const handlePushClick = async () => {
-    if (selectedFiles.size === 0) {
+    const selectedCount = getSelectedCount(groups);
+    if (selectedCount === 0 && !allSelected) {
       console.log('No files selected');
       return;
     }
 
     try {
-      console.log(`📤 Pushing ${selectedFiles.size} files to AudiobookShelf...`);
+      console.log(`📤 Pushing ${selectedCount} files to AudiobookShelf...`);
+      const actualSelectedFiles = getSelectedFileIds(groups);
 
       const result = await pushToAudiobookShelf(
-        selectedFiles,
+        actualSelectedFiles,
         (progress) => {
           console.log(`Progress: ${progress.itemsProcessed}/${progress.totalItems} items`);
         }
@@ -461,6 +473,7 @@ export function ScannerPage({ onActionsReady }) {
       {/* Action bars at the top */}
       <ActionBar
         selectedFiles={selectedFiles}
+        allSelected={allSelected}
         groups={groups}
         fileStatuses={fileStatuses}
         selectedGroupCount={selectedGroupIds.size}
@@ -480,6 +493,7 @@ export function ScannerPage({ onActionsReady }) {
         <BookList
           groups={groups}
           selectedFiles={selectedFiles}
+          allSelected={allSelected}
           selectedGroup={selectedGroup}
           selectedGroupIds={selectedGroupIds}
           expandedGroups={expandedGroups}
@@ -538,7 +552,7 @@ export function ScannerPage({ onActionsReady }) {
         />
       )}
 
-      {showBulkEditModal && selectedGroupIds.size > 0 && (
+      {showBulkEditModal && (selectedGroupIds.size > 0 || allSelected) && (
         <BulkEditModal
           isOpen={showBulkEditModal}
           onClose={() => setShowBulkEditModal(false)}
@@ -558,17 +572,21 @@ export function ScannerPage({ onActionsReady }) {
 
       {showRenameModal && (
         <RenamePreviewModal
-          selectedFiles={Array.from(selectedFiles).map(id => {
-            for (const group of groups) {
-              const file = group.files.find(f => f.id === id);
-              if (file) return file.path;
-            }
-            return null;
-          }).filter(Boolean)}
+          selectedFiles={(() => {
+            const fileIds = getSelectedFileIds(groups);
+            return Array.from(fileIds).map(id => {
+              for (const group of groups) {
+                const file = group.files.find(f => f.id === id);
+                if (file) return file.path;
+              }
+              return null;
+            }).filter(Boolean);
+          })()}
           metadata={selectedGroup?.metadata}
           onConfirm={async () => {
             try {
-              await renameFiles(selectedFiles);
+              const actualSelectedFiles = getSelectedFileIds(groups);
+              await renameFiles(actualSelectedFiles);
               setShowRenameModal(false);
               await handleScan();
             } catch (error) {
