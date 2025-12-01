@@ -2003,72 +2003,11 @@ fn tags_are_clean(title: Option<&str>, artist: Option<&str>) -> bool {
     title.len() >= 3 && artist.len() >= 3
 }
 
-/// Check if a name looks like a specific book title (from filename) rather than a folder name
-/// This helps detect when multiple .m4b files in the same folder need individual titles
-fn looks_like_book_title(name: &str) -> bool {
-    let lower = name.to_lowercase();
-
-    // Patterns that indicate this is a filename-derived title
-    let book_indicators = [
-        " - a ",          // "Title - A Novel", "Title - A Cosmere Novel"
-        " - the ",        // "Title - The Sequel"
-        "novel",          // "A Cosmere Novel"
-        "novella",        // "A Cosmere Novella"
-        "collection",     // "The Cosmere Collection"
-        " by ",           // "Title by Author"
-    ];
-
-    // Check for book indicators
-    if book_indicators.iter().any(|p| lower.contains(p)) {
-        return true;
-    }
-
-    // Pattern: "Series # - Title" like "Cosmere 10 - Sixth of the Dusk"
-    // Must have a number followed by separator and more text
-    let has_numbered_pattern = {
-        let parts: Vec<&str> = name.split(" - ").collect();
-        if parts.len() >= 2 {
-            // Check if first part ends with a number
-            parts[0].chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false)
-        } else {
-            false
-        }
-    };
-
-    if has_numbered_pattern {
-        return true;
-    }
-
-    // Pattern: "Author Name - Title" where both parts have multiple words
-    let dash_parts: Vec<&str> = name.split(" - ").collect();
-    if dash_parts.len() >= 2 {
-        let first_part_words = dash_parts[0].split_whitespace().count();
-        let rest_words: usize = dash_parts[1..].iter()
-            .map(|p| p.split_whitespace().count())
-            .sum();
-        // Both parts should have at least 2 words (likely Author Name - Book Title)
-        if first_part_words >= 2 && rest_words >= 2 {
-            return true;
-        }
-    }
-
-    false
-}
-
 async fn extract_book_info_with_gpt(
     sample_file: &RawFileData,
     folder_name: &str,
     api_key: Option<&str>
 ) -> (String, String) {
-    // CHECK: If folder_name looks like a specific book title (from split m4b files),
-    // use it directly instead of relying on embedded tags
-    // This handles cases where multiple .m4b files in the same folder have shared/wrong embedded tags
-    if looks_like_book_title(folder_name) {
-        println!("   ⚡ Using filename-derived title: '{}'", folder_name);
-        let author = sample_file.tags.artist.clone().unwrap_or_else(|| String::from("Unknown"));
-        return (folder_name.to_string(), author);
-    }
-
     // PERFORMANCE: Skip GPT if tags are already clean
     if let (Some(title), Some(artist)) = (&sample_file.tags.title, &sample_file.tags.artist) {
         let clean_title = title.replace(" - Part 1", "").replace(" - Part 2", "").trim().to_string();
@@ -2091,7 +2030,7 @@ async fn extract_book_info_with_gpt(
     let clean_title = sample_file.tags.title.as_ref()
         .map(|t| t.replace(" - Part 1", "").replace(" - Part 2", "").trim().to_string());
     let clean_artist = sample_file.tags.artist.as_ref().map(|a| a.to_string());
-    
+
     let book_number = extract_book_number_from_folder(folder_name);
     let book_hint = if let Some(num) = &book_number {
         format!("\nBOOK NUMBER DETECTED: This is Book #{} in a series", num)
