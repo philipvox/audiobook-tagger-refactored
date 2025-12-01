@@ -109,6 +109,21 @@ pub enum ScanStatus {
     NotScanned,
 }
 
+/// Scan mode options for different rescan behaviors
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanMode {
+    /// Default: Skip if metadata.json exists
+    #[default]
+    Normal,
+    /// Bypass metadata.json but use cached API results (quick refresh)
+    RefreshMetadata,
+    /// Clear all caches AND bypass metadata.json (full fresh scan)
+    ForceFresh,
+    /// Re-fetch only specified fields (selective refresh)
+    SelectiveRefresh,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BookMetadata {
     #[serde(default)]
@@ -166,6 +181,14 @@ pub struct BookMetadata {
     /// Source tracking - where each metadata field came from
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sources: Option<MetadataSources>,
+
+    // COLLECTION DETECTION FIELDS
+    /// Whether this audiobook is a collection/omnibus containing multiple books
+    #[serde(default)]
+    pub is_collection: bool,
+    /// List of individual book titles if this is a collection
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collection_books: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

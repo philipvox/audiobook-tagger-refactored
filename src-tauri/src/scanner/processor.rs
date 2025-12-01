@@ -2,11 +2,12 @@
 // IMPROVED VERSION - Smart Series Handling + Normalization
 // GPT validates/chooses from candidates instead of inventing series names
 
-use super::types::{AudioFile, BookGroup, BookMetadata, MetadataChange, MetadataSource, MetadataSources, ScanStatus};
+use super::types::{AudioFile, BookGroup, BookMetadata, MetadataChange, MetadataSource, MetadataSources, ScanStatus, ScanMode};
 use crate::cache;
 use crate::config::Config;
 use crate::normalize;
 use futures::stream::{self, StreamExt};
+use indexmap::IndexSet;
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
 use lofty::file::TaggedFileExt;
@@ -141,12 +142,12 @@ pub async fn process_all_groups(
     groups: Vec<BookGroup>,
     config: &Config,
     cancel_flag: Option<Arc<AtomicBool>>,
-    force: bool,
+    scan_mode: ScanMode,
 ) -> Result<Vec<BookGroup>, Box<dyn std::error::Error + Send + Sync>> {
     let total = groups.len();
     let start_time = std::time::Instant::now();
 
-    println!("🚀 Processing {} book groups (force={})...", total, force);
+    println!("🚀 Processing {} book groups (mode={:?})...", total, scan_mode);
 
     crate::progress::update_progress(0, total, "Starting...");
 
@@ -162,10 +163,10 @@ pub async fn process_all_groups(
             let processed = processed.clone();
             let covers_found = covers_found.clone();
             let total = total;
-            let force = force;
+            let scan_mode = scan_mode;
 
             async move {
-                let result = process_book_group(group, &config, cancel_flag, covers_found.clone(), force).await;
+                let result = process_book_group(group, &config, cancel_flag, covers_found.clone(), scan_mode).await;
                 
                 let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
                 let covers = covers_found.load(Ordering::Relaxed);
@@ -201,7 +202,7 @@ async fn process_book_group(
     config: &Config,
     cancel_flag: Option<Arc<AtomicBool>>,
     covers_found: Arc<AtomicUsize>,
-    force: bool,
+    scan_mode: ScanMode,
 ) -> Result<BookGroup, Box<dyn std::error::Error + Send + Sync>> {
 
     if let Some(ref flag) = cancel_flag {
@@ -210,15 +211,35 @@ async fn process_book_group(
         }
     }
 
-    // SKIP API CALLS if metadata was loaded from existing metadata.json (unless force=true)
-    if !force && group.scan_status == ScanStatus::LoadedFromFile {
-        println!("   ⚡ Skipping API calls for '{}' (metadata.json exists)", group.metadata.title);
-        group.total_changes = calculate_changes(&mut group);
-        return Ok(group);
-    }
-
-    if force && group.scan_status == ScanStatus::LoadedFromFile {
-        println!("   🔄 Force rescan for '{}' (ignoring metadata.json)", group.metadata.title);
+    // Handle skip logic based on scan mode
+    match scan_mode {
+        ScanMode::Normal => {
+            // SKIP API CALLS if metadata was loaded from existing metadata.json
+            if group.scan_status == ScanStatus::LoadedFromFile {
+                println!("   ⚡ Skipping API calls for '{}' (metadata.json exists)", group.metadata.title);
+                group.total_changes = calculate_changes(&mut group);
+                return Ok(group);
+            }
+        }
+        ScanMode::RefreshMetadata => {
+            // Bypass metadata.json but use cached API results
+            if group.scan_status == ScanStatus::LoadedFromFile {
+                println!("   🔄 Refresh metadata for '{}' (bypassing metadata.json, using API cache)", group.metadata.title);
+                // Don't return - continue to process but API calls will use cache
+            }
+        }
+        ScanMode::ForceFresh => {
+            // Full rescan - ignore metadata.json AND clear caches (handled in mod.rs)
+            if group.scan_status == ScanStatus::LoadedFromFile {
+                println!("   🔄 Force fresh rescan for '{}' (ignoring metadata.json and cache)", group.metadata.title);
+            }
+        }
+        ScanMode::SelectiveRefresh => {
+            // Selective refresh - bypass metadata.json, use cache
+            if group.scan_status == ScanStatus::LoadedFromFile {
+                println!("   🔄 Selective refresh for '{}' (refreshing specific fields)", group.metadata.title);
+            }
+        }
     }
 
     let cache_key = format!("book_{}", group.group_name);
@@ -1023,6 +1044,9 @@ fn fallback_metadata(
         explicit: None,
         publish_date: audible_data.as_ref().and_then(|d| d.release_date.clone()),
         sources: Some(sources),
+        // Collection fields - detection happens in normalize_metadata
+        is_collection: false,
+        collection_books: vec![],
     }
 }
 
@@ -1175,6 +1199,9 @@ fn create_metadata_from_audible(
         explicit: None,
         publish_date: audible_data.release_date,
         sources: Some(sources),
+        // Collection fields - detection happens in normalize_metadata
+        is_collection: false,
+        collection_books: vec![],
     })
 }
 
@@ -1233,6 +1260,13 @@ fn normalize_metadata(mut metadata: BookMetadata) -> BookMetadata {
             .collect();
     }
 
+    // SYNC: Always ensure author matches authors[0] for consistency
+    if !metadata.authors.is_empty() {
+        metadata.author = metadata.authors[0].clone();
+    } else if normalize::is_valid_author(&metadata.author) {
+        metadata.authors = vec![metadata.author.clone()];
+    }
+
     // Clean narrator name
     if let Some(ref narrator) = metadata.narrator {
         if normalize::is_valid_narrator(narrator) {
@@ -1256,6 +1290,13 @@ fn normalize_metadata(mut metadata: BookMetadata) -> BookMetadata {
                 metadata.narrators = vec![narrator.clone()];
             }
         }
+    }
+
+    // SYNC: Always ensure narrator matches narrators[0] for consistency
+    if !metadata.narrators.is_empty() {
+        metadata.narrator = Some(metadata.narrators[0].clone());
+    } else if metadata.narrator.as_ref().map(|n| normalize::is_valid_narrator(n)).unwrap_or(false) {
+        metadata.narrators = vec![metadata.narrator.clone().unwrap()];
     }
 
     // Validate and normalize year
@@ -1282,6 +1323,36 @@ fn normalize_metadata(mut metadata: BookMetadata) -> BookMetadata {
             metadata.publisher = Some(normalize::to_title_case(clean));
         } else {
             metadata.publisher = None;
+        }
+    }
+
+    // COLLECTION DETECTION
+    // Only run if not already marked as collection
+    if !metadata.is_collection {
+        let (is_collection, mut collection_books) = detect_collection(
+            &metadata.title,
+            &metadata.title, // Use title as folder fallback
+            metadata.runtime_minutes
+        );
+
+        if is_collection {
+            metadata.is_collection = true;
+            println!("   📚 Detected collection: '{}'", metadata.title);
+
+            // Try to extract book titles from description
+            if collection_books.is_empty() {
+                if let Some(ref desc) = metadata.description {
+                    collection_books = extract_collection_books_from_description(
+                        desc,
+                        metadata.series.as_deref()
+                    );
+                }
+            }
+
+            if !collection_books.is_empty() {
+                println!("   📖 Found {} books in collection: {:?}", collection_books.len(), collection_books);
+                metadata.collection_books = collection_books;
+            }
         }
     }
 
@@ -1334,10 +1405,13 @@ pub async fn enrich_with_gpt(
                 explicit: None,
                 publish_date: None,
                 sources: Some(sources),
+                // Collection fields
+                is_collection: false,
+                collection_books: vec![],
             };
         }
     };
-    
+
     // IMPROVED prompt - encourage GPT to use knowledge for well-known series
     let prompt = format!(
 r#"You are enriching audiobook metadata using your knowledge.
@@ -1508,6 +1582,9 @@ JSON:"#,
                         explicit: None,
                         publish_date: None,
                         sources: Some(sources),
+                        // Collection fields
+                        is_collection: false,
+                        collection_books: vec![],
                     })
                 }
                 Err(e) => {
@@ -1546,6 +1623,9 @@ JSON:"#,
                         explicit: None,
                         publish_date: None,
                         sources: Some(sources),
+                        // Collection fields
+                        is_collection: false,
+                        collection_books: vec![],
                     })
                 }
             }
@@ -1585,6 +1665,9 @@ JSON:"#,
                 explicit: None,
                 publish_date: None,
                 sources: Some(sources),
+                // Collection fields
+                is_collection: false,
+                collection_books: vec![],
             })
         }
     }
@@ -1820,14 +1903,14 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
     }
 
     // Method 3: HTML link extraction (fallback)
+    // Use IndexSet to preserve order while deduplicating
     if extracted_authors.is_empty() {
         if let Ok(author_regex) = regex::Regex::new(r#"/author/[^"]*"[^>]*>([^<]+)</a>"#) {
-            extracted_authors = author_regex
+            let unique: IndexSet<String> = author_regex
                 .captures_iter(&product_html)
                 .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
                 .collect();
+            extracted_authors = unique.into_iter().collect();
         }
     }
 
@@ -1843,13 +1926,13 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
     }
 
     // Extract ALL narrators (not just first)
+    // Use IndexSet to preserve order while deduplicating
     let narrator_regex = regex::Regex::new(r#"/narrator/[^"]*"[^>]*>([^<]+)</a>"#).ok()?;
-    let extracted_narrators: Vec<String> = narrator_regex
+    let unique_narrators: IndexSet<String> = narrator_regex
         .captures_iter(&product_html)
         .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
         .collect();
+    let extracted_narrators: Vec<String> = unique_narrators.into_iter().collect();
 
     // Extract series - look for series link with book number
     let series_regex = regex::Regex::new(r#"/series/[^"]*"[^>]*>([^<]+)</a>[^<]*,?\s*Book\s*(\d+)"#).ok()?;
@@ -2034,6 +2117,165 @@ fn detect_abridged(html: &str) -> Option<bool> {
 
     // Default to unabridged if not specified (most audiobooks are unabridged)
     Some(false)
+}
+
+// ============================================================================
+// COLLECTION DETECTION
+// ============================================================================
+
+/// Collection detection patterns
+const COLLECTION_PATTERNS: &[&str] = &[
+    "collection",
+    "complete",
+    "omnibus",
+    "box set",
+    "boxed set",
+    "anthology",
+    "compendium",
+    "books 1",
+    "books 2",
+    "books 3",
+    "books 1-",
+    "books 2-",
+    "books one",
+    "books two",
+    "volumes 1",
+    "volumes 2",
+    "vol 1-",
+    "vol. 1-",
+    "trilogy",
+    "duology",
+    "complete series",
+    "complete saga",
+    "3-in-1",
+    "3 in 1",
+    "2-in-1",
+    "2 in 1",
+    "4-in-1",
+    "4 in 1",
+];
+
+/// Detect if title or folder name indicates a collection
+fn detect_collection(title: &str, folder_name: &str, runtime_minutes: Option<u32>) -> (bool, Vec<String>) {
+    let title_lower = title.to_lowercase();
+    let folder_lower = folder_name.to_lowercase();
+    let mut collection_books = Vec::new();
+
+    // Check for collection keywords in title or folder name
+    let mut is_collection = COLLECTION_PATTERNS.iter().any(|pattern| {
+        title_lower.contains(pattern) || folder_lower.contains(pattern)
+    });
+
+    // Check for "Books X-Y" pattern in title
+    if let Ok(books_range_regex) = regex::Regex::new(r"(?i)books?\s*(\d+)\s*[-–to]+\s*(\d+)") {
+        if let Some(caps) = books_range_regex.captures(&title_lower) {
+            is_collection = true;
+            if let (Some(start), Some(end)) = (caps.get(1), caps.get(2)) {
+                if let (Ok(s), Ok(e)) = (start.as_str().parse::<u32>(), end.as_str().parse::<u32>()) {
+                    // Generate book numbers
+                    for i in s..=e {
+                        collection_books.push(format!("Book {}", i));
+                    }
+                }
+            }
+        }
+    }
+
+    // Check runtime - unusually long runtimes suggest collection
+    // Average audiobook is ~10 hours (600 minutes), collection threshold > 30 hours (1800 minutes)
+    if let Some(runtime) = runtime_minutes {
+        if runtime > 1800 && !is_collection {
+            // Long runtime without collection keywords - flag as potential collection
+            println!("   ⚠️ Long runtime detected ({} hours) - potential collection", runtime / 60);
+        }
+        // Very long runtime (>50 hours) almost certainly a collection
+        if runtime > 3000 {
+            is_collection = true;
+            println!("   📚 Very long runtime ({} hours) - marking as collection", runtime / 60);
+        }
+    }
+
+    (is_collection, collection_books)
+}
+
+/// Extract individual book titles from collection description
+fn extract_collection_books_from_description(description: &str, series_name: Option<&str>) -> Vec<String> {
+    let mut books = Vec::new();
+
+    // Pattern 1: "Book 1: Title, Book 2: Title, ..."
+    if let Ok(book_title_regex) = regex::Regex::new(r"(?i)book\s*(\d+)[:\s]+([^,\n.]+)") {
+        for caps in book_title_regex.captures_iter(description) {
+            if let Some(title) = caps.get(2) {
+                let book_title = title.as_str().trim().to_string();
+                if book_title.len() > 3 && !books.contains(&book_title) {
+                    books.push(book_title);
+                }
+            }
+        }
+    }
+
+    // Pattern 2: Numbered list "1. Title\n2. Title\n..."
+    if books.is_empty() {
+        if let Ok(numbered_regex) = regex::Regex::new(r"(?m)^\s*(\d+)[.)\s]+([^\n]+)") {
+            for caps in numbered_regex.captures_iter(description) {
+                if let Some(title) = caps.get(2) {
+                    let book_title = title.as_str().trim().to_string();
+                    // Filter out common false positives
+                    if book_title.len() > 3
+                       && !book_title.to_lowercase().contains("chapter")
+                       && !book_title.to_lowercase().contains("narrator")
+                       && !books.contains(&book_title) {
+                        books.push(book_title);
+                    }
+                }
+            }
+        }
+    }
+
+    // Pattern 3: "Contains: Title, Title, and Title"
+    if books.is_empty() {
+        if let Ok(contains_regex) = regex::Regex::new(r"(?i)contains:?\s*([^.]+)") {
+            if let Some(caps) = contains_regex.captures(description) {
+                if let Some(content) = caps.get(1) {
+                    // Split by comma or "and"
+                    let items: Vec<&str> = content.as_str()
+                        .split(&[',', '&'][..])
+                        .flat_map(|s| s.split(" and "))
+                        .collect();
+                    for item in items {
+                        let book_title = item.trim().to_string();
+                        if book_title.len() > 3 && !books.contains(&book_title) {
+                            books.push(book_title);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Pattern 4: Known series - look for book titles from that series
+    if let Some(series) = series_name {
+        if books.is_empty() {
+            // Try to find titles that match "Series Name: Book Title" or "Book Title (Series Name)"
+            let series_lower = series.to_lowercase();
+            if let Ok(series_book_regex) = regex::Regex::new(&format!(
+                r"(?i){}[:\s]+([^,\n.]+)|([^,\n.]+)\s*\({}\)",
+                regex::escape(&series_lower),
+                regex::escape(&series_lower)
+            )) {
+                for caps in series_book_regex.captures_iter(description) {
+                    if let Some(title) = caps.get(1).or_else(|| caps.get(2)) {
+                        let book_title = title.as_str().trim().to_string();
+                        if book_title.len() > 3 && !books.contains(&book_title) {
+                            books.push(book_title);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    books
 }
 
 fn extract_series_from_folder(folder_name: &str) -> (Option<String>, Option<String>) {
