@@ -37,19 +37,20 @@ pub async fn import_folders(paths: Vec<String>) -> Result<scanner::ScanResult, S
 }
 
 #[tauri::command]
-pub async fn scan_library(paths: Vec<String>) -> Result<scanner::ScanResult, String> {
-    println!("🔍 scan_library called with {} paths", paths.len());
-    
+pub async fn scan_library(paths: Vec<String>, force: Option<bool>) -> Result<scanner::ScanResult, String> {
+    let force = force.unwrap_or(false);
+    println!("🔍 scan_library called with {} paths (force={})", paths.len(), force);
+
     CANCEL_FLAG.store(false, Ordering::SeqCst);
-    
+
     // FORCE cache clear every time to prevent stale data issues
     if let Err(e) = crate::cache::clear() {
         println!("⚠️ Cache clear failed: {}", e);
     } else {
         println!("🗑️ Cache cleared successfully");
     }
-    
-    let result = scanner::scan_directories(&paths, Some(CANCEL_FLAG.clone()))
+
+    let result = scanner::scan_directories(&paths, Some(CANCEL_FLAG.clone()), force)
         .await
         .map_err(|e| {
             println!("❌ Scan error: {}", e);
