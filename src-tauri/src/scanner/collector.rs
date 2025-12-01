@@ -75,7 +75,18 @@ fn collect_audio_files_from_path(path: &str) -> Result<Vec<RawFileData>, Box<dyn
         }
         
         if let Some(ext) = path.extension() {
-            if AUDIO_EXTENSIONS.contains(&ext.to_string_lossy().to_lowercase().as_str()) {
+            let ext_lower = ext.to_string_lossy().to_lowercase();
+            // Skip .bak files (used to hide original files from ABS after chapter splitting)
+            if ext_lower == "bak" {
+                continue;
+            }
+            // Also skip files ending with .m4b.bak, .mp3.bak, etc.
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                if file_name.ends_with(".bak") {
+                    continue;
+                }
+            }
+            if AUDIO_EXTENSIONS.contains(&ext_lower.as_str()) {
                 let parent = path.parent()
                     .unwrap_or(Path::new(""))
                     .to_string_lossy()
@@ -168,10 +179,51 @@ fn detect_group_type(files: &[RawFileData]) -> GroupType {
         GroupType::Single
     } else if files.iter().any(|f| {
         let lower = f.filename.to_lowercase();
-        lower.contains("part") || lower.contains("disk") || lower.contains("cd")
+        is_multi_part_filename(&lower)
     }) {
         GroupType::MultiPart
     } else {
         GroupType::Chapters
     }
+}
+
+/// Check if a filename indicates it's part of a multi-part/chapter set
+/// Returns true for common chapter/part naming conventions
+fn is_multi_part_filename(filename: &str) -> bool {
+    use regex::Regex;
+
+    // Direct keyword matches (case-insensitive, filename already lowercased)
+    let keywords = [
+        "part", "disk", "disc", "cd", "chapter", "chap", "ch.",
+        "track", "section", "segment", "volume", "vol.", "book",
+        "episode", "ep.", "side"
+    ];
+
+    if keywords.iter().any(|k| filename.contains(k)) {
+        return true;
+    }
+
+    // Pattern: starts with number followed by separator (01 - Title, 01_title, 01.title)
+    // This catches files like "01 - Chapter One.mp3", "01_intro.m4a"
+    lazy_static::lazy_static! {
+        static ref LEADING_NUM: Regex = Regex::new(r"^\d{1,3}[\s._-]").unwrap();
+        // Roman numerals: "I - ", "II.", "III_", "IV -", "V.", "VI_", etc.
+        static ref ROMAN_NUMERAL: Regex = Regex::new(r"(?i)\b(i{1,3}|iv|vi{0,3}|ix|xi{0,3}|xiv|xvi{0,3}|xix|xxi{0,3})[\s._-]").unwrap();
+        // Patterns like "pt1", "pt.1", "pt 1", "part1"
+        static ref PART_NUM: Regex = Regex::new(r"(?i)(pt|part|ch|chap|chapter|ep|episode|sec|section|track|trk)\.?\s*\d").unwrap();
+    }
+
+    if LEADING_NUM.is_match(filename) {
+        return true;
+    }
+
+    if ROMAN_NUMERAL.is_match(filename) {
+        return true;
+    }
+
+    if PART_NUM.is_match(filename) {
+        return true;
+    }
+
+    false
 }
