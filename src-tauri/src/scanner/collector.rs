@@ -1,5 +1,5 @@
 // src-tauri/src/scanner/collector.rs
-use super::types::*;
+use super::types::{AudioFile, BookGroup, BookMetadata, GroupType, RawFileData, ScanStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::path::Path;
@@ -46,18 +46,19 @@ struct AbsSeriesJson {
 }
 
 /// Try to load metadata.json from a folder
-fn load_metadata_json(folder_path: &str) -> Option<BookMetadata> {
+/// Returns (metadata, was_loaded_from_file)
+fn load_metadata_json(folder_path: &str) -> (Option<BookMetadata>, bool) {
     let json_path = Path::new(folder_path).join("metadata.json");
 
     if !json_path.exists() {
-        return None;
+        return (None, false);
     }
 
     let content = match std::fs::read_to_string(&json_path) {
         Ok(c) => c,
         Err(e) => {
             println!("   ⚠️ Failed to read metadata.json: {}", e);
-            return None;
+            return (None, false);
         }
     };
 
@@ -65,7 +66,7 @@ fn load_metadata_json(folder_path: &str) -> Option<BookMetadata> {
         Ok(m) => m,
         Err(e) => {
             println!("   ⚠️ Failed to parse metadata.json: {}", e);
-            return None;
+            return (None, false);
         }
     };
 
@@ -93,7 +94,7 @@ fn load_metadata_json(folder_path: &str) -> Option<BookMetadata> {
 
     println!("   ✅ Loaded metadata.json for '{}'", title);
 
-    Some(BookMetadata {
+    (Some(BookMetadata {
         title,
         author,
         subtitle: abs_meta.subtitle,
@@ -116,7 +117,7 @@ fn load_metadata_json(folder_path: &str) -> Option<BookMetadata> {
         explicit: None,
         publish_date: None,
         sources: None,
-    })
+    }), true)
 }
 
 pub async fn collect_and_group_files(
@@ -250,8 +251,14 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                 .collect();
 
             // Try to load existing metadata.json
-            let metadata = load_metadata_json(&parent_dir).unwrap_or_else(|| {
-                BookMetadata {
+            let (loaded_metadata, has_metadata_file) = load_metadata_json(&parent_dir);
+
+            let (metadata, scan_status) = if let Some(meta) = loaded_metadata {
+                // Metadata was loaded from file - no need to scan
+                (meta, ScanStatus::LoadedFromFile)
+            } else {
+                // No metadata.json found - needs scanning
+                (BookMetadata {
                     title: group_name.clone(),
                     author: "Unknown".to_string(),
                     subtitle: None,
@@ -274,8 +281,8 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                     explicit: None,
                     publish_date: None,
                     sources: None,
-                }
-            });
+                }, ScanStatus::NotScanned)
+            };
 
             BookGroup {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -284,6 +291,7 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                 metadata,
                 files: audio_files,
                 total_changes: 0,
+                scan_status,
             }
         })
         .collect()
