@@ -5,8 +5,119 @@ use std::sync::Arc;
 use std::path::Path;
 use walkdir::WalkDir;
 use std::collections::HashMap;
+use serde::Deserialize;
 
 const AUDIO_EXTENSIONS: &[&str] = &["m4b", "m4a", "mp3", "flac", "ogg", "opus", "aac"];
+
+// AudiobookShelf metadata.json format for reading
+#[derive(Debug, Deserialize)]
+struct AbsMetadataJson {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    subtitle: Option<String>,
+    #[serde(default)]
+    authors: Vec<String>,
+    #[serde(default)]
+    narrators: Vec<String>,
+    #[serde(default)]
+    series: Vec<AbsSeriesJson>,
+    #[serde(default)]
+    genres: Vec<String>,
+    #[serde(rename = "publishedYear", default)]
+    published_year: Option<String>,
+    #[serde(default)]
+    publisher: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    isbn: Option<String>,
+    #[serde(default)]
+    asin: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AbsSeriesJson {
+    name: String,
+    #[serde(default)]
+    sequence: Option<String>,
+}
+
+/// Try to load metadata.json from a folder
+fn load_metadata_json(folder_path: &str) -> Option<BookMetadata> {
+    let json_path = Path::new(folder_path).join("metadata.json");
+
+    if !json_path.exists() {
+        return None;
+    }
+
+    let content = match std::fs::read_to_string(&json_path) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("   ⚠️ Failed to read metadata.json: {}", e);
+            return None;
+        }
+    };
+
+    let abs_meta: AbsMetadataJson = match serde_json::from_str(&content) {
+        Ok(m) => m,
+        Err(e) => {
+            println!("   ⚠️ Failed to parse metadata.json: {}", e);
+            return None;
+        }
+    };
+
+    // Convert to BookMetadata
+    let title = abs_meta.title.unwrap_or_else(|| {
+        Path::new(folder_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    });
+
+    let author = abs_meta.authors.first().cloned().unwrap_or_else(|| "Unknown".to_string());
+    let narrator = if abs_meta.narrators.is_empty() {
+        None
+    } else {
+        Some(abs_meta.narrators.join(", "))
+    };
+
+    let (series, sequence) = if let Some(first_series) = abs_meta.series.first() {
+        (Some(first_series.name.clone()), first_series.sequence.clone())
+    } else {
+        (None, None)
+    };
+
+    println!("   ✅ Loaded metadata.json for '{}'", title);
+
+    Some(BookMetadata {
+        title,
+        author,
+        subtitle: abs_meta.subtitle,
+        narrator,
+        series,
+        sequence,
+        genres: abs_meta.genres,
+        description: abs_meta.description,
+        publisher: abs_meta.publisher,
+        year: abs_meta.published_year,
+        isbn: abs_meta.isbn,
+        asin: abs_meta.asin,
+        cover_url: None,
+        cover_mime: None,
+        authors: abs_meta.authors,
+        narrators: abs_meta.narrators,
+        language: abs_meta.language,
+        abridged: None,
+        runtime_minutes: None,
+        explicit: None,
+        publish_date: None,
+        sources: None,
+    })
+}
 
 pub async fn collect_and_group_files(
     paths: &[String],
@@ -138,12 +249,10 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                 })
                 .collect();
 
-            BookGroup {
-                id: uuid::Uuid::new_v4().to_string(),
-                group_name: group_name.clone(),
-                group_type,
-                metadata: BookMetadata {
-                    title: group_name,
+            // Try to load existing metadata.json
+            let metadata = load_metadata_json(&parent_dir).unwrap_or_else(|| {
+                BookMetadata {
+                    title: group_name.clone(),
                     author: "Unknown".to_string(),
                     subtitle: None,
                     narrator: None,
@@ -165,7 +274,14 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                     explicit: None,
                     publish_date: None,
                     sources: None,
-                },
+                }
+            });
+
+            BookGroup {
+                id: uuid::Uuid::new_v4().to_string(),
+                group_name: metadata.title.clone(),
+                group_type,
+                metadata,
                 files: audio_files,
                 total_changes: 0,
             }
