@@ -231,10 +231,10 @@ export function MaintenancePage() {
             <div className="p-6 space-y-3">
               <button
                 onClick={() => showConfirm({
-                  title: "Clear All Genres from ABS",
-                  message: "This will remove ALL genre assignments from EVERY book in AudiobookShelf. This does NOT affect the genre tags in your actual audio files. Use this if you want to start fresh with genre categorization in ABS. Continue?",
-                  confirmText: "Clear All Genres",
-                  type: "danger",
+                  title: "Clear Unused Genres from ABS",
+                  message: "This will find and remove genres from the ABS dropdown that are not assigned to any book. This helps clean up stale genre entries. It does NOT affect genres currently assigned to books. Continue?",
+                  confirmText: "Clear Unused Genres",
+                  type: "warning",
                   onConfirm: async () => {
                     try {
                       setButtonLoading('clearGenres', true);
@@ -249,16 +249,16 @@ export function MaintenancePage() {
                   }
                 })}
                 disabled={loading.clearGenres}
-                className="w-full flex items-center justify-between px-4 py-3 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors group disabled:opacity-50"
+                className="w-full flex items-center justify-between px-4 py-3 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition-colors group disabled:opacity-50"
               >
                 <div className="flex items-center gap-3">
-                  <Trash2 className={`w-5 h-5 text-red-600 ${loading.clearGenres ? 'animate-pulse' : ''}`} />
+                  <Trash2 className={`w-5 h-5 text-amber-600 ${loading.clearGenres ? 'animate-pulse' : ''}`} />
                   <div className="text-left">
-                    <div className="font-medium text-gray-900">Clear All Genres</div>
-                    <div className="text-sm text-gray-600">Remove genre assignments from all books in ABS</div>
+                    <div className="font-medium text-gray-900">Clear Unused Genres</div>
+                    <div className="text-sm text-gray-600">Remove genres not assigned to any book from ABS dropdown</div>
                   </div>
                 </div>
-                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-red-600 transition-colors" />
+                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-amber-600 transition-colors" />
               </button>
 
               <button
