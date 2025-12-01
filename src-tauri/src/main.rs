@@ -70,6 +70,7 @@ fn main() {
             commands::chapters::create_chapters_from_files,
             commands::chapters::merge_chapters,
             commands::chapters::adjust_chapter_boundary,
+            commands::chapters::restore_original_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
