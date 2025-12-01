@@ -134,12 +134,31 @@ async fn fetch_covers_for_groups(
 pub async fn scan_directories(
     paths: &[String],
     cancel_flag: Option<Arc<AtomicBool>>,
-    force: bool
+    scan_mode: ScanMode
 ) -> Result<ScanResult, Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔍 Starting scan of {} paths (force={})", paths.len(), force);
+    println!("🔍 Starting scan of {} paths (mode={:?})", paths.len(), scan_mode);
 
     // ✅ THIS LINE MUST BE HERE
     crate::progress::reset_progress();
+
+    // Clear cache based on scan mode
+    match scan_mode {
+        ScanMode::ForceFresh => {
+            // Full fresh scan - clear all caches
+            if let Err(e) = cache::clear() {
+                println!("⚠️ Cache clear failed: {}", e);
+            } else {
+                println!("🗑️ Cache cleared for fresh scan");
+            }
+        }
+        ScanMode::RefreshMetadata | ScanMode::SelectiveRefresh => {
+            // Keep API cache but bypass metadata.json
+            println!("📄 Refresh mode - using cached API data");
+        }
+        ScanMode::Normal => {
+            // Normal mode - use everything
+        }
+    }
 
     if let Some(ref flag) = cancel_flag {
         if flag.load(Ordering::SeqCst) {
@@ -176,7 +195,7 @@ pub async fn scan_directories(
         groups,
         &config,
         cancel_flag.clone(),
-        force
+        scan_mode
     ).await?;
 
     Ok(ScanResult {
@@ -184,4 +203,14 @@ pub async fn scan_directories(
         total_files,
         groups: processed_groups,
     })
+}
+
+/// Legacy wrapper for backward compatibility
+pub async fn scan_directories_force(
+    paths: &[String],
+    cancel_flag: Option<Arc<AtomicBool>>,
+    force: bool
+) -> Result<ScanResult, Box<dyn std::error::Error + Send + Sync>> {
+    let scan_mode = if force { ScanMode::ForceFresh } else { ScanMode::Normal };
+    scan_directories(paths, cancel_flag, scan_mode).await
 }
