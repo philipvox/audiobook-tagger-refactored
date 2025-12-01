@@ -32,6 +32,7 @@ fn main() {
             commands::config::get_config,
             commands::config::save_config,
             commands::scan::scan_library,
+            commands::scan::import_folders,
             commands::scan::cancel_scan,
             commands::scan::get_scan_progress,
             commands::tags::write_tags,

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::path::Path;
 use walkdir::WalkDir;
 use std::collections::HashMap;
+use regex::Regex;
 
 const AUDIO_EXTENSIONS: &[&str] = &["m4b", "m4a", "mp3", "flac", "ogg", "opus", "aac"];
 
@@ -108,26 +109,32 @@ fn collect_audio_files_from_path(path: &str) -> Result<Vec<RawFileData>, Box<dyn
 }
 
 fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
-    let mut groups: HashMap<String, Vec<RawFileData>> = HashMap::new();
-    
+    let mut dir_groups: HashMap<String, Vec<RawFileData>> = HashMap::new();
+
+    // First, group by parent directory
     for file in files {
-        groups.entry(file.parent_dir.clone())
+        dir_groups.entry(file.parent_dir.clone())
             .or_insert_with(Vec::new)
             .push(file);
     }
-    
-    groups.into_iter()
-        .map(|(parent_dir, mut files)| {
-            files.sort_by(|a, b| a.filename.cmp(&b.filename));
-            
-            let group_name = Path::new(&parent_dir)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            
+
+    let mut all_book_groups: Vec<BookGroup> = Vec::new();
+
+    for (parent_dir, mut dir_files) in dir_groups {
+        dir_files.sort_by(|a, b| a.filename.cmp(&b.filename));
+
+        let folder_name = Path::new(&parent_dir)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        // Try to detect multiple books in the same folder
+        let book_groups = split_into_books(dir_files, &folder_name);
+
+        for (book_title, files) in book_groups {
             let group_type = detect_group_type(&files);
-            
+
             let audio_files: Vec<AudioFile> = files.iter()
                 .map(|f| AudioFile {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -137,13 +144,13 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                     status: "unchanged".to_string(),
                 })
                 .collect();
-            
-            BookGroup {
+
+            all_book_groups.push(BookGroup {
                 id: uuid::Uuid::new_v4().to_string(),
-                group_name: group_name.clone(),
+                group_name: book_title.clone(),
                 group_type,
                 metadata: BookMetadata {
-                    title: group_name,
+                    title: book_title,
                     author: "Unknown".to_string(),
                     subtitle: None,
                     narrator: None,
@@ -169,9 +176,120 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                 },
                 files: audio_files,
                 total_changes: 0,
+            });
+        }
+    }
+
+    all_book_groups
+}
+
+/// Extract the book title from a filename, removing chapter/part numbers and file extensions
+fn extract_book_title(filename: &str) -> String {
+    // Remove file extension
+    let name = Path::new(filename)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    lazy_static::lazy_static! {
+        // Pattern: "01 Book Title" or "01 - Book Title" or "01. Book Title"
+        static ref LEADING_NUM: Regex = Regex::new(r"^\d{1,3}[\s._-]+").unwrap();
+        // Pattern: " - Part 1", " - Chapter 1", " Part 1", " Ch. 1", etc. at end
+        static ref TRAILING_PART: Regex = Regex::new(r"(?i)\s*[-_]?\s*(part|pt|chapter|ch|disc|disk|cd|track|section|seg)\.?\s*\d+\s*$").unwrap();
+        // Pattern: " (Part 1)", " [Part 1]", " - 01", " - 001" at end
+        static ref TRAILING_NUM: Regex = Regex::new(r"\s*[-_]?\s*[\[(]?\s*(part|pt|chapter|ch)?\s*\d{1,3}\s*[\])]?\s*$").unwrap();
+        // Pattern for "Author - Series - Book Title" format
+        static ref AUTHOR_SERIES_TITLE: Regex = Regex::new(r"^([^-]+)\s*-\s*([^-]+)\s*-\s*(.+)$").unwrap();
+    }
+
+    let cleaned = LEADING_NUM.replace(&name, "").to_string();
+    let cleaned = TRAILING_PART.replace(&cleaned, "").to_string();
+    let cleaned = TRAILING_NUM.replace(&cleaned, "").to_string();
+
+    cleaned.trim().to_string()
+}
+
+/// Split files in a directory into separate book groups based on detected titles
+fn split_into_books(files: Vec<RawFileData>, folder_name: &str) -> Vec<(String, Vec<RawFileData>)> {
+    if files.len() <= 1 {
+        // Single file - use folder name
+        return vec![(folder_name.to_string(), files)];
+    }
+
+    // Extract titles from all filenames
+    let mut title_to_files: HashMap<String, Vec<RawFileData>> = HashMap::new();
+
+    for file in &files {
+        let title = extract_book_title(&file.filename);
+        title_to_files.entry(title)
+            .or_insert_with(Vec::new)
+            .push(file.clone());
+    }
+
+    // If we detected multiple distinct book titles
+    if title_to_files.len() > 1 {
+        println!("📚 Detected {} distinct books in folder '{}':", title_to_files.len(), folder_name);
+        for (title, book_files) in &title_to_files {
+            println!("   - '{}' ({} files)", title, book_files.len());
+        }
+
+        // Check if the titles are meaningful (not just numbers or empty)
+        let meaningful_titles: Vec<_> = title_to_files.iter()
+            .filter(|(title, _)| {
+                let t = title.trim();
+                !t.is_empty() && !t.chars().all(|c| c.is_numeric() || c.is_whitespace())
+            })
+            .collect();
+
+        // Only split if we have meaningful distinct titles
+        if meaningful_titles.len() > 1 {
+            return title_to_files.into_iter()
+                .map(|(title, mut files)| {
+                    files.sort_by(|a, b| a.filename.cmp(&b.filename));
+                    let display_title = if title.is_empty() { folder_name.to_string() } else { title };
+                    (display_title, files)
+                })
+                .collect();
+        }
+    }
+
+    // Check for .m4b files - each .m4b is typically a complete book
+    let m4b_files: Vec<_> = files.iter()
+        .filter(|f| f.filename.to_lowercase().ends_with(".m4b"))
+        .collect();
+
+    if m4b_files.len() > 1 {
+        // Multiple .m4b files - each is likely a separate book
+        println!("📚 Detected {} separate .m4b books in folder '{}'", m4b_files.len(), folder_name);
+
+        let mut result: Vec<(String, Vec<RawFileData>)> = Vec::new();
+        let mut non_m4b_files: Vec<RawFileData> = Vec::new();
+
+        for file in files {
+            if file.filename.to_lowercase().ends_with(".m4b") {
+                // Each .m4b is its own book - use filename as title
+                let title = Path::new(&file.filename)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                result.push((title, vec![file]));
+            } else {
+                non_m4b_files.push(file);
             }
-        })
-        .collect()
+        }
+
+        // If there are non-m4b files left over, group them by folder name
+        if !non_m4b_files.is_empty() {
+            result.push((folder_name.to_string(), non_m4b_files));
+        }
+
+        return result;
+    }
+
+    // Default: all files belong to one book (folder name)
+    vec![(folder_name.to_string(), files)]
 }
 
 fn detect_group_type(files: &[RawFileData]) -> GroupType {

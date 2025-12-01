@@ -6,6 +6,36 @@ use once_cell::sync::Lazy;
 
 static CANCEL_FLAG: Lazy<Arc<AtomicBool>> = Lazy::new(|| Arc::new(AtomicBool::new(false)));
 
+/// Import folders without metadata scanning - just collect and group files
+#[tauri::command]
+pub async fn import_folders(paths: Vec<String>) -> Result<scanner::ScanResult, String> {
+    println!("📁 import_folders called with {} paths (no metadata scan)", paths.len());
+
+    CANCEL_FLAG.store(false, Ordering::SeqCst);
+
+    let result = scanner::import_directories(&paths, Some(CANCEL_FLAG.clone()))
+        .await
+        .map_err(|e| {
+            println!("❌ Import error: {}", e);
+            e.to_string()
+        })?;
+
+    println!("📊 Import complete: {} groups, {} files", result.groups.len(), result.total_files);
+
+    // DEBUG: Try to serialize to check for cycles
+    match serde_json::to_string(&result) {
+        Ok(json) => {
+            println!("✅ JSON serialization OK, {} bytes", json.len());
+        }
+        Err(e) => {
+            println!("❌ JSON serialization FAILED: {}", e);
+            return Err(format!("Serialization error: {}", e));
+        }
+    }
+
+    Ok(result)
+}
+
 #[tauri::command]
 pub async fn scan_library(paths: Vec<String>) -> Result<scanner::ScanResult, String> {
     println!("🔍 scan_library called with {} paths", paths.len());
