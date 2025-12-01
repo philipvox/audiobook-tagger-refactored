@@ -300,7 +300,8 @@ export function useScan() {
         let allNewGroups = [];
         for (const path of paths) {
           try {
-            const result = await invoke('scan_library', { paths: [path] });
+            // Pass force: true to rescan even if metadata.json exists
+            const result = await invoke('scan_library', { paths: [path], force: true });
             if (result && result.groups) {
               allNewGroups.push(...result.groups);
             }

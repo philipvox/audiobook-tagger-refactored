@@ -141,18 +141,19 @@ pub async fn process_all_groups(
     groups: Vec<BookGroup>,
     config: &Config,
     cancel_flag: Option<Arc<AtomicBool>>,
+    force: bool,
 ) -> Result<Vec<BookGroup>, Box<dyn std::error::Error + Send + Sync>> {
     let total = groups.len();
     let start_time = std::time::Instant::now();
-    
-    println!("🚀 Processing {} book groups...", total);
-    
+
+    println!("🚀 Processing {} book groups (force={})...", total, force);
+
     crate::progress::update_progress(0, total, "Starting...");
-    
+
     let processed = Arc::new(AtomicUsize::new(0));
     let covers_found = Arc::new(AtomicUsize::new(0));
     let config = Arc::new(config.clone());
-    
+
     // Process with controlled concurrency
     let results: Vec<BookGroup> = stream::iter(groups)
         .map(|group| {
@@ -161,9 +162,10 @@ pub async fn process_all_groups(
             let processed = processed.clone();
             let covers_found = covers_found.clone();
             let total = total;
-            
+            let force = force;
+
             async move {
-                let result = process_book_group(group, &config, cancel_flag, covers_found.clone()).await;
+                let result = process_book_group(group, &config, cancel_flag, covers_found.clone(), force).await;
                 
                 let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
                 let covers = covers_found.load(Ordering::Relaxed);
@@ -199,6 +201,7 @@ async fn process_book_group(
     config: &Config,
     cancel_flag: Option<Arc<AtomicBool>>,
     covers_found: Arc<AtomicUsize>,
+    force: bool,
 ) -> Result<BookGroup, Box<dyn std::error::Error + Send + Sync>> {
 
     if let Some(ref flag) = cancel_flag {
@@ -207,11 +210,15 @@ async fn process_book_group(
         }
     }
 
-    // SKIP API CALLS if metadata was loaded from existing metadata.json
-    if group.scan_status == ScanStatus::LoadedFromFile {
+    // SKIP API CALLS if metadata was loaded from existing metadata.json (unless force=true)
+    if !force && group.scan_status == ScanStatus::LoadedFromFile {
         println!("   ⚡ Skipping API calls for '{}' (metadata.json exists)", group.metadata.title);
         group.total_changes = calculate_changes(&mut group);
         return Ok(group);
+    }
+
+    if force && group.scan_status == ScanStatus::LoadedFromFile {
+        println!("   🔄 Force rescan for '{}' (ignoring metadata.json)", group.metadata.title);
     }
 
     let cache_key = format!("book_{}", group.group_name);
