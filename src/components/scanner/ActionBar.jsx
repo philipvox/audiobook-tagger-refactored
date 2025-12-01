@@ -2,6 +2,7 @@ import { CheckCircle, RefreshCw, Save, FileType, UploadCloud, Edit3 } from 'luci
 
 export function ActionBar({
   selectedFiles,
+  allSelected = false,
   groups,
   fileStatuses,
   selectedGroupCount = 0,
@@ -15,11 +16,25 @@ export function ActionBar({
   pushing,
   scanning
 }) {
+  // Calculate total file count (for allSelected mode)
+  const totalFileCount = groups.reduce((sum, g) => sum + g.files.length, 0);
+  const selectedCount = allSelected ? totalFileCount : selectedFiles.size;
+
   const getSuccessCount = () => {
+    if (allSelected) {
+      return groups.reduce((count, g) => {
+        return count + g.files.filter(f => fileStatuses[f.id] === 'success').length;
+      }, 0);
+    }
     return Array.from(selectedFiles).filter(id => fileStatuses[id] === 'success').length;
   };
 
   const getFilesWithChanges = () => {
+    if (allSelected) {
+      return groups.flatMap(g =>
+        g.files.filter(f => Object.keys(f.changes).length > 0).map(f => f.id)
+      );
+    }
     return Array.from(selectedFiles).filter(id => {
       for (const group of groups) {
         const file = group.files.find(f => f.id === id);
@@ -30,6 +45,9 @@ export function ActionBar({
   };
 
   const getSelectedGroups = () => {
+    if (allSelected) {
+      return new Set(groups.map(g => g.id));
+    }
     const selectedGroups = new Set();
     groups.forEach(group => {
       if (group.files.some(f => selectedFiles.has(f.id))) {
@@ -42,22 +60,23 @@ export function ActionBar({
   const filesWithChanges = getFilesWithChanges();
   const successCount = getSuccessCount();
   const selectedGroups = getSelectedGroups();
+  const effectiveGroupCount = allSelected ? groups.length : selectedGroupCount;
 
   return (
     <>
       {/* Selection Action Bar */}
-      {selectedFiles.size > 0 && (
+      {selectedCount > 0 && (
         <div className="bg-blue-50 border-b border-blue-200 px-6 py-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3 text-sm">
               <div className="flex items-center gap-2">
                 <CheckCircle className="w-4 h-4 text-blue-600" />
                 <span className="font-medium text-blue-900">
-                  {selectedFiles.size === 1 ? '1 file' : `${selectedFiles.size} files`} selected
+                  {allSelected ? 'All ' : ''}{selectedCount === 1 ? '1 file' : `${selectedCount} files`} selected
                 </span>
               </div>
-              
-              {selectedFiles.size > 1 && (
+
+              {selectedCount > 1 && (
                 <div className="flex items-center gap-3 text-xs">
                   {filesWithChanges.length > 0 && (
                     <span className="text-amber-600">{filesWithChanges.length} with changes</span>
@@ -67,36 +86,36 @@ export function ActionBar({
                   )}
                 </div>
               )}
-              
-              <button 
+
+              <button
                 onClick={onClearSelection}
                 className="text-blue-600 hover:text-blue-800 underline"
               >
                 Clear
               </button>
             </div>
-            
+
             <div className="flex items-center gap-3">
-              <button 
-                onClick={onRescan} 
-                disabled={scanning} 
+              <button
+                onClick={onRescan}
+                disabled={scanning}
                 className="px-4 py-2 bg-white border border-blue-300 text-blue-700 rounded-lg hover:bg-blue-50 transition-colors font-medium flex items-center gap-2"
               >
                 <RefreshCw className={`w-4 h-4 ${scanning ? 'animate-spin' : ''}`} />
-                {scanning ? 'Rescanning...' : `Rescan ${selectedFiles.size === 1 ? 'File' : `${selectedFiles.size} Files`}`}
+                {scanning ? 'Rescanning...' : `Rescan ${selectedCount === 1 ? 'File' : `${selectedCount} Files`}`}
               </button>
-              
+
               {filesWithChanges.length > 0 && (
-                <button 
-                  onClick={onWrite} 
-                  disabled={writing} 
+                <button
+                  onClick={onWrite}
+                  disabled={writing}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium flex items-center gap-2"
                 >
                   <Save className="w-4 h-4" />
                   {writing ? 'Writing...' : `Write ${filesWithChanges.length} File${filesWithChanges.length === 1 ? '' : 's'}`}
                 </button>
               )}
-              
+
               {selectedGroups.size === 1 && (
                 <button
                   onClick={onRename}
@@ -104,17 +123,17 @@ export function ActionBar({
                   className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors font-medium flex items-center gap-2"
                 >
                   <FileType className="w-4 h-4" />
-                  Rename {selectedFiles.size === 1 ? 'File' : 'Files'}
+                  Rename {selectedCount === 1 ? 'File' : 'Files'}
                 </button>
               )}
 
-              {selectedGroupCount > 1 && onBulkEdit && (
+              {effectiveGroupCount > 1 && onBulkEdit && (
                 <button
                   onClick={onBulkEdit}
                   className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors font-medium flex items-center gap-2"
                 >
                   <Edit3 className="w-4 h-4" />
-                  Bulk Edit {selectedGroupCount} Books
+                  Bulk Edit {effectiveGroupCount} Books
                 </button>
               )}
             </div>

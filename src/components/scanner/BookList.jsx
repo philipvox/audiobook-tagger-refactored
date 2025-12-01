@@ -9,6 +9,7 @@ const BUFFER_SIZE = 10;
 export function BookList({
   groups,
   selectedFiles,
+  allSelected = false,
   selectedGroup,
   selectedGroupIds,
   expandedGroups,
@@ -440,7 +441,7 @@ export function BookList({
           <div style={{ transform: `translateY(${offsetY}px)` }}>
             {filteredGroups.slice(visibleRange.start, visibleRange.end).map((group, idx) => {
               const actualIndex = visibleRange.start + idx;
-              const isInMultiSelect = selectedGroupIds?.has(group.id);
+              const isInMultiSelect = allSelected || selectedGroupIds?.has(group.id);
               const isSingleSelected = selectedGroup?.id === group.id;
               const isSelected = isInMultiSelect || isSingleSelected;
               const metadata = group.metadata;
@@ -588,7 +589,7 @@ export function BookList({
                           <div className="flex items-center gap-3 pl-7">
                             <input
                               type="checkbox"
-                              checked={selectedFiles.has(file.id)}
+                              checked={allSelected || selectedFiles.has(file.id)}
                               onChange={(e) => {
                                 e.stopPropagation();
                               }}
