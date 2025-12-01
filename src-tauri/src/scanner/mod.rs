@@ -133,9 +133,10 @@ async fn fetch_covers_for_groups(
 
 pub async fn scan_directories(
     paths: &[String],
-    cancel_flag: Option<Arc<AtomicBool>>
+    cancel_flag: Option<Arc<AtomicBool>>,
+    force: bool
 ) -> Result<ScanResult, Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔍 Starting scan of {} paths", paths.len());
+    println!("🔍 Starting scan of {} paths (force={})", paths.len(), force);
 
     // ✅ THIS LINE MUST BE HERE
     crate::progress::reset_progress();
@@ -174,7 +175,8 @@ pub async fn scan_directories(
     let processed_groups = processor::process_all_groups(
         groups,
         &config,
-        cancel_flag.clone()
+        cancel_flag.clone(),
+        force
     ).await?;
 
     Ok(ScanResult {
