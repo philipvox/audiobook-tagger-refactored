@@ -163,6 +163,75 @@ export function useScan() {
     }
   }, [setGroups]);
 
+  // Import folders without metadata scanning
+  const handleImport = useCallback(async () => {
+    // Clean up any existing intervals
+    if (progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+    }
+
+    if (resetTimeoutRef.current) {
+      clearTimeout(resetTimeoutRef.current);
+      resetTimeoutRef.current = null;
+    }
+
+    try {
+      // OPEN FILE PICKER
+      const selected = await open({
+        directory: true,
+        multiple: true,
+      });
+
+      if (!selected) {
+        console.log('No folder selected');
+        return;
+      }
+
+      const paths = Array.isArray(selected) ? selected : [selected];
+      console.log('Importing paths (no scan):', paths);
+
+      setScanning(true);
+      const startTime = Date.now();
+      setScanProgress({
+        current: 0,
+        total: 0,
+        currentFile: 'Importing folders...',
+        startTime,
+        filesPerSecond: 0,
+        covers_found: 0,
+      });
+
+      try {
+        const result = await invoke('import_folders', { paths });
+
+        // Simple direct set - replace all groups
+        if (result && result.groups) {
+          setGroups(result.groups);
+        }
+
+      } finally {
+        setScanning(false);
+
+        resetTimeoutRef.current = setTimeout(() => {
+          setScanProgress({
+            current: 0,
+            total: 0,
+            currentFile: '',
+            startTime: null,
+            filesPerSecond: 0,
+            covers_found: 0,
+          });
+          resetTimeoutRef.current = null;
+        }, 500);
+      }
+    } catch (error) {
+      console.error('Import failed:', error);
+      setScanning(false);
+      throw error;
+    }
+  }, [setGroups]);
+
   const handleRescan = useCallback(async (selectedFiles, groups) => {
     if (progressIntervalRef.current) {
       clearInterval(progressIntervalRef.current);
@@ -324,6 +393,7 @@ export function useScan() {
     scanProgress,
     calculateETA,
     handleScan,
+    handleImport,
     handleRescan,
     cancelScan,
   };
