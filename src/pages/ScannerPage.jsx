@@ -419,15 +419,17 @@ export function ScannerPage({ onActionsReady }) {
     setShowRenameModal(true);
   };
 
-  // ✅ SIMPLIFIED - No popup, just rescan
-  const handleRescanClick = async () => {
+  // ✅ Rescan with configurable mode
+  // @param {string} scanMode - 'refresh_metadata' or 'force_fresh'
+  const handleRescanClick = async (scanMode = 'force_fresh') => {
     const selectedCount = getSelectedCount(groups);
     if (selectedCount === 0 && !allSelected) return;
 
     try {
-      console.log(`🔄 Rescanning ${selectedCount} files...`);
+      const modeLabel = scanMode === 'refresh_metadata' ? 'quick refresh' : 'full rescan';
+      console.log(`🔄 ${modeLabel} for ${selectedCount} files...`);
       const actualSelectedFiles = getSelectedFileIds(groups);
-      const result = await handleRescan(actualSelectedFiles, groups);
+      const result = await handleRescan(actualSelectedFiles, groups, scanMode);
       console.log(`✅ Rescanned ${result.count} books`);
       handleClearSelection();
       clearFileStatuses();
