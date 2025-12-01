@@ -124,6 +124,8 @@ pub struct SplitRequest {
     pub cover_data: Option<String>,
     /// MIME type of cover image (e.g., "image/jpeg", "image/png")
     pub cover_mime_type: Option<String>,
+    /// If true, add .bak extension to original file to hide it from ABS
+    pub hide_original: Option<bool>,
 }
 
 /// Split an audiobook by chapters
@@ -179,14 +181,78 @@ pub async fn split_audiobook_chapters(request: SplitRequest) -> Result<SplitResu
         _ => None,
     };
 
-    chapters::split_by_chapters_with_cover(
+    let result = chapters::split_by_chapters_with_cover(
         &request.file_path,
         &request.chapters,
         &options,
         None,
         cover.as_ref(),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    // If splitting was successful and hide_original is true, rename original file to .bak
+    if result.success && request.hide_original.unwrap_or(false) {
+        let original_path = std::path::Path::new(&request.file_path);
+        let bak_path = original_path.with_extension(
+            format!("{}.bak",
+                original_path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("m4b")
+            )
+        );
+
+        if let Err(e) = std::fs::rename(original_path, &bak_path) {
+            eprintln!("   ⚠️  Failed to hide original file: {}", e);
+            // Don't fail the whole operation, just log the warning
+        } else {
+            println!("   📦 Original file hidden: {} -> {}",
+                original_path.display(),
+                bak_path.display()
+            );
+        }
+    }
+
+    Ok(result)
+}
+
+/// Restore a hidden original file (remove .bak extension)
+#[tauri::command]
+pub async fn restore_original_file(bak_file_path: String) -> Result<String, String> {
+    let bak_path = std::path::Path::new(&bak_file_path);
+
+    if !bak_path.exists() {
+        return Err(format!("File not found: {}", bak_file_path));
+    }
+
+    // Check if it ends with .bak
+    let file_name = bak_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    if !file_name.ends_with(".bak") {
+        return Err("File does not have .bak extension".to_string());
+    }
+
+    // Remove the .bak suffix to get the original filename
+    let original_name = &file_name[..file_name.len() - 4]; // Remove ".bak"
+    let original_path = bak_path.with_file_name(original_name);
+
+    if original_path.exists() {
+        return Err(format!(
+            "Cannot restore: original file already exists at {}",
+            original_path.display()
+        ));
+    }
+
+    std::fs::rename(bak_path, &original_path)
+        .map_err(|e| format!("Failed to restore file: {}", e))?;
+
+    println!("   📦 Original file restored: {} -> {}",
+        bak_path.display(),
+        original_path.display()
+    );
+
+    Ok(original_path.to_string_lossy().to_string())
 }
 
 /// Update chapter titles
