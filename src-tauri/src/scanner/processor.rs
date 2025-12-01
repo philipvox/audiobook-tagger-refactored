@@ -847,6 +847,7 @@ struct GoogleBookData {
     year: Option<String>,
     genres: Vec<String>,
     isbn: Option<String>,
+    authors: Vec<String>,
 }
 
 fn fallback_metadata(
@@ -884,17 +885,29 @@ fn fallback_metadata(
         .unwrap_or_default();
     let narrator = narrators.first().cloned();
 
-    // Get all authors, split if contains "&" or "and"
+    // Get all authors: Audible -> Google Books -> folder name
     let authors = audible_data.as_ref()
+        .filter(|d| !d.authors.is_empty())
         .map(|d| {
-            if !d.authors.is_empty() {
-                sources.author = Some(MetadataSource::Audible);
-            }
+            sources.author = Some(MetadataSource::Audible);
             d.authors.clone()
         })
+        .or_else(|| {
+            google_data.as_ref()
+                .filter(|d| !d.authors.is_empty())
+                .map(|d| {
+                    sources.author = Some(MetadataSource::GoogleBooks);
+                    d.authors.clone()
+                })
+        })
         .unwrap_or_else(|| {
-            sources.author = Some(MetadataSource::Folder);
-            split_authors(extracted_author)
+            // Only use folder name if it doesn't look like "Unknown"
+            if extracted_author.to_lowercase() != "unknown" && !extracted_author.is_empty() {
+                sources.author = Some(MetadataSource::Folder);
+                split_authors(extracted_author)
+            } else {
+                vec![]
+            }
         });
 
     // Track title source
@@ -976,11 +989,20 @@ fn fallback_metadata(
         sources.runtime = Some(MetadataSource::Audible);
     }
 
+    // Derive author from authors array (or use extracted_author as fallback)
+    let author = authors.first().cloned().unwrap_or_else(|| {
+        if extracted_author.to_lowercase() != "unknown" {
+            extracted_author.to_string()
+        } else {
+            "Unknown".to_string()
+        }
+    });
+
     // Note: normalize_metadata is called by the callers of fallback_metadata
     BookMetadata {
         title: extracted_title.to_string(),
         subtitle,
-        author: extracted_author.to_string(),
+        author,
         narrator,
         series,
         sequence,
@@ -1018,16 +1040,27 @@ fn create_metadata_from_audible(
     let title = audible_data.title.clone().unwrap_or_else(|| extracted_title.to_string());
     sources.title = Some(MetadataSource::Audible);
 
-    // Author from Audible
-    let author = audible_data.authors.first()
-        .cloned()
-        .unwrap_or_else(|| extracted_author.to_string());
+    // Author from Audible -> Google Books -> folder
     let authors = if !audible_data.authors.is_empty() {
         sources.author = Some(MetadataSource::Audible);
         audible_data.authors.clone()
-    } else {
+    } else if let Some(ref gd) = google_data {
+        if !gd.authors.is_empty() {
+            sources.author = Some(MetadataSource::GoogleBooks);
+            gd.authors.clone()
+        } else if extracted_author.to_lowercase() != "unknown" {
+            sources.author = Some(MetadataSource::Folder);
+            split_authors(extracted_author)
+        } else {
+            vec![]
+        }
+    } else if extracted_author.to_lowercase() != "unknown" {
+        sources.author = Some(MetadataSource::Folder);
         split_authors(extracted_author)
+    } else {
+        vec![]
     };
+    let author = authors.first().cloned().unwrap_or_else(|| "Unknown".to_string());
 
     // Narrators from Audible
     let narrators = audible_data.narrators.clone();
@@ -1651,7 +1684,12 @@ async fn fetch_google_books_data(
         return Ok(cached);
     }
 
-    let query = format!("intitle:{} inauthor:{}", title, author);
+    // Don't include "Unknown" in the search - it hurts results
+    let query = if author.to_lowercase() == "unknown" || author.is_empty() {
+        format!("intitle:{}", title)
+    } else {
+        format!("intitle:{} inauthor:{}", title, author)
+    };
     let encoded_query = query
         .replace(' ', "+")
         .replace('&', "%26")
@@ -1697,6 +1735,10 @@ async fn fetch_google_books_data(
                     .or_else(|| arr.iter().find(|id| id["type"].as_str() == Some("ISBN_10")))
                     .and_then(|id| id["identifier"].as_str().map(|s| s.to_string()))
             }),
+        authors: volume_info["authors"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default(),
     };
 
     // Cache the result for future lookups
@@ -1712,7 +1754,12 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
         return cached;
     }
 
-    let search_query = format!("{} {}", title, author);
+    // Don't include "Unknown" in the search - it hurts results
+    let search_query = if author.to_lowercase() == "unknown" || author.is_empty() {
+        title.to_string()
+    } else {
+        format!("{} {}", title, author)
+    };
     let encoded_query = search_query
         .replace(' ', "+")
         .replace('&', "%26")
@@ -1746,14 +1793,54 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().replace(" (Audiobook)", "").replace(" Audiobook", ""));
 
-    // Extract ALL authors (not just first)
-    let author_regex = regex::Regex::new(r#"/author/[^"]*"[^>]*>([^<]+)</a>"#).ok()?;
-    let extracted_authors: Vec<String> = author_regex
-        .captures_iter(&product_html)
-        .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+    // Extract ALL authors - try multiple methods
+    let mut extracted_authors: Vec<String> = Vec::new();
+
+    // Method 1: JSON-LD author extraction (most reliable)
+    if let Ok(jsonld_author_regex) = regex::Regex::new(r#""author"\s*:\s*\[\s*\{[^}]*"name"\s*:\s*"([^"]+)""#) {
+        for caps in jsonld_author_regex.captures_iter(&product_html) {
+            if let Some(name) = caps.get(1) {
+                let author_name = name.as_str().trim().to_string();
+                if !extracted_authors.contains(&author_name) {
+                    extracted_authors.push(author_name);
+                }
+            }
+        }
+    }
+
+    // Method 2: Single author JSON-LD format
+    if extracted_authors.is_empty() {
+        if let Ok(single_author_regex) = regex::Regex::new(r#""author"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)""#) {
+            if let Some(caps) = single_author_regex.captures(&product_html) {
+                if let Some(name) = caps.get(1) {
+                    extracted_authors.push(name.as_str().trim().to_string());
+                }
+            }
+        }
+    }
+
+    // Method 3: HTML link extraction (fallback)
+    if extracted_authors.is_empty() {
+        if let Ok(author_regex) = regex::Regex::new(r#"/author/[^"]*"[^>]*>([^<]+)</a>"#) {
+            extracted_authors = author_regex
+                .captures_iter(&product_html)
+                .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+        }
+    }
+
+    // Method 4: "By:" pattern in HTML
+    if extracted_authors.is_empty() {
+        if let Ok(by_regex) = regex::Regex::new(r#"(?i)>\s*By:?\s*</[^>]+>\s*<[^>]+>([^<]+)</a>"#) {
+            if let Some(caps) = by_regex.captures(&product_html) {
+                if let Some(name) = caps.get(1) {
+                    extracted_authors.push(name.as_str().trim().to_string());
+                }
+            }
+        }
+    }
 
     // Extract ALL narrators (not just first)
     let narrator_regex = regex::Regex::new(r#"/narrator/[^"]*"[^>]*>([^<]+)</a>"#).ok()?;
