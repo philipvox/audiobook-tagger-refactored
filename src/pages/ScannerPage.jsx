@@ -426,28 +426,25 @@ export function ScannerPage({ onActionsReady }) {
     }
   };
 
-  // ✅ SIMPLIFIED - No popup, just push
+  // ✅ Push all selected files (including non-rescanned/imported ones)
   const handlePushClick = async () => {
-    const successCount = getSuccessCount(fileStatuses);
-    
-    if (successCount === 0) {
-      console.log('No files ready to push');
+    if (selectedFiles.size === 0) {
+      console.log('No files selected');
       return;
     }
 
     try {
-      console.log(`📤 Pushing ${successCount} files to AudiobookShelf...`);
-      const successfulFileIds = Array.from(selectedFiles).filter(id => fileStatuses[id] === 'success');
-      
+      console.log(`📤 Pushing ${selectedFiles.size} files to AudiobookShelf...`);
+
       const result = await pushToAudiobookShelf(
-        new Set(successfulFileIds),
+        selectedFiles,
         (progress) => {
           console.log(`Progress: ${progress.itemsProcessed}/${progress.totalItems} items`);
         }
       );
-      
+
       console.log(`✅ Pushed ${result.updated || 0} items`);
-      
+
       if (result.unmatched?.length > 0) {
         console.log(`⚠️ Unmatched: ${result.unmatched.length} files`);
       }
