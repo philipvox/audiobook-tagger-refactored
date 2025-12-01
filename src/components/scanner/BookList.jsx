@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, Filter, X, Download } from 'lucide-react';
+import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, Filter, X, Download, FolderPlus } from 'lucide-react';
 
 // Virtualized item height (approximate)
 const ITEM_HEIGHT = 140;
@@ -18,6 +18,7 @@ export function BookList({
   onSelectGroup,
   onSelectFile,
   onScan,
+  onImport,
   scanning,
   onSelectAll,
   onClearSelection,
@@ -214,13 +215,27 @@ export function BookList({
             <Upload className="w-12 h-12 text-blue-400 mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-gray-900 mb-2">No Files Scanned</h3>
             <p className="text-gray-600 mb-6 text-sm">Select a folder to scan for audiobook files and view metadata</p>
-            <button 
-              onClick={onScan} 
-              disabled={scanning}
-              className="w-full px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:opacity-50"
-            >
-              {scanning ? 'Scanning...' : 'Scan Library'}
-            </button>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={onScan}
+                disabled={scanning}
+                className="w-full px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:opacity-50"
+              >
+                {scanning ? 'Scanning...' : 'Scan Library'}
+              </button>
+              {onImport && (
+                <button
+                  onClick={onImport}
+                  disabled={scanning}
+                  className="w-full px-4 py-2.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium disabled:opacity-50 text-sm"
+                >
+                  Import Without Scanning
+                </button>
+              )}
+            </div>
+            <p className="text-xs text-gray-500 mt-3">
+              Import adds folders without fetching metadata from online sources
+            </p>
           </div>
         </div>
       </div>
@@ -285,6 +300,17 @@ export function BookList({
               Filters
               {hasActiveFilters && <span className="w-1.5 h-1.5 bg-blue-600 rounded-full" />}
             </button>
+            {onImport && (
+              <button
+                onClick={onImport}
+                disabled={scanning}
+                className="px-2 py-1 text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-md transition-colors flex items-center gap-1 disabled:opacity-50"
+                title="Import folders without metadata scanning"
+              >
+                <FolderPlus className="w-3 h-3" />
+                Import
+              </button>
+            )}
             {onExport && (
               <button
                 onClick={onExport}
