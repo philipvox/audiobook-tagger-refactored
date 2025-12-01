@@ -29,3 +29,8 @@ pub fn clear() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     cache.clear()?;
     Ok(())
 }
+
+pub fn count() -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let cache = CACHE_DB.lock().unwrap();
+    Ok(cache.len())
+}

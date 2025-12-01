@@ -1,10 +1,13 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Upload, RefreshCw, Book, Wrench, Folder, AlertCircle, ChevronRight } from 'lucide-react';
+import { Upload, RefreshCw, Book, Wrench, Folder, AlertCircle, ChevronRight, Trash2, Database, Tag, BarChart3, Server } from 'lucide-react';
 import { ConfirmModal } from '../components/ConfirmModal';
 
 export function MaintenancePage() {
   const [confirmModal, setConfirmModal] = useState(null);
+  const [cacheStats, setCacheStats] = useState(null);
+  const [genreStats, setGenreStats] = useState(null);
+  const [loading, setLoading] = useState({});
 
   const showConfirm = (config) => {
     setConfirmModal(config);
@@ -14,16 +17,66 @@ export function MaintenancePage() {
     setConfirmModal(null);
   };
 
+  const refreshStats = async () => {
+    try {
+      const [cache, genres] = await Promise.all([
+        invoke('get_cache_stats').catch(() => null),
+        invoke('get_genre_stats').catch(() => null)
+      ]);
+      setCacheStats(cache);
+      setGenreStats(genres);
+    } catch (e) {
+      console.error('Failed to fetch stats:', e);
+    }
+  };
+
+  useEffect(() => {
+    refreshStats();
+  }, []);
+
+  const setButtonLoading = (key, value) => {
+    setLoading(prev => ({ ...prev, [key]: value }));
+  };
+
   return (
     <div className="h-full overflow-y-auto bg-gray-50">
       <div className="p-6">
         <div className="max-w-4xl mx-auto space-y-6">
           {/* Header */}
           <div className="bg-white rounded-xl border border-gray-200 p-6">
-            <h2 className="text-2xl font-bold text-gray-900 mb-2">Library Maintenance</h2>
-            <p className="text-gray-600">
-              Advanced maintenance features for AudiobookShelf and local library management.
-            </p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900 mb-2">Library Maintenance</h2>
+                <p className="text-gray-600">
+                  Manage AudiobookShelf server and local cache settings.
+                </p>
+              </div>
+              <button
+                onClick={refreshStats}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                title="Refresh stats"
+              >
+                <RefreshCw className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            {/* Stats Row */}
+            {(cacheStats || genreStats) && (
+              <div className="mt-4 pt-4 border-t border-gray-200 flex gap-6 text-sm">
+                {cacheStats && (
+                  <div className="flex items-center gap-2 text-gray-600">
+                    <Database className="w-4 h-4" />
+                    <span>Local Cache: {cacheStats}</span>
+                  </div>
+                )}
+                {genreStats && (
+                  <div className="flex items-center gap-2 text-gray-600">
+                    <Tag className="w-4 h-4" />
+                    <span>ABS: {genreStats}</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* AudiobookShelf Server Section */}
@@ -31,35 +84,39 @@ export function MaintenancePage() {
             <div className="bg-gradient-to-r from-blue-50 to-indigo-50 px-6 py-4 border-b border-gray-200">
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-blue-100 rounded-lg">
-                  <Upload className="w-5 h-5 text-blue-600" />
+                  <Server className="w-5 h-5 text-blue-600" />
                 </div>
                 <div>
                   <h3 className="text-lg font-semibold text-gray-900">AudiobookShelf Server</h3>
-                  <p className="text-sm text-gray-600">Manage your AudiobookShelf Docker container</p>
+                  <p className="text-sm text-gray-600">Manage your AudiobookShelf Docker container and server cache</p>
                 </div>
               </div>
             </div>
-            
+
             <div className="p-6 space-y-3">
-              <button 
+              <button
                 onClick={() => showConfirm({
                   title: "Restart Docker Container",
-                  message: "This will temporarily stop the AudiobookShelf server. Continue?",
+                  message: "This will temporarily stop the AudiobookShelf server while it restarts. Users will be disconnected briefly. Continue?",
                   confirmText: "Restart",
                   type: "warning",
                   onConfirm: async () => {
                     try {
+                      setButtonLoading('restart', true);
                       await invoke('restart_abs_docker');
-                      alert('✅ Container restarted!');
+                      alert('Container restarted successfully!');
                     } catch (error) {
-                      alert('❌ Failed: ' + error);
+                      alert('Failed: ' + error);
+                    } finally {
+                      setButtonLoading('restart', false);
                     }
                   }
                 })}
-                className="w-full flex items-center justify-between px-4 py-3 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors group"
+                disabled={loading.restart}
+                className="w-full flex items-center justify-between px-4 py-3 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors group disabled:opacity-50"
               >
                 <div className="flex items-center gap-3">
-                  <RefreshCw className="w-5 h-5 text-blue-600" />
+                  <RefreshCw className={`w-5 h-5 text-blue-600 ${loading.restart ? 'animate-spin' : ''}`} />
                   <div className="text-left">
                     <div className="font-medium text-gray-900">Restart Docker Container</div>
                     <div className="text-sm text-gray-600">Restart the AudiobookShelf service</div>
@@ -68,49 +125,88 @@ export function MaintenancePage() {
                 <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-blue-600 transition-colors" />
               </button>
 
-              <button 
+              <button
                 onClick={() => showConfirm({
                   title: "Force Library Rescan",
-                  message: "Scan all library folders for changes. Continue?",
+                  message: "This will trigger AudiobookShelf to scan all library folders for new or changed files. This may take a while for large libraries. Continue?",
                   confirmText: "Start Rescan",
                   type: "info",
                   onConfirm: async () => {
                     try {
+                      setButtonLoading('rescan', true);
                       await invoke('force_abs_rescan');
-                      alert('✅ Rescan triggered!');
+                      alert('Library rescan triggered! Check AudiobookShelf for progress.');
                     } catch (error) {
-                      alert('❌ Failed: ' + error);
+                      alert('Failed: ' + error);
+                    } finally {
+                      setButtonLoading('rescan', false);
                     }
                   }
                 })}
-                className="w-full flex items-center justify-between px-4 py-3 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors group"
+                disabled={loading.rescan}
+                className="w-full flex items-center justify-between px-4 py-3 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors group disabled:opacity-50"
               >
                 <div className="flex items-center gap-3">
-                  <Book className="w-5 h-5 text-blue-600" />
+                  <Book className={`w-5 h-5 text-blue-600 ${loading.rescan ? 'animate-pulse' : ''}`} />
                   <div className="text-left">
                     <div className="font-medium text-gray-900">Force Library Rescan</div>
-                    <div className="text-sm text-gray-600">Refresh all books</div>
+                    <div className="text-sm text-gray-600">Scan all folders for new/changed audiobooks</div>
                   </div>
                 </div>
                 <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-blue-600 transition-colors" />
               </button>
 
-              <button 
-                onClick={async () => {
-                  try {
-                    await invoke('clear_abs_library_cache');
-                    alert('✅ Library cache cleared! Next push will fetch fresh data.');
-                  } catch (error) {
-                    alert('❌ Failed to clear cache: ' + error);
+              <button
+                onClick={() => showConfirm({
+                  title: "Clear ABS Server Cache",
+                  message: "This clears AudiobookShelf's internal cache directory (/config/cache). This can help resolve issues with stale cover art or metadata. Continue?",
+                  confirmText: "Clear Server Cache",
+                  type: "warning",
+                  onConfirm: async () => {
+                    try {
+                      setButtonLoading('absCache', true);
+                      await invoke('clear_abs_cache');
+                      alert('AudiobookShelf server cache cleared!');
+                    } catch (error) {
+                      alert('Failed: ' + error);
+                    } finally {
+                      setButtonLoading('absCache', false);
+                    }
                   }
-                }}
-                className="w-full flex items-center justify-between px-4 py-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors group"
+                })}
+                disabled={loading.absCache}
+                className="w-full flex items-center justify-between px-4 py-3 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg transition-colors group disabled:opacity-50"
               >
                 <div className="flex items-center gap-3">
-                  <RefreshCw className="w-5 h-5 text-purple-600" />
+                  <Trash2 className="w-5 h-5 text-orange-600" />
                   <div className="text-left">
-                    <div className="font-medium text-gray-900">Clear Library Cache</div>
-                    <div className="text-sm text-gray-600">Force fresh library fetch on next push</div>
+                    <div className="font-medium text-gray-900">Clear ABS Server Cache</div>
+                    <div className="text-sm text-gray-600">Clear AudiobookShelf's internal cache files</div>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-orange-600 transition-colors" />
+              </button>
+
+              <button
+                onClick={async () => {
+                  try {
+                    setButtonLoading('libCache', true);
+                    await invoke('clear_abs_library_cache');
+                    alert('Library cache cleared! Next push will fetch fresh library data from ABS.');
+                  } catch (error) {
+                    alert('Failed to clear cache: ' + error);
+                  } finally {
+                    setButtonLoading('libCache', false);
+                  }
+                }}
+                disabled={loading.libCache}
+                className="w-full flex items-center justify-between px-4 py-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors group disabled:opacity-50"
+              >
+                <div className="flex items-center gap-3">
+                  <Database className="w-5 h-5 text-purple-600" />
+                  <div className="text-left">
+                    <div className="font-medium text-gray-900">Clear Library Item Cache</div>
+                    <div className="text-sm text-gray-600">Force fresh library fetch on next push (in-memory)</div>
                   </div>
                 </div>
                 <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-purple-600 transition-colors" />
@@ -118,118 +214,196 @@ export function MaintenancePage() {
             </div>
           </div>
 
-          {/* Genre Management */}
+          {/* Genre Management (ABS) */}
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
             <div className="bg-gradient-to-r from-purple-50 to-pink-50 px-6 py-4 border-b border-gray-200">
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-purple-100 rounded-lg">
-                  <Folder className="w-5 h-5 text-purple-600" />
+                  <Tag className="w-5 h-5 text-purple-600" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-semibold text-gray-900">Genre Management</h3>
-                  <p className="text-sm text-gray-600">Clean up genre tags</p>
+                  <h3 className="text-lg font-semibold text-gray-900">ABS Genre Management</h3>
+                  <p className="text-sm text-gray-600">Manage genres in AudiobookShelf (not file tags)</p>
                 </div>
               </div>
             </div>
-            
+
             <div className="p-6 space-y-3">
-              <button 
+              <button
                 onClick={() => showConfirm({
-                  title: "Clear Unused Genres",
-                  message: "Remove genres not assigned to any books. Continue?",
-                  confirmText: "Clear Genres",
+                  title: "Clear All Genres from ABS",
+                  message: "This will remove ALL genre assignments from EVERY book in AudiobookShelf. This does NOT affect the genre tags in your actual audio files. Use this if you want to start fresh with genre categorization in ABS. Continue?",
+                  confirmText: "Clear All Genres",
                   type: "danger",
                   onConfirm: async () => {
                     try {
+                      setButtonLoading('clearGenres', true);
                       const result = await invoke('clear_all_genres');
-                      alert('✅ ' + result);
+                      alert(result);
+                      refreshStats();
                     } catch (error) {
-                      alert('❌ Failed: ' + error);
+                      alert('Failed: ' + error);
+                    } finally {
+                      setButtonLoading('clearGenres', false);
                     }
                   }
                 })}
-                className="w-full flex items-center justify-between px-4 py-3 bg-yellow-50 hover:bg-yellow-100 border border-yellow-200 rounded-lg transition-colors group"
+                disabled={loading.clearGenres}
+                className="w-full flex items-center justify-between px-4 py-3 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors group disabled:opacity-50"
               >
                 <div className="flex items-center gap-3">
-                  <AlertCircle className="w-5 h-5 text-yellow-600" />
+                  <Trash2 className={`w-5 h-5 text-red-600 ${loading.clearGenres ? 'animate-pulse' : ''}`} />
                   <div className="text-left">
-                    <div className="font-medium text-gray-900">Clear Unused Genres</div>
-                    <div className="text-sm text-gray-600">Remove unused entries</div>
-                  </div>
-                </div>
-                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-yellow-600 transition-colors" />
-              </button>
-
-              <button 
-                onClick={() => showConfirm({
-                  title: "Normalize Book Genres",
-                  message: "Map all genres to approved list. Continue?",
-                  confirmText: "Normalize Genres",
-                  type: "warning",
-                  onConfirm: async () => {
-                    try {
-                      const result = await invoke('normalize_genres');
-                      alert('✅ ' + result);
-                    } catch (error) {
-                      alert('❌ Failed: ' + error);
-                    }
-                  }
-                })}
-                className="w-full flex items-center justify-between px-4 py-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors group"
-              >
-                <div className="flex items-center gap-3">
-                  <Book className="w-5 h-5 text-purple-600" />
-                  <div className="text-left">
-                    <div className="font-medium text-gray-900">Normalize Book Genres</div>
-                    <div className="text-sm text-gray-600">Map to approved list</div>
-                  </div>
-                </div>
-                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-purple-600 transition-colors" />
-              </button>
-            </div>
-          </div>
-
-          {/* Local Library */}
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            <div className="bg-gradient-to-r from-green-50 to-emerald-50 px-6 py-4 border-b border-gray-200">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-green-100 rounded-lg">
-                  <Book className="w-5 h-5 text-green-600" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900">Local Library</h3>
-                  <p className="text-sm text-gray-600">Manage local cache</p>
-                </div>
-              </div>
-            </div>
-            
-            <div className="p-6">
-              <button 
-                onClick={() => showConfirm({
-                  title: "Clear Metadata Cache",
-                  message: "Force fresh API lookups on next scan. Continue?",
-                  confirmText: "Clear Cache",
-                  type: "danger",
-                  onConfirm: async () => {
-                    try {
-                      await invoke('clear_cache');
-                      alert('✅ Cache cleared!');
-                    } catch (error) {
-                      alert('❌ Failed: ' + error);
-                    }
-                  }
-                })}
-                className="w-full flex items-center justify-between px-4 py-3 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors group"
-              >
-                <div className="flex items-center gap-3">
-                  <AlertCircle className="w-5 h-5 text-red-600" />
-                  <div className="text-left">
-                    <div className="font-medium text-gray-900">Clear Metadata Cache</div>
-                    <div className="text-sm text-gray-600">Force fresh lookups</div>
+                    <div className="font-medium text-gray-900">Clear All Genres</div>
+                    <div className="text-sm text-gray-600">Remove genre assignments from all books in ABS</div>
                   </div>
                 </div>
                 <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-red-600 transition-colors" />
               </button>
+
+              <button
+                onClick={() => showConfirm({
+                  title: "Normalize Book Genres",
+                  message: "This will update all genre assignments in AudiobookShelf to use the approved genre list (e.g., 'Sci-Fi' becomes 'Science Fiction'). This does NOT modify your audio files. Continue?",
+                  confirmText: "Normalize Genres",
+                  type: "warning",
+                  onConfirm: async () => {
+                    try {
+                      setButtonLoading('normalizeGenres', true);
+                      const result = await invoke('normalize_genres');
+                      alert(result);
+                      refreshStats();
+                    } catch (error) {
+                      alert('Failed: ' + error);
+                    } finally {
+                      setButtonLoading('normalizeGenres', false);
+                    }
+                  }
+                })}
+                disabled={loading.normalizeGenres}
+                className="w-full flex items-center justify-between px-4 py-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors group disabled:opacity-50"
+              >
+                <div className="flex items-center gap-3">
+                  <Wrench className={`w-5 h-5 text-purple-600 ${loading.normalizeGenres ? 'animate-spin' : ''}`} />
+                  <div className="text-left">
+                    <div className="font-medium text-gray-900">Normalize Book Genres</div>
+                    <div className="text-sm text-gray-600">Map all ABS genres to approved standard list</div>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-purple-600 transition-colors" />
+              </button>
+
+              <button
+                onClick={async () => {
+                  try {
+                    setButtonLoading('genreStats', true);
+                    const stats = await invoke('get_genre_stats');
+                    setGenreStats(stats);
+                    alert(stats);
+                  } catch (error) {
+                    alert('Failed: ' + error);
+                  } finally {
+                    setButtonLoading('genreStats', false);
+                  }
+                }}
+                disabled={loading.genreStats}
+                className="w-full flex items-center justify-between px-4 py-3 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors group disabled:opacity-50"
+              >
+                <div className="flex items-center gap-3">
+                  <BarChart3 className="w-5 h-5 text-indigo-600" />
+                  <div className="text-left">
+                    <div className="font-medium text-gray-900">View Genre Statistics</div>
+                    <div className="text-sm text-gray-600">See how many genres need normalization</div>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-indigo-600 transition-colors" />
+              </button>
+            </div>
+          </div>
+
+          {/* Local Cache */}
+          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div className="bg-gradient-to-r from-green-50 to-emerald-50 px-6 py-4 border-b border-gray-200">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-green-100 rounded-lg">
+                  <Database className="w-5 h-5 text-green-600" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900">Local Application Cache</h3>
+                  <p className="text-sm text-gray-600">Manage cached API responses and cover art stored on this computer</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-3">
+              <button
+                onClick={() => showConfirm({
+                  title: "Clear Metadata Cache",
+                  message: "This clears all cached API responses (Audible, OpenAI, etc.) stored locally. The next scan will fetch fresh metadata from APIs. This does NOT affect AudiobookShelf. Continue?",
+                  confirmText: "Clear Cache",
+                  type: "danger",
+                  onConfirm: async () => {
+                    try {
+                      setButtonLoading('metaCache', true);
+                      await invoke('clear_cache');
+                      alert('Local metadata cache cleared!');
+                      refreshStats();
+                    } catch (error) {
+                      alert('Failed: ' + error);
+                    } finally {
+                      setButtonLoading('metaCache', false);
+                    }
+                  }
+                })}
+                disabled={loading.metaCache}
+                className="w-full flex items-center justify-between px-4 py-3 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors group disabled:opacity-50"
+              >
+                <div className="flex items-center gap-3">
+                  <Trash2 className="w-5 h-5 text-red-600" />
+                  <div className="text-left">
+                    <div className="font-medium text-gray-900">Clear Metadata Cache</div>
+                    <div className="text-sm text-gray-600">Force fresh API lookups on next scan</div>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-red-600 transition-colors" />
+              </button>
+
+              <button
+                onClick={async () => {
+                  try {
+                    setButtonLoading('cacheStats', true);
+                    const stats = await invoke('get_cache_stats');
+                    setCacheStats(stats);
+                    alert(`Local cache: ${stats}`);
+                  } catch (error) {
+                    alert('Failed: ' + error);
+                  } finally {
+                    setButtonLoading('cacheStats', false);
+                  }
+                }}
+                disabled={loading.cacheStats}
+                className="w-full flex items-center justify-between px-4 py-3 bg-green-50 hover:bg-green-100 border border-green-200 rounded-lg transition-colors group disabled:opacity-50"
+              >
+                <div className="flex items-center gap-3">
+                  <BarChart3 className="w-5 h-5 text-green-600" />
+                  <div className="text-left">
+                    <div className="font-medium text-gray-900">View Cache Statistics</div>
+                    <div className="text-sm text-gray-600">See how many items are cached locally</div>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-green-600 transition-colors" />
+              </button>
+            </div>
+          </div>
+
+          {/* Info Card */}
+          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+            <div className="flex gap-3">
+              <AlertCircle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+              <div className="text-sm text-blue-800">
+                <p className="font-medium mb-1">About Genre Management</p>
+                <p>Genre operations in the "ABS Genre Management" section only affect metadata stored in AudiobookShelf. They do <strong>not</strong> modify the genre tags embedded in your audio files. To update file tags, use the "Write Tags" feature after scanning your library.</p>
+              </div>
             </div>
           </div>
         </div>
