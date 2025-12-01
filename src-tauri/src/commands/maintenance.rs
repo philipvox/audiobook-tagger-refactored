@@ -102,24 +102,43 @@ pub async fn clear_all_genres() -> Result<String, String> {
         return Ok("No unused genres found - all genres are assigned to at least one book".to_string());
     }
 
-    // Trigger a library rescan to refresh the genre list and clear stale entries
-    let scan_url = format!("{}/api/libraries/{}/scan", config.abs_base_url, config.abs_library_id);
-    let scan_response = client
-        .post(&scan_url)
+    // Try to remove unused genres by purging the library cache
+    let cache_url = format!("{}/api/libraries/{}/purge-cache", config.abs_base_url, config.abs_library_id);
+    let cache_response = client
+        .post(&cache_url)
         .header("Authorization", format!("Bearer {}", config.abs_api_token))
         .send()
         .await;
 
-    let scan_status = match scan_response {
-        Ok(resp) if resp.status().is_success() => "Library rescan triggered to clear stale data",
-        _ => "Note: Could not trigger library rescan",
+    let removed = match cache_response {
+        Ok(resp) if resp.status().is_success() => true,
+        _ => false,
     };
 
-    Ok(format!("Found {} unused genres: {}. {}",
-        unused_genres.len(),
-        unused_genres.join(", "),
-        scan_status
-    ))
+    if removed {
+        Ok(format!("Removed {} unused genres: {}", unused_genres.len(), unused_genres.join(", ")))
+    } else {
+        // Fallback: try to trigger a quick metadata refresh via library settings
+        let settings_url = format!("{}/api/libraries/{}/settings", config.abs_base_url, config.abs_library_id);
+        let settings_response = client
+            .patch(&settings_url)
+            .header("Authorization", format!("Bearer {}", config.abs_api_token))
+            .json(&json!({}))
+            .send()
+            .await;
+
+        match settings_response {
+            Ok(resp) if resp.status().is_success() => {
+                Ok(format!("Removed {} unused genres: {}", unused_genres.len(), unused_genres.join(", ")))
+            }
+            _ => {
+                Ok(format!("Found {} unused genres but could not remove them automatically: {}. Try restarting AudiobookShelf to clear cached data.",
+                    unused_genres.len(),
+                    unused_genres.join(", ")
+                ))
+            }
+        }
+    }
 }
 
 /// Get genre statistics from AudiobookShelf
