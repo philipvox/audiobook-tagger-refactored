@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, Filter, X, Download, FolderPlus } from 'lucide-react';
+import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, Filter, X, Download, FolderPlus, Sparkles, FileJson } from 'lucide-react';
 
 // Virtualized item height (approximate)
 const ITEM_HEIGHT = 140;
@@ -38,6 +38,7 @@ export function BookList({
     hasSeries: null,   // null = all, true = in series, false = standalone
     hasChanges: null,  // null = all, true = has changes, false = no changes
     genre: '',         // empty = all, or specific genre
+    scanStatus: '',    // empty = all, 'new_scan' = freshly scanned, 'loaded_from_file' = loaded from metadata.json
   });
 
   // Get unique genres from all groups
@@ -92,6 +93,11 @@ export function BookList({
         if (!hasGenre) return false;
       }
 
+      // Scan status filter
+      if (filters.scanStatus) {
+        if (filters.scanStatus !== group.scan_status) return false;
+      }
+
       return true;
     });
   }, [groups, searchQuery, filters, coverCache]);
@@ -104,11 +110,12 @@ export function BookList({
       hasSeries: null,
       hasChanges: null,
       genre: '',
+      scanStatus: '',
     });
   };
 
   const hasActiveFilters = searchQuery || filters.hasCover !== null ||
-    filters.hasSeries !== null || filters.hasChanges !== null || filters.genre;
+    filters.hasSeries !== null || filters.hasChanges !== null || filters.genre || filters.scanStatus;
 
   // Cleanup blob URLs on unmount
   useEffect(() => {
@@ -379,6 +386,18 @@ export function BookList({
                 <option value="false">No Changes</option>
               </select>
 
+              {/* Scan Status Filter */}
+              <select
+                value={filters.scanStatus}
+                onChange={(e) => setFilters(f => ({ ...f, scanStatus: e.target.value }))}
+                className="text-xs px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                <option value="">All Sources</option>
+                <option value="new_scan">New Scans</option>
+                <option value="loaded_from_file">From metadata.json</option>
+                <option value="not_scanned">Not Scanned</option>
+              </select>
+
               {hasActiveFilters && (
                 <button
                   onClick={clearFilters}
@@ -469,6 +488,19 @@ export function BookList({
                             {metadata.title}
                           </h4>
                           <div className="flex items-center gap-1 flex-shrink-0">
+                            {/* Scan Status Badge */}
+                            {group.scan_status === 'new_scan' && (
+                              <span className="px-2 py-0.5 bg-cyan-100 text-cyan-700 text-[10px] rounded-full font-medium flex items-center gap-1" title="Freshly scanned from APIs">
+                                <Sparkles className="w-3 h-3" />
+                                New
+                              </span>
+                            )}
+                            {group.scan_status === 'loaded_from_file' && (
+                              <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-[10px] rounded-full font-medium flex items-center gap-1" title="Loaded from existing metadata.json">
+                                <FileJson className="w-3 h-3" />
+                                Saved
+                              </span>
+                            )}
                             {group.total_changes > 0 && (
                               <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded-full font-medium">
                                 {group.total_changes}
