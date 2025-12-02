@@ -217,6 +217,11 @@ pub async fn clear_all_genres() -> Result<String, String> {
     }
 }
 
+/// Check if a genre string contains combined genres that need splitting
+fn is_combined_genre(genre: &str) -> bool {
+    genre.contains(" / ") || genre.contains(", ") || genre.contains(" & ")
+}
+
 /// Get genre statistics from AudiobookShelf
 #[tauri::command]
 pub async fn get_genre_stats() -> Result<String, String> {
@@ -243,12 +248,21 @@ pub async fn get_genre_stats() -> Result<String, String> {
     let filter_data: LibraryFilterData = filter_response.json().await.map_err(|e| e.to_string())?;
     let total_genres = filter_data.genres.len();
 
-    // Count non-approved genres
-    let non_approved: Vec<&String> = filter_data.genres.iter()
-        .filter(|g| genres::map_genre_basic(g).is_none() || genres::map_genre_basic(g).as_ref() != Some(*g))
+    // Count genres that need normalization:
+    // 1. Combined genres (contain separators like ", " or " / ")
+    // 2. Non-approved genres that don't map to approved list
+    let needs_normalization: Vec<&String> = filter_data.genres.iter()
+        .filter(|g| {
+            // Check if it's a combined genre string
+            if is_combined_genre(g) {
+                return true;
+            }
+            // Check if it doesn't map to an approved genre
+            genres::map_genre_basic(g).is_none() || genres::map_genre_basic(g).as_ref() != Some(*g)
+        })
         .collect();
 
-    Ok(format!("{} genres in library, {} need normalization", total_genres, non_approved.len()))
+    Ok(format!("{} genres in library, {} need normalization", total_genres, needs_normalization.len()))
 }
 
 #[tauri::command]
@@ -276,7 +290,8 @@ pub async fn normalize_genres() -> Result<String, String> {
                 continue;
             }
             
-            let normalized_genres = genres::enforce_genre_policy_basic(current_genres);
+            // Use split-aware normalization to handle combined genre strings
+            let normalized_genres = genres::enforce_genre_policy_with_split(current_genres);
             
             if normalized_genres != *current_genres {
                 let update_url = format!("{}/api/items/{}/media", config.abs_base_url, item.id);
