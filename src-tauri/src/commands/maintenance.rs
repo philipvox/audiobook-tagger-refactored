@@ -199,32 +199,13 @@ pub async fn clear_all_genres() -> Result<String, String> {
             ))
         }
         Some((new_count, false)) => {
-            // Genres still present - try triggering a library metadata refresh
-            let scan_url = format!("{}/api/libraries/{}/scan", config.abs_base_url, config.abs_library_id);
-            let scan_result = client
-                .post(&scan_url)
-                .header("Authorization", format!("Bearer {}", config.abs_api_token))
-                .json(&json!({"force": false}))
-                .send()
-                .await;
-
-            match scan_result {
-                Ok(resp) if resp.status().is_success() => {
-                    Ok(format!(
-                        "Found {} unused genres. Triggered quick library refresh to remove them. Check ABS in a few seconds. ({} → {} genres currently)",
-                        unused_genres.len(),
-                        initial_genre_count,
-                        new_count
-                    ))
-                }
-                _ => {
-                    Ok(format!(
-                        "Found {} unused genres: {}. Cache was purged but ABS may need a quick refresh. Go to ABS Settings > Libraries and click the refresh icon.",
-                        unused_genres.len(),
-                        unused_genres.join(", ")
-                    ))
-                }
-            }
+            // Genres still present after cache purge - they may still be assigned to items
+            // or embedded in file tags. Do NOT trigger a scan as that would re-import from files.
+            Ok(format!(
+                "Found {} genres not currently assigned to books: {}. Cache purged but genres remain - they may be embedded in audio file tags. Use 'Write Tags' after scanning to update file tags, or restart ABS to fully clear the cache.",
+                unused_genres.len(),
+                unused_genres.join(", ")
+            ))
         }
         None => {
             Ok(format!(
