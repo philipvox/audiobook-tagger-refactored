@@ -35,6 +35,7 @@ fn main() {
             commands::scan::import_folders,
             commands::scan::cancel_scan,
             commands::scan::get_scan_progress,
+            commands::scan::rescan_fields,
             commands::tags::write_tags,
             commands::tags::inspect_file_tags,
             commands::rename::preview_rename,

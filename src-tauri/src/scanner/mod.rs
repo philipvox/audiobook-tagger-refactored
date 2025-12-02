@@ -136,7 +136,34 @@ pub async fn scan_directories(
     cancel_flag: Option<Arc<AtomicBool>>,
     scan_mode: ScanMode
 ) -> Result<ScanResult, Box<dyn std::error::Error + Send + Sync>> {
-    println!("🔍 Starting scan of {} paths (mode={:?})", paths.len(), scan_mode);
+    scan_directories_with_options(paths, cancel_flag, scan_mode, None).await
+}
+
+/// Scan directories with selective refresh options
+/// selective_fields: If provided with SelectiveRefresh mode, only these fields will be refreshed
+pub async fn scan_directories_with_options(
+    paths: &[String],
+    cancel_flag: Option<Arc<AtomicBool>>,
+    scan_mode: ScanMode,
+    selective_fields: Option<SelectiveRefreshFields>
+) -> Result<ScanResult, Box<dyn std::error::Error + Send + Sync>> {
+    let fields_desc = if let Some(ref fields) = selective_fields {
+        let mut selected = Vec::new();
+        if fields.all { selected.push("all"); }
+        else {
+            if fields.authors { selected.push("authors"); }
+            if fields.narrators { selected.push("narrators"); }
+            if fields.description { selected.push("description"); }
+            if fields.series { selected.push("series"); }
+            if fields.genres { selected.push("genres"); }
+            if fields.publisher { selected.push("publisher"); }
+            if fields.cover { selected.push("cover"); }
+        }
+        format!(" [fields: {}]", selected.join(", "))
+    } else {
+        String::new()
+    };
+    println!("🔍 Starting scan of {} paths (mode={:?}){}", paths.len(), scan_mode, fields_desc);
 
     // ✅ THIS LINE MUST BE HERE
     crate::progress::reset_progress();
@@ -191,11 +218,12 @@ pub async fn scan_directories(
     crate::progress::update_progress(0, groups.len(), "Starting processing...");
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let processed_groups = processor::process_all_groups(
+    let processed_groups = processor::process_all_groups_with_options(
         groups,
         &config,
         cancel_flag.clone(),
-        scan_mode
+        scan_mode,
+        selective_fields
     ).await?;
 
     Ok(ScanResult {
