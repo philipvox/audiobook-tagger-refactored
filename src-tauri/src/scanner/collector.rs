@@ -80,11 +80,9 @@ fn load_metadata_json(folder_path: &str) -> (Option<BookMetadata>, bool) {
     });
 
     let author = abs_meta.authors.first().cloned().unwrap_or_else(|| "Unknown".to_string());
-    let narrator = if abs_meta.narrators.is_empty() {
-        None
-    } else {
-        Some(abs_meta.narrators.join(", "))
-    };
+    // CRITICAL FIX: Keep narrator as single value (first narrator), not joined string
+    // The narrators array is stored separately and used for metadata.json
+    let narrator = abs_meta.narrators.first().cloned();
 
     let (series, sequence) = if let Some(first_series) = abs_meta.series.first() {
         (Some(first_series.name.clone()), first_series.sequence.clone())
