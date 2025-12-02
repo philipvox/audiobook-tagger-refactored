@@ -363,8 +363,7 @@ pub async fn get_author_stats() -> Result<String, String> {
     }
 
     let client = reqwest::Client::new();
-    // Fetch with expanded data to get audio file tags
-    let url = format!("{}/api/libraries/{}/items?limit=1000&expanded=1", config.abs_base_url, config.abs_library_id);
+    let url = format!("{}/api/libraries/{}/items?limit=1000", config.abs_base_url, config.abs_library_id);
 
     let response = client
         .get(&url)
@@ -375,34 +374,45 @@ pub async fn get_author_stats() -> Result<String, String> {
 
     let items: LibraryItemsResponse = response.json().await.map_err(|e| e.to_string())?;
 
-    let mut mismatch_count = 0;
-    let mut total_with_tags = 0;
-
+    // Count books by author
+    let mut author_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for item in &items.results {
-        // Get current ABS author
         let abs_author = item.media.metadata.author_name.clone()
             .or_else(|| item.media.metadata.authors.as_ref()
                 .and_then(|a| a.first().map(|x| x.name.clone())))
-            .unwrap_or_default();
-
-        // Get author from file tags
-        let tag_author = item.media.audio_files.first()
-            .and_then(|af| af.metadata.as_ref())
-            .and_then(|m| m.tag_album_artist.clone().or(m.tag_artist.clone()));
-
-        if let Some(ref tag) = tag_author {
-            total_with_tags += 1;
-            if !tag.is_empty() && !abs_author.is_empty()
-                && !crate::normalize::authors_match(tag, &abs_author) {
-                mismatch_count += 1;
-            }
-        }
+            .unwrap_or_else(|| "Unknown".to_string());
+        *author_counts.entry(abs_author).or_insert(0) += 1;
     }
 
-    Ok(format!("{} items checked, {} potential author mismatches found", total_with_tags, mismatch_count))
+    // Find suspicious counts (authors with way too many books)
+    let suspicious: Vec<_> = author_counts.iter()
+        .filter(|(_, &count)| count > 50)
+        .collect();
+
+    if suspicious.is_empty() {
+        Ok(format!("{} items, no suspicious author counts found", items.results.len()))
+    } else {
+        let suspicious_list: Vec<String> = suspicious.iter()
+            .map(|(author, count)| format!("{}: {}", author, count))
+            .collect();
+        Ok(format!("{} items, suspicious: {}", items.results.len(), suspicious_list.join(", ")))
+    }
 }
 
-/// Fix author mismatches by comparing ABS metadata with file tags
+/// Read author from audio file tags
+fn read_author_from_file(path: &str) -> Option<String> {
+    use lofty::{Probe, TaggedFileExt, Accessor};
+
+    let tagged_file = Probe::open(path).ok()?.read().ok()?;
+    let tag = tagged_file.primary_tag()?;
+
+    // Try album artist first (more reliable for audiobooks), then artist
+    tag.get_string(&lofty::ItemKey::AlbumArtist)
+        .map(|s| s.to_string())
+        .or_else(|| tag.artist().map(|s| s.to_string()))
+}
+
+/// Fix author mismatches by reading actual file tags from disk
 /// This will update ABS entries where the author doesn't match the file tags
 #[tauri::command]
 pub async fn fix_author_mismatches() -> Result<String, String> {
@@ -413,8 +423,8 @@ pub async fn fix_author_mismatches() -> Result<String, String> {
     }
 
     let client = reqwest::Client::new();
-    // Fetch with expanded data to get audio file tags
-    let url = format!("{}/api/libraries/{}/items?limit=1000&expanded=1", config.abs_base_url, config.abs_library_id);
+    // Fetch items with their file paths
+    let url = format!("{}/api/libraries/{}/items?limit=1000", config.abs_base_url, config.abs_library_id);
 
     let response = client
         .get(&url)
@@ -427,6 +437,7 @@ pub async fn fix_author_mismatches() -> Result<String, String> {
 
     let mut fixed_count = 0;
     let mut skipped_count = 0;
+    let mut no_file_count = 0;
     let mut error_count = 0;
 
     // Known famous authors that are often wrongly assigned
@@ -443,44 +454,51 @@ pub async fn fix_author_mismatches() -> Result<String, String> {
                 .and_then(|a| a.first().map(|x| x.name.clone())))
             .unwrap_or_default();
 
-        // Get author from file tags (prefer album artist, then artist)
-        let tag_author = item.media.audio_files.first()
-            .and_then(|af| af.metadata.as_ref())
-            .and_then(|m| m.tag_album_artist.clone().or(m.tag_artist.clone()));
+        // Get file path from library_files
+        let file_path = item.library_files.iter()
+            .find(|f| {
+                f.metadata.ext.as_ref()
+                    .map(|e| ["m4b", "m4a", "mp3", "flac", "ogg", "opus"].contains(&e.to_lowercase().as_str()))
+                    .unwrap_or(false)
+            })
+            .and_then(|f| f.metadata.path.clone());
 
-        let Some(tag) = tag_author else {
-            skipped_count += 1;
+        let Some(path) = file_path else {
+            no_file_count += 1;
             continue;
         };
 
-        // Skip if tag is empty or generic
-        if tag.is_empty() || tag.to_lowercase() == "unknown" {
-            skipped_count += 1;
-            continue;
-        }
+        // Read actual file tags from disk
+        let file_author = match read_author_from_file(&path) {
+            Some(author) if !author.is_empty() && author.to_lowercase() != "unknown" => author,
+            _ => {
+                skipped_count += 1;
+                continue;
+            }
+        };
 
         // Check if this is a mismatch
         let abs_lower = abs_author.to_lowercase();
-        let tag_lower = tag.to_lowercase();
+        let file_lower = file_author.to_lowercase();
 
-        // Check if ABS has a suspicious famous author but tag has different author
+        // Check if ABS has a suspicious famous author but file has different author
         let abs_is_suspicious = suspicious_authors.iter().any(|&s| abs_lower.contains(s));
-        let tag_is_same_suspicious = suspicious_authors.iter().any(|&s| {
-            abs_lower.contains(s) && tag_lower.contains(s)
+        let file_is_same_suspicious = suspicious_authors.iter().any(|&s| {
+            abs_lower.contains(s) && file_lower.contains(s)
         });
 
         // Only fix if:
-        // 1. ABS has a famous author that's different from the tag, OR
-        // 2. Authors don't match and tag is valid
-        let should_fix = if abs_is_suspicious && !tag_is_same_suspicious {
+        // 1. ABS has a famous author that's different from the file, OR
+        // 2. Authors don't match and file author is valid
+        let should_fix = if abs_is_suspicious && !file_is_same_suspicious {
             // Famous author mismatch - definitely fix
             println!("🔧 Fixing famous author mismatch: '{}' -> '{}' for '{}'",
-                abs_author, tag, item.media.metadata.title.as_deref().unwrap_or("Unknown"));
+                abs_author, file_author, item.media.metadata.title.as_deref().unwrap_or("Unknown"));
             true
-        } else if !crate::normalize::authors_match(&tag, &abs_author) {
+        } else if !crate::normalize::authors_match(&file_author, &abs_author) {
             // General mismatch
             println!("🔧 Fixing author mismatch: '{}' -> '{}' for '{}'",
-                abs_author, tag, item.media.metadata.title.as_deref().unwrap_or("Unknown"));
+                abs_author, file_author, item.media.metadata.title.as_deref().unwrap_or("Unknown"));
             true
         } else {
             false
@@ -494,7 +512,7 @@ pub async fn fix_author_mismatches() -> Result<String, String> {
                 .header("Authorization", format!("Bearer {}", config.abs_api_token))
                 .json(&json!({
                     "metadata": {
-                        "authors": [{"name": tag}]
+                        "authors": [{"name": file_author}]
                     }
                 }))
                 .send()
@@ -516,5 +534,6 @@ pub async fn fix_author_mismatches() -> Result<String, String> {
         }
     }
 
-    Ok(format!("Fixed {} author mismatches, skipped {}, errors: {}", fixed_count, skipped_count, error_count))
+    Ok(format!("Fixed {} mismatches, skipped {} (matched), {} no audio file, {} errors",
+        fixed_count, skipped_count, no_file_count, error_count))
 }
