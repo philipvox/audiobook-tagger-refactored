@@ -2,8 +2,10 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Upload, RefreshCw, Book, Wrench, Folder, AlertCircle, ChevronRight, Trash2, Database, Tag, BarChart3, Server } from 'lucide-react';
 import { ConfirmModal } from '../components/ConfirmModal';
+import { useApp } from '../context/AppContext';
 
 export function MaintenancePage() {
+  const { startGlobalProgress, updateGlobalProgress, endGlobalProgress } = useApp();
   const [confirmModal, setConfirmModal] = useState(null);
   const [cacheStats, setCacheStats] = useState(null);
   const [genreStats, setGenreStats] = useState(null);
@@ -103,9 +105,15 @@ export function MaintenancePage() {
                   onConfirm: async () => {
                     try {
                       setButtonLoading('restart', true);
+                      startGlobalProgress({
+                        message: 'Restarting AudiobookShelf Docker container...',
+                        type: 'warning'
+                      });
                       await invoke('restart_abs_docker');
+                      endGlobalProgress();
                       alert('Container restarted successfully!');
                     } catch (error) {
+                      endGlobalProgress();
                       alert('Failed: ' + error);
                     } finally {
                       setButtonLoading('restart', false);
@@ -134,9 +142,15 @@ export function MaintenancePage() {
                   onConfirm: async () => {
                     try {
                       setButtonLoading('rescan', true);
+                      startGlobalProgress({
+                        message: 'Triggering AudiobookShelf library rescan...',
+                        type: 'info'
+                      });
                       await invoke('force_abs_rescan');
+                      endGlobalProgress();
                       alert('Library rescan triggered! Check AudiobookShelf for progress.');
                     } catch (error) {
+                      endGlobalProgress();
                       alert('Failed: ' + error);
                     } finally {
                       setButtonLoading('rescan', false);
@@ -165,9 +179,15 @@ export function MaintenancePage() {
                   onConfirm: async () => {
                     try {
                       setButtonLoading('absCache', true);
+                      startGlobalProgress({
+                        message: 'Clearing AudiobookShelf server cache...',
+                        type: 'warning'
+                      });
                       await invoke('clear_abs_cache');
+                      endGlobalProgress();
                       alert('AudiobookShelf server cache cleared!');
                     } catch (error) {
+                      endGlobalProgress();
                       alert('Failed: ' + error);
                     } finally {
                       setButtonLoading('absCache', false);
@@ -238,10 +258,16 @@ export function MaintenancePage() {
                   onConfirm: async () => {
                     try {
                       setButtonLoading('clearGenres', true);
+                      startGlobalProgress({
+                        message: 'Clearing unused genres from AudiobookShelf...',
+                        type: 'warning'
+                      });
                       const result = await invoke('clear_all_genres');
+                      endGlobalProgress();
                       alert(result);
                       refreshStats();
                     } catch (error) {
+                      endGlobalProgress();
                       alert('Failed: ' + error);
                     } finally {
                       setButtonLoading('clearGenres', false);
@@ -270,10 +296,16 @@ export function MaintenancePage() {
                   onConfirm: async () => {
                     try {
                       setButtonLoading('normalizeGenres', true);
+                      startGlobalProgress({
+                        message: 'Normalizing genres in AudiobookShelf...',
+                        type: 'info'
+                      });
                       const result = await invoke('normalize_genres');
+                      endGlobalProgress();
                       alert(result);
                       refreshStats();
                     } catch (error) {
+                      endGlobalProgress();
                       alert('Failed: ' + error);
                     } finally {
                       setButtonLoading('normalizeGenres', false);
@@ -345,10 +377,16 @@ export function MaintenancePage() {
                   onConfirm: async () => {
                     try {
                       setButtonLoading('metaCache', true);
+                      startGlobalProgress({
+                        message: 'Clearing local metadata cache...',
+                        type: 'danger'
+                      });
                       await invoke('clear_cache');
+                      endGlobalProgress();
                       alert('Local metadata cache cleared!');
                       refreshStats();
                     } catch (error) {
+                      endGlobalProgress();
                       alert('Failed: ' + error);
                     } finally {
                       setButtonLoading('metaCache', false);
