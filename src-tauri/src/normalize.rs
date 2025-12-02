@@ -349,6 +349,132 @@ pub fn is_valid_author(author: &str) -> bool {
     true
 }
 
+/// Calculate similarity between two strings (0.0 to 1.0)
+///
+/// Uses word-based matching for author names
+fn calculate_name_similarity(name1: &str, name2: &str) -> f64 {
+    let n1 = name1.to_lowercase();
+    let n2 = name2.to_lowercase();
+
+    // Exact match
+    if n1 == n2 {
+        return 1.0;
+    }
+
+    // Extract words (split on spaces, hyphens, periods)
+    let words1: Vec<&str> = n1.split(|c: char| c.is_whitespace() || c == '-' || c == '.')
+        .filter(|s| !s.is_empty() && s.len() > 1)
+        .collect();
+    let words2: Vec<&str> = n2.split(|c: char| c.is_whitespace() || c == '-' || c == '.')
+        .filter(|s| !s.is_empty() && s.len() > 1)
+        .collect();
+
+    if words1.is_empty() || words2.is_empty() {
+        return 0.0;
+    }
+
+    // Count matching words
+    let mut matches = 0;
+    for w1 in &words1 {
+        for w2 in &words2 {
+            // Exact word match
+            if w1 == w2 {
+                matches += 2;
+                break;
+            }
+            // One contains the other (for initials like "J." matching "James")
+            if w1.starts_with(w2) || w2.starts_with(w1) {
+                matches += 1;
+                break;
+            }
+        }
+    }
+
+    // Calculate score based on total possible matches
+    let max_possible = (words1.len() + words2.len()) as f64;
+    (matches as f64) / max_possible
+}
+
+/// Check if two author names are similar enough to be considered a match
+///
+/// Returns true if the names are likely the same person
+pub fn authors_match(expected: &str, found: &str) -> bool {
+    let expected_clean = expected.trim().to_lowercase();
+    let found_clean = found.trim().to_lowercase();
+
+    // Exact match (case-insensitive)
+    if expected_clean == found_clean {
+        return true;
+    }
+
+    // Empty or invalid - don't match
+    if expected_clean.is_empty() || found_clean.is_empty()
+        || expected_clean == "unknown" || found_clean == "unknown" {
+        return false;
+    }
+
+    // Check for common famous author mismatches - these should never match
+    let famous_authors = [
+        "j.k. rowling", "jk rowling", "j. k. rowling",
+        "stephen king", "james patterson", "john grisham",
+        "dan brown", "agatha christie", "tolkien",
+    ];
+
+    let expected_is_famous = famous_authors.iter().any(|&f| expected_clean.contains(f));
+    let found_is_famous = famous_authors.iter().any(|&f| found_clean.contains(f));
+
+    // If one is famous and the other isn't, they don't match
+    if expected_is_famous != found_is_famous {
+        return false;
+    }
+
+    // If both are famous but different, they don't match
+    if expected_is_famous && found_is_famous {
+        for famous in &famous_authors {
+            let exp_has = expected_clean.contains(famous);
+            let found_has = found_clean.contains(famous);
+            if exp_has != found_has {
+                return false;
+            }
+        }
+    }
+
+    // Calculate similarity score
+    let similarity = calculate_name_similarity(&expected_clean, &found_clean);
+
+    // Require at least 50% similarity
+    // This allows for variations like:
+    // - "Brandon Sanderson" vs "Sanderson, Brandon"
+    // - "J.R.R. Tolkien" vs "J. R. R. Tolkien"
+    // - "Will Wight" vs "Wight, Will"
+    similarity >= 0.5
+}
+
+/// Check if found author is acceptable given expected author
+///
+/// More lenient than authors_match - allows accepting if found is valid
+/// and expected was "Unknown" or very generic
+pub fn author_is_acceptable(expected: &str, found: &str) -> bool {
+    // If they match, accept
+    if authors_match(expected, found) {
+        return true;
+    }
+
+    let expected_clean = expected.trim().to_lowercase();
+
+    // If expected was unknown/generic, accept any valid author
+    let generic_expected = [
+        "unknown", "unknown author", "various", "various authors",
+        "author", "n/a", "", "audiobook",
+    ];
+
+    if generic_expected.contains(&expected_clean.as_str()) && is_valid_author(found) {
+        return true;
+    }
+
+    false
+}
+
 /// Validate a narrator name
 pub fn is_valid_narrator(narrator: &str) -> bool {
     // Same rules as author
