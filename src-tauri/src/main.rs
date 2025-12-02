@@ -50,6 +50,8 @@ fn main() {
             commands::maintenance::normalize_genres,
             commands::maintenance::clear_all_genres,
             commands::maintenance::get_genre_stats,
+            commands::maintenance::get_author_stats,
+            commands::maintenance::fix_author_mismatches,
             commands::audible::login_to_audible,
             commands::audible::check_audible_installed,
             commands::covers::get_cover_for_group,
