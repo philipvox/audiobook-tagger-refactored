@@ -2908,32 +2908,56 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
         // Read current tags from file to compare
         let current = read_file_tags(&file.path);
 
-        // Compare and add changes
-        if current.title.as_ref() != Some(&group.metadata.title) {
-            file.changes.insert("title".to_string(), MetadataChange {
-                old: current.title.unwrap_or_default(),
-                new: group.metadata.title.clone(),
+        // CRITICAL FIX: ALWAYS include all metadata fields for metadata.json writing
+        // Previously only changed fields were included, causing empty values when writing
+
+        // Title - ALWAYS include
+        let title_changed = current.title.as_ref() != Some(&group.metadata.title);
+        file.changes.insert("title".to_string(), MetadataChange {
+            old: current.title.clone().unwrap_or_default(),
+            new: group.metadata.title.clone(),
+        });
+        if title_changed { total_changes += 1; }
+
+        // Author (primary) - ALWAYS include
+        let author_changed = current.artist.as_ref() != Some(&group.metadata.author);
+        file.changes.insert("author".to_string(), MetadataChange {
+            old: current.artist.clone().unwrap_or_default(),
+            new: group.metadata.author.clone(),
+        });
+        if author_changed { total_changes += 1; }
+
+        // Authors array - ALWAYS include (JSON array for metadata.json)
+        let authors_json = serde_json::to_string(&group.metadata.authors).unwrap_or_else(|_| "[]".to_string());
+        file.changes.insert("authors_json".to_string(), MetadataChange {
+            old: String::new(),
+            new: authors_json,
+        });
+
+        // Album = Title - ALWAYS include
+        let album_changed = current.album.as_ref() != Some(&group.metadata.title);
+        file.changes.insert("album".to_string(), MetadataChange {
+            old: current.album.clone().unwrap_or_default(),
+            new: group.metadata.title.clone(),
+        });
+        if album_changed { total_changes += 1; }
+
+        // Subtitle - ALWAYS include if present
+        if let Some(ref subtitle) = group.metadata.subtitle {
+            file.changes.insert("subtitle".to_string(), MetadataChange {
+                old: String::new(),
+                new: subtitle.clone(),
             });
-            total_changes += 1;
         }
 
-        if current.artist.as_ref() != Some(&group.metadata.author) {
-            file.changes.insert("author".to_string(), MetadataChange {
-                old: current.artist.unwrap_or_default(),
-                new: group.metadata.author.clone(),
-            });
-            total_changes += 1;
-        }
+        // Narrators array - ALWAYS include (JSON array for metadata.json)
+        let narrators_json = serde_json::to_string(&group.metadata.narrators).unwrap_or_else(|_| "[]".to_string());
+        file.changes.insert("narrators_json".to_string(), MetadataChange {
+            old: String::new(),
+            new: narrators_json,
+        });
 
-        if current.album.as_ref() != Some(&group.metadata.title) {
-            file.changes.insert("album".to_string(), MetadataChange {
-                old: current.album.unwrap_or_default(),
-                new: group.metadata.title.clone(),
-            });
-            total_changes += 1;
-        }
-
-        // Handle multiple narrators - join with semicolon for ABS compatibility
+        // Narrator (single string for audio file tags) - ALWAYS include if present
         if !group.metadata.narrators.is_empty() {
             let narrators_str = group.metadata.narrators.join("; ");
             file.changes.insert("narrator".to_string(), MetadataChange {
@@ -2949,14 +2973,23 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             total_changes += 1;
         }
 
-        if !group.metadata.genres.is_empty() {
-            file.changes.insert("genre".to_string(), MetadataChange {
-                old: current.genre.unwrap_or_default(),
-                new: group.metadata.genres.join(", "),
-            });
-            total_changes += 1;
-        }
+        // Genres - ALWAYS include (even empty)
+        let genres_str = group.metadata.genres.join(", ");
+        let genre_changed = current.genre.as_ref().map(|g| g.as_str()) != Some(&genres_str);
+        file.changes.insert("genre".to_string(), MetadataChange {
+            old: current.genre.clone().unwrap_or_default(),
+            new: genres_str,
+        });
+        if genre_changed && !group.metadata.genres.is_empty() { total_changes += 1; }
 
+        // Genres array - ALWAYS include (JSON array for metadata.json)
+        let genres_json = serde_json::to_string(&group.metadata.genres).unwrap_or_else(|_| "[]".to_string());
+        file.changes.insert("genres_json".to_string(), MetadataChange {
+            old: String::new(),
+            new: genres_json,
+        });
+
+        // Series - include if present
         if let Some(ref series) = group.metadata.series {
             file.changes.insert("series".to_string(), MetadataChange {
                 old: String::new(),
@@ -2965,6 +2998,7 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             total_changes += 1;
         }
 
+        // Sequence - include if present
         if let Some(ref sequence) = group.metadata.sequence {
             file.changes.insert("sequence".to_string(), MetadataChange {
                 old: String::new(),
@@ -2973,25 +3007,26 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             total_changes += 1;
         }
 
+        // Description - include if present
         if let Some(ref description) = group.metadata.description {
             file.changes.insert("description".to_string(), MetadataChange {
-                old: current.comment.unwrap_or_default(),
+                old: current.comment.clone().unwrap_or_default(),
                 new: description.clone(),
             });
             total_changes += 1;
         }
 
+        // Year - ALWAYS include if present
         if let Some(ref year) = group.metadata.year {
-            if current.year.as_ref() != Some(year) {
-                file.changes.insert("year".to_string(), MetadataChange {
-                    old: current.year.unwrap_or_default(),
-                    new: year.clone(),
-                });
-                total_changes += 1;
-            }
+            let year_changed = current.year.as_ref() != Some(year);
+            file.changes.insert("year".to_string(), MetadataChange {
+                old: current.year.clone().unwrap_or_default(),
+                new: year.clone(),
+            });
+            if year_changed { total_changes += 1; }
         }
 
-        // NEW FIELDS - Add ASIN, ISBN, language, publisher to changes
+        // ASIN - include if present
         if let Some(ref asin) = group.metadata.asin {
             file.changes.insert("asin".to_string(), MetadataChange {
                 old: String::new(),
@@ -3000,6 +3035,7 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             total_changes += 1;
         }
 
+        // ISBN - include if present
         if let Some(ref isbn) = group.metadata.isbn {
             file.changes.insert("isbn".to_string(), MetadataChange {
                 old: String::new(),
@@ -3008,6 +3044,7 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             total_changes += 1;
         }
 
+        // Language - include if present
         if let Some(ref language) = group.metadata.language {
             file.changes.insert("language".to_string(), MetadataChange {
                 old: String::new(),
@@ -3016,12 +3053,21 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
             total_changes += 1;
         }
 
+        // Publisher - include if present
         if let Some(ref publisher) = group.metadata.publisher {
             file.changes.insert("publisher".to_string(), MetadataChange {
                 old: String::new(),
                 new: publisher.clone(),
             });
             total_changes += 1;
+        }
+
+        // Cover URL - include if present (for cover downloading)
+        if let Some(ref cover_url) = group.metadata.cover_url {
+            file.changes.insert("cover_url".to_string(), MetadataChange {
+                old: String::new(),
+                new: cover_url.clone(),
+            });
         }
     }
 
