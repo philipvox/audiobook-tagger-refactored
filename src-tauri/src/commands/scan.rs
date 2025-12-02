@@ -1,6 +1,6 @@
 // src-tauri/src/commands/scan.rs
 use crate::scanner;
-use crate::scanner::ScanMode;
+use crate::scanner::{ScanMode, SelectiveRefreshFields};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use once_cell::sync::Lazy;
@@ -40,15 +40,17 @@ pub async fn import_folders(paths: Vec<String>) -> Result<scanner::ScanResult, S
 /// Scan library with configurable scan mode
 /// - scan_mode: "normal", "refresh_metadata", "force_fresh", or "selective_refresh"
 /// - force: Legacy parameter, if true uses force_fresh mode
+/// - selective_fields: Optional JSON object specifying which fields to refresh (for selective_refresh mode)
 #[tauri::command]
 pub async fn scan_library(
     paths: Vec<String>,
     force: Option<bool>,
-    scan_mode: Option<String>
+    scan_mode: Option<String>,
+    selective_fields: Option<SelectiveRefreshFields>
 ) -> Result<scanner::ScanResult, String> {
     // Determine scan mode from parameters
-    let mode = if let Some(mode_str) = scan_mode {
-        match mode_str.as_str() {
+    let mode = if let Some(mode_str) = scan_mode.as_deref() {
+        match mode_str {
             "normal" => ScanMode::Normal,
             "refresh_metadata" => ScanMode::RefreshMetadata,
             "force_fresh" => ScanMode::ForceFresh,
@@ -69,7 +71,12 @@ pub async fn scan_library(
 
     CANCEL_FLAG.store(false, Ordering::SeqCst);
 
-    let result = scanner::scan_directories(&paths, Some(CANCEL_FLAG.clone()), mode)
+    let result = scanner::scan_directories_with_options(
+        &paths,
+        Some(CANCEL_FLAG.clone()),
+        mode,
+        selective_fields
+    )
         .await
         .map_err(|e| {
             println!("❌ Scan error: {}", e);
@@ -98,6 +105,56 @@ pub async fn scan_library(
             return Err(format!("Serialization error: {}", e));
         }
     }
+
+    Ok(result)
+}
+
+/// Rescan specific metadata fields for books
+/// Use this to fix incorrect metadata without doing a full rescan
+/// Example fields: "authors", "narrators", "description", "series", "genres", "publisher", "cover"
+#[tauri::command]
+pub async fn rescan_fields(
+    paths: Vec<String>,
+    fields: Vec<String>
+) -> Result<scanner::ScanResult, String> {
+    // Build selective fields from the list
+    let mut selective_fields = SelectiveRefreshFields::default();
+
+    for field in &fields {
+        match field.to_lowercase().as_str() {
+            "authors" | "author" => selective_fields.authors = true,
+            "narrators" | "narrator" => selective_fields.narrators = true,
+            "description" | "desc" => selective_fields.description = true,
+            "series" => selective_fields.series = true,
+            "genres" | "genre" => selective_fields.genres = true,
+            "publisher" => selective_fields.publisher = true,
+            "cover" | "artwork" => selective_fields.cover = true,
+            "all" => selective_fields = SelectiveRefreshFields::all_fields(),
+            _ => println!("⚠️ Unknown field '{}', ignoring", field),
+        }
+    }
+
+    if !selective_fields.any_selected() {
+        return Err("No valid fields specified. Use: authors, narrators, description, series, genres, publisher, cover, or all".to_string());
+    }
+
+    println!("🔄 rescan_fields called with {} paths, fields: {:?}", paths.len(), fields);
+
+    CANCEL_FLAG.store(false, Ordering::SeqCst);
+
+    let result = scanner::scan_directories_with_options(
+        &paths,
+        Some(CANCEL_FLAG.clone()),
+        ScanMode::SelectiveRefresh,
+        Some(selective_fields)
+    )
+        .await
+        .map_err(|e| {
+            println!("❌ Rescan error: {}", e);
+            e.to_string()
+        })?;
+
+    println!("📊 Rescan complete: {} groups, {} files", result.groups.len(), result.total_files);
 
     Ok(result)
 }
