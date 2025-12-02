@@ -13,17 +13,56 @@ struct LibraryFilterData {
 struct LibraryItem {
     id: String,
     media: Media,
+    #[serde(rename = "libraryFiles", default)]
+    library_files: Vec<LibraryFile>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct LibraryFile {
+    #[serde(rename = "ino")]
+    _ino: Option<String>,
+    metadata: FileMetadata,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct FileMetadata {
+    filename: Option<String>,
+    ext: Option<String>,
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Media {
     metadata: ItemMetadata,
+    #[serde(rename = "audioFiles", default)]
+    audio_files: Vec<AudioFileInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AudioFileInfo {
+    metadata: Option<AudioFileMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AudioFileMetadata {
+    #[serde(rename = "tagArtist")]
+    tag_artist: Option<String>,
+    #[serde(rename = "tagAlbumArtist")]
+    tag_album_artist: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ItemMetadata {
     genres: Option<Vec<String>>,
     title: Option<String>,
+    #[serde(rename = "authorName")]
+    author_name: Option<String>,
+    authors: Option<Vec<AuthorInfo>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorInfo {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,4 +351,170 @@ pub async fn normalize_genres() -> Result<String, String> {
     }
     
     Ok(format!("Normalized {} items, skipped {}", updated_count, skipped_count))
+}
+
+/// Get author statistics - find potential mismatches
+#[tauri::command]
+pub async fn get_author_stats() -> Result<String, String> {
+    let config = config::load_config().map_err(|e| e.to_string())?;
+
+    if config.abs_base_url.is_empty() || config.abs_api_token.is_empty() || config.abs_library_id.is_empty() {
+        return Err("AudiobookShelf not configured".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    // Fetch with expanded data to get audio file tags
+    let url = format!("{}/api/libraries/{}/items?limit=1000&expanded=1", config.abs_base_url, config.abs_library_id);
+
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", config.abs_api_token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let items: LibraryItemsResponse = response.json().await.map_err(|e| e.to_string())?;
+
+    let mut mismatch_count = 0;
+    let mut total_with_tags = 0;
+
+    for item in &items.results {
+        // Get current ABS author
+        let abs_author = item.media.metadata.author_name.clone()
+            .or_else(|| item.media.metadata.authors.as_ref()
+                .and_then(|a| a.first().map(|x| x.name.clone())))
+            .unwrap_or_default();
+
+        // Get author from file tags
+        let tag_author = item.media.audio_files.first()
+            .and_then(|af| af.metadata.as_ref())
+            .and_then(|m| m.tag_album_artist.clone().or(m.tag_artist.clone()));
+
+        if let Some(ref tag) = tag_author {
+            total_with_tags += 1;
+            if !tag.is_empty() && !abs_author.is_empty()
+                && !crate::normalize::authors_match(tag, &abs_author) {
+                mismatch_count += 1;
+            }
+        }
+    }
+
+    Ok(format!("{} items checked, {} potential author mismatches found", total_with_tags, mismatch_count))
+}
+
+/// Fix author mismatches by comparing ABS metadata with file tags
+/// This will update ABS entries where the author doesn't match the file tags
+#[tauri::command]
+pub async fn fix_author_mismatches() -> Result<String, String> {
+    let config = config::load_config().map_err(|e| e.to_string())?;
+
+    if config.abs_base_url.is_empty() || config.abs_api_token.is_empty() || config.abs_library_id.is_empty() {
+        return Err("AudiobookShelf not configured".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    // Fetch with expanded data to get audio file tags
+    let url = format!("{}/api/libraries/{}/items?limit=1000&expanded=1", config.abs_base_url, config.abs_library_id);
+
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", config.abs_api_token))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let items: LibraryItemsResponse = response.json().await.map_err(|e| e.to_string())?;
+
+    let mut fixed_count = 0;
+    let mut skipped_count = 0;
+    let mut error_count = 0;
+
+    // Known famous authors that are often wrongly assigned
+    let suspicious_authors = [
+        "j.k. rowling", "jk rowling", "j. k. rowling",
+        "stephen king", "james patterson", "john grisham",
+        "dan brown", "agatha christie",
+    ];
+
+    for item in &items.results {
+        // Get current ABS author
+        let abs_author = item.media.metadata.author_name.clone()
+            .or_else(|| item.media.metadata.authors.as_ref()
+                .and_then(|a| a.first().map(|x| x.name.clone())))
+            .unwrap_or_default();
+
+        // Get author from file tags (prefer album artist, then artist)
+        let tag_author = item.media.audio_files.first()
+            .and_then(|af| af.metadata.as_ref())
+            .and_then(|m| m.tag_album_artist.clone().or(m.tag_artist.clone()));
+
+        let Some(tag) = tag_author else {
+            skipped_count += 1;
+            continue;
+        };
+
+        // Skip if tag is empty or generic
+        if tag.is_empty() || tag.to_lowercase() == "unknown" {
+            skipped_count += 1;
+            continue;
+        }
+
+        // Check if this is a mismatch
+        let abs_lower = abs_author.to_lowercase();
+        let tag_lower = tag.to_lowercase();
+
+        // Check if ABS has a suspicious famous author but tag has different author
+        let abs_is_suspicious = suspicious_authors.iter().any(|&s| abs_lower.contains(s));
+        let tag_is_same_suspicious = suspicious_authors.iter().any(|&s| {
+            abs_lower.contains(s) && tag_lower.contains(s)
+        });
+
+        // Only fix if:
+        // 1. ABS has a famous author that's different from the tag, OR
+        // 2. Authors don't match and tag is valid
+        let should_fix = if abs_is_suspicious && !tag_is_same_suspicious {
+            // Famous author mismatch - definitely fix
+            println!("🔧 Fixing famous author mismatch: '{}' -> '{}' for '{}'",
+                abs_author, tag, item.media.metadata.title.as_deref().unwrap_or("Unknown"));
+            true
+        } else if !crate::normalize::authors_match(&tag, &abs_author) {
+            // General mismatch
+            println!("🔧 Fixing author mismatch: '{}' -> '{}' for '{}'",
+                abs_author, tag, item.media.metadata.title.as_deref().unwrap_or("Unknown"));
+            true
+        } else {
+            false
+        };
+
+        if should_fix {
+            // Update ABS with the correct author from file tags
+            let update_url = format!("{}/api/items/{}/media", config.abs_base_url, item.id);
+            match client
+                .patch(&update_url)
+                .header("Authorization", format!("Bearer {}", config.abs_api_token))
+                .json(&json!({
+                    "metadata": {
+                        "authors": [{"name": tag}]
+                    }
+                }))
+                .send()
+                .await {
+                Ok(resp) if resp.status().is_success() => {
+                    fixed_count += 1;
+                }
+                Ok(resp) => {
+                    println!("❌ Failed to update {}: {}", item.id, resp.status());
+                    error_count += 1;
+                }
+                Err(e) => {
+                    println!("❌ Error updating {}: {}", item.id, e);
+                    error_count += 1;
+                }
+            }
+        } else {
+            skipped_count += 1;
+        }
+    }
+
+    Ok(format!("Fixed {} author mismatches, skipped {}, errors: {}", fixed_count, skipped_count, error_count))
 }
