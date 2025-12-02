@@ -652,6 +652,23 @@ fn looks_like_author_name(name: &str) -> bool {
         return false;
     }
 
+    // Contains brackets (often ASIN or year) - not an author name
+    if name.contains('[') || name.contains(']') || name.contains('(') || name.contains(')') {
+        return false;
+    }
+
+    // Contains comma - likely "Series Name, Book X" format
+    if name.contains(',') {
+        return false;
+    }
+
+    // Contains "Book" followed by a number or # - series info, not author
+    if let Ok(book_num_regex) = regex::Regex::new(r"(?i)book\s*[#]?\d") {
+        if book_num_regex.is_match(name) {
+            return false;
+        }
+    }
+
     // Common false positives - series names, descriptors, etc.
     let false_positives = [
         "the ", "a ", "an ", "book", "volume", "vol", "part", "chapter",
@@ -662,6 +679,17 @@ fn looks_like_author_name(name: &str) -> bool {
     let name_lower = name.to_lowercase();
     for fp in &false_positives {
         if name_lower.starts_with(fp) {
+            return false;
+        }
+    }
+
+    // Check for false positives ANYWHERE in the name (not just start)
+    let anywhere_false_positives = [
+        " series", " book ", " volume ", " trilogy", " saga",
+        " collection", "'s money", "'s guide", "'s handbook",
+    ];
+    for fp in &anywhere_false_positives {
+        if name_lower.contains(fp) {
             return false;
         }
     }
