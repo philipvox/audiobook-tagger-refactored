@@ -612,8 +612,9 @@ async fn extract_book_info_with_priority(
 
     // For title, prefer file tag if clean, else folder name
     if let Some(ref title) = file_title {
-        let clean_title = title.replace(" - Part 1", "").replace(" - Part 2", "").trim().to_string();
-        if tags_are_clean(Some(&clean_title), Some(&final_author)) {
+        // Apply full title cleaning to file tags too
+        let clean_title = normalize::normalize_title(title);
+        if tags_are_clean(Some(&clean_title), Some(&final_author)) && !clean_title.is_empty() {
             final_title = clean_title;
         } else {
             final_title = folder_title;
@@ -622,19 +623,12 @@ async fn extract_book_info_with_priority(
         final_title = folder_title;
     }
 
-    // STEP 4: If we have GPT, validate and clean up
-    if let Some(key) = api_key {
-        if !key.is_empty() {
-            // Use GPT to validate/clean but NOT to discover new author
-            // The author is already determined from folder/file above
-            return (
-                normalize::normalize_title(&final_title),
-                normalize::clean_author_name(&final_author)
-            );
-        }
-    }
+    // STEP 4: Always normalize title and author
+    // (GPT validation was previously done here but is now optional)
+    let normalized_title = normalize::normalize_title(&final_title);
+    let normalized_author = normalize::clean_author_name(&final_author);
 
-    (final_title, final_author)
+    (normalized_title, normalized_author)
 }
 
 /// Check if a string looks like a valid author name
@@ -687,6 +681,8 @@ fn looks_like_author_name(name: &str) -> bool {
     let anywhere_false_positives = [
         " series", " book ", " volume ", " trilogy", " saga",
         " collection", "'s money", "'s guide", "'s handbook",
+        "translator", "translated by", "narrated by", "read by",
+        "performed by", "foreword by", "introduction by", "edited by",
     ];
     for fp in &anywhere_false_positives {
         if name_lower.contains(fp) {

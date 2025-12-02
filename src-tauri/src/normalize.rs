@@ -293,9 +293,21 @@ pub fn clean_narrator_name(narrator: &str) -> String {
 /// 3. Apply title case
 /// 4. Trim whitespace
 pub fn normalize_title(title: &str) -> String {
-    let cleaned = remove_junk_suffixes(title);
+    // 1. Strip leading track numbers (e.g., "1 - Title" -> "Title")
+    let no_track_num = strip_leading_track_number(title);
+
+    // 2. Strip track-derived suffixes (e.g., ": Opening Credits")
+    let no_track_suffix = strip_track_suffixes(&no_track_num);
+
+    // 3. Remove junk suffixes (Unabridged, Audiobook, etc.)
+    let cleaned = remove_junk_suffixes(&no_track_suffix);
+
+    // 4. Remove series info
     let no_series = strip_series_from_title(&cleaned);
+
+    // 5. Apply title case
     let title_cased = to_title_case(&no_series);
+
     title_cased.trim().to_string()
 }
 
@@ -528,6 +540,84 @@ pub fn normalize_description(description: &str, max_length: Option<usize>) -> St
     }
 
     result
+}
+
+/// Strip leading track/chapter numbers from titles
+/// Examples: "1 - Title" -> "Title", "01. Title" -> "Title", "Track 1 - Title" -> "Title"
+pub fn strip_leading_track_number(title: &str) -> String {
+    let mut result = title.trim().to_string();
+
+    // Pattern: "1 - Title", "01 - Title", "1. Title", "01. Title"
+    if let Ok(re) = Regex::new(r"^(?:\d{1,3})\s*[-–.]\s*(.+)$") {
+        if let Some(caps) = re.captures(&result) {
+            if let Some(m) = caps.get(1) {
+                result = m.as_str().trim().to_string();
+            }
+        }
+    }
+
+    // Pattern: "Track 1 - Title", "Chapter 1 - Title", "Part 1 - Title"
+    if let Ok(re) = Regex::new(r"(?i)^(?:track|chapter|part|ch\.?|disc|cd)\s*\d+\s*[-–:]\s*(.+)$") {
+        if let Some(caps) = re.captures(&result) {
+            if let Some(m) = caps.get(1) {
+                result = m.as_str().trim().to_string();
+            }
+        }
+    }
+
+    result
+}
+
+/// Strip common track/file-derived suffixes from titles
+/// Examples: "Title: Opening Credits" -> "Title", "Title - Track 1" -> "Title"
+pub fn strip_track_suffixes(title: &str) -> String {
+    let mut result = title.to_string();
+
+    // Common track-derived suffixes to remove
+    let track_suffixes = [
+        // Credits-related
+        ": Opening Credits", ": Opening", ": Closing Credits", ": Credits",
+        " - Opening Credits", " - Opening", " - Closing Credits", " - Credits",
+        // Track/Chapter suffixes
+        ": Track 1", ": Chapter 1", ": Part 1", ": Intro",
+        " - Track 1", " - Chapter 1", " - Part 1", " - Intro",
+        // Prologue/Epilogue
+        ": Prologue", ": Epilogue", " - Prologue", " - Epilogue",
+    ];
+
+    for suffix in &track_suffixes {
+        if result.to_lowercase().ends_with(&suffix.to_lowercase()) {
+            result = result[..result.len() - suffix.len()].trim().to_string();
+            break;
+        }
+    }
+
+    // Also try pattern matching for more flexible removal
+    // Pattern: ": Track N" or " - Track N" at end
+    if let Ok(re) = Regex::new(r"(?i)[:\s-]+(?:track|chapter|part|opening|closing|credits|intro|prologue|epilogue)\s*\d*\s*$") {
+        result = re.replace(&result, "").to_string();
+    }
+
+    result.trim().to_string()
+}
+
+/// Clean a title by applying all title-cleaning operations
+pub fn clean_title(title: &str) -> String {
+    let mut result = title.to_string();
+
+    // 1. Strip leading track numbers
+    result = strip_leading_track_number(&result);
+
+    // 2. Strip track-derived suffixes
+    result = strip_track_suffixes(&result);
+
+    // 3. Remove junk suffixes (Unabridged, Audiobook, etc.)
+    result = remove_junk_suffixes(&result);
+
+    // 4. Apply title case
+    result = to_title_case(&result);
+
+    result.trim().to_string()
 }
 
 #[cfg(test)]
