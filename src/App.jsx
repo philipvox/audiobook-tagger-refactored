@@ -5,6 +5,7 @@ import { ScannerPage } from './pages/ScannerPage';
 import { MaintenancePage } from './pages/MaintenancePage';
 import { SettingsPage } from './pages/SettingsPage';
 import { RawTagInspector } from './components/RawTagInspector';
+import { GlobalProgressBar } from './components/GlobalProgressBar';
 
 function AppContent() {
   const [activeTab, setActiveTab] = useState('scanner');
@@ -95,11 +96,14 @@ function AppContent() {
 
       {/* Tag Inspector Modal */}
       {showTagInspector && (
-        <RawTagInspector 
-          isOpen={showTagInspector} 
-          onClose={() => setShowTagInspector(false)} 
+        <RawTagInspector
+          isOpen={showTagInspector}
+          onClose={() => setShowTagInspector(false)}
         />
       )}
+
+      {/* Global Progress Bar - Shows for any long-running operation */}
+      <GlobalProgressBar />
     </div>
   );
 }
