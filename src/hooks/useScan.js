@@ -53,33 +53,38 @@ export function useScan() {
     }
   }, [scanProgress]);
 
-  const handleScan = useCallback(async () => {
+  /**
+   * Scan library with configurable scan mode
+   * @param {string} scanMode - Scan mode: 'normal' (default), 'force_fresh' (clean scan)
+   */
+  const handleScan = useCallback(async (scanMode = 'normal') => {
     // Clean up any existing intervals
     if (progressIntervalRef.current) {
       clearInterval(progressIntervalRef.current);
       progressIntervalRef.current = null;
     }
-    
+
     if (resetTimeoutRef.current) {
       clearTimeout(resetTimeoutRef.current);
       resetTimeoutRef.current = null;
     }
-    
+
     try {
       // OPEN FILE PICKER
       const selected = await open({
         directory: true,
         multiple: true,
       });
-      
+
       if (!selected) {
         console.log('No folder selected');
         return;
       }
-      
+
       const paths = Array.isArray(selected) ? selected : [selected];
-      console.log('Scanning paths:', paths);
-      
+      const modeLabel = scanMode === 'force_fresh' ? 'clean scan' : 'normal scan';
+      console.log(`Scanning paths (${modeLabel}):`, paths);
+
       setScanning(true);
       const startTime = Date.now();
       setScanProgress({
@@ -90,7 +95,7 @@ export function useScan() {
         filesPerSecond: 0,
         covers_found: 0,
       });
-      
+
       // Poll for progress
       progressIntervalRef.current = setInterval(async () => {
         try {
@@ -98,7 +103,7 @@ export function useScan() {
           const now = Date.now();
           const elapsed = (now - startTime) / 1000;
           const rate = progress.current > 0 && elapsed > 0 ? progress.current / elapsed : 0;
-          
+
           setScanProgress({
             current: progress.current,
             total: progress.total,
@@ -111,28 +116,29 @@ export function useScan() {
           // Ignore polling errors
         }
       }, 500);
-      
+
       try {
-        const result = await invoke('scan_library', { paths });
-        
+        // Pass scan mode to backend
+        const result = await invoke('scan_library', { paths, scanMode });
+
         if (progressIntervalRef.current) {
           clearInterval(progressIntervalRef.current);
           progressIntervalRef.current = null;
         }
-        
+
         // Simple direct set - replace all groups
         if (result && result.groups) {
           setGroups(result.groups);
         }
-        
+
       } finally {
         if (progressIntervalRef.current) {
           clearInterval(progressIntervalRef.current);
           progressIntervalRef.current = null;
         }
-        
+
         setScanning(false);
-        
+
         resetTimeoutRef.current = setTimeout(() => {
           setScanProgress({
             current: 0,
@@ -147,17 +153,17 @@ export function useScan() {
       }
     } catch (error) {
       console.error('Scan failed:', error);
-      
+
       if (progressIntervalRef.current) {
         clearInterval(progressIntervalRef.current);
         progressIntervalRef.current = null;
       }
-      
+
       if (resetTimeoutRef.current) {
         clearTimeout(resetTimeoutRef.current);
         resetTimeoutRef.current = null;
       }
-      
+
       setScanning(false);
       throw error;
     }

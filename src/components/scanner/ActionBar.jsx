@@ -1,11 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
-import { CheckCircle, RefreshCw, Save, FileType, UploadCloud, Edit3, ChevronDown } from 'lucide-react';
-
-// Scan mode options for rescan dropdown
-const SCAN_MODES = [
-  { id: 'refresh_metadata', label: 'Quick Refresh', description: 'Use cached API data, bypass local metadata' },
-  { id: 'force_fresh', label: 'Full Rescan', description: 'Clear caches and fetch fresh data' },
-];
+import { CheckCircle, RefreshCw, Save, FileType, UploadCloud, Edit3 } from 'lucide-react';
 
 export function ActionBar({
   selectedFiles,
@@ -23,24 +16,6 @@ export function ActionBar({
   pushing,
   scanning
 }) {
-  const [showRescanMenu, setShowRescanMenu] = useState(false);
-  const rescanMenuRef = useRef(null);
-
-  // Close menu when clicking outside
-  useEffect(() => {
-    function handleClickOutside(event) {
-      if (rescanMenuRef.current && !rescanMenuRef.current.contains(event.target)) {
-        setShowRescanMenu(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  const handleRescanWithMode = (mode) => {
-    setShowRescanMenu(false);
-    onRescan(mode);
-  };
   // Calculate total file count (for allSelected mode)
   const totalFileCount = groups.reduce((sum, g) => sum + g.files.length, 0);
   const selectedCount = allSelected ? totalFileCount : selectedFiles.size;
@@ -121,44 +96,15 @@ export function ActionBar({
             </div>
 
             <div className="flex items-center gap-3">
-              {/* Rescan Split Button with Dropdown */}
-              <div className="relative" ref={rescanMenuRef}>
-                <div className="flex">
-                  <button
-                    onClick={() => handleRescanWithMode('force_fresh')}
-                    disabled={scanning}
-                    className="px-4 py-2 bg-white border border-blue-300 border-r-0 text-blue-700 rounded-l-lg hover:bg-blue-50 transition-colors font-medium flex items-center gap-2"
-                  >
-                    <RefreshCw className={`w-4 h-4 ${scanning ? 'animate-spin' : ''}`} />
-                    {scanning ? 'Rescanning...' : `Rescan ${selectedCount === 1 ? 'File' : `${selectedCount} Files`}`}
-                  </button>
-                  <button
-                    onClick={() => setShowRescanMenu(!showRescanMenu)}
-                    disabled={scanning}
-                    className="px-2 py-2 bg-white border border-blue-300 text-blue-700 rounded-r-lg hover:bg-blue-50 transition-colors"
-                  >
-                    <ChevronDown className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Dropdown Menu */}
-                {showRescanMenu && (
-                  <div className="absolute right-0 mt-1 w-64 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
-                    <div className="py-1">
-                      {SCAN_MODES.map(mode => (
-                        <button
-                          key={mode.id}
-                          onClick={() => handleRescanWithMode(mode.id)}
-                          className="w-full px-4 py-2 text-left hover:bg-gray-50 transition-colors"
-                        >
-                          <div className="font-medium text-gray-900">{mode.label}</div>
-                          <div className="text-xs text-gray-500">{mode.description}</div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
+              {/* Simple Rescan Button */}
+              <button
+                onClick={() => onRescan('force_fresh')}
+                disabled={scanning}
+                className="px-4 py-2 bg-white border border-blue-300 text-blue-700 rounded-lg hover:bg-blue-50 transition-colors font-medium flex items-center gap-2"
+              >
+                <RefreshCw className={`w-4 h-4 ${scanning ? 'animate-spin' : ''}`} />
+                {scanning ? 'Rescanning...' : `Rescan ${selectedCount === 1 ? 'File' : `${selectedCount} Files`}`}
+              </button>
 
               {filesWithChanges.length > 0 && (
                 <button
