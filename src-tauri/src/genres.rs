@@ -624,3 +624,64 @@ pub fn enforce_genre_policy_basic(genres: &[String]) -> Vec<String> {
 
     mapped
 }
+
+/// Split combined genre strings into individual genres
+///
+/// Handles various separators used by different sources:
+/// - Comma-separated: "Suspense, Crime Thrillers, Police Procedurals"
+/// - Slash-separated (Google Books): "Fiction / Thrillers / Suspense"
+/// - Ampersand-separated: "Mystery & Thriller"
+///
+/// Returns a flattened Vec of individual genre strings
+pub fn split_combined_genres(genres: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+
+    for genre in genres {
+        let trimmed = genre.trim();
+
+        // Check for various separators and split accordingly
+        if trimmed.contains(" / ") {
+            // Google Books hierarchical format: "Fiction / Thrillers / Suspense"
+            for part in trimmed.split(" / ") {
+                let cleaned = part.trim();
+                if !cleaned.is_empty() {
+                    result.push(cleaned.to_string());
+                }
+            }
+        } else if trimmed.contains(", ") {
+            // Comma-separated: "Suspense, Crime Thrillers"
+            for part in trimmed.split(", ") {
+                let cleaned = part.trim();
+                if !cleaned.is_empty() {
+                    result.push(cleaned.to_string());
+                }
+            }
+        } else if trimmed.contains(" & ") {
+            // Ampersand-separated: "Mystery & Thriller"
+            for part in trimmed.split(" & ") {
+                let cleaned = part.trim();
+                if !cleaned.is_empty() {
+                    result.push(cleaned.to_string());
+                }
+            }
+        } else if !trimmed.is_empty() {
+            // Single genre, just add it
+            result.push(trimmed.to_string());
+        }
+    }
+
+    // Remove duplicates while preserving order
+    let mut seen = std::collections::HashSet::new();
+    result.retain(|g| seen.insert(g.to_lowercase()));
+
+    result
+}
+
+/// Enforce genre policy with automatic splitting of combined genres
+///
+/// This is an enhanced version that first splits combined genre strings,
+/// then applies the standard genre policy.
+pub fn enforce_genre_policy_with_split(genres: &[String]) -> Vec<String> {
+    let split_genres = split_combined_genres(genres);
+    enforce_genre_policy_basic(&split_genres)
+}
