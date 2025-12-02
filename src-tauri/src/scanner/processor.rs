@@ -1,8 +1,9 @@
 // src-tauri/src/scanner/processor.rs
 // IMPROVED VERSION - Smart Series Handling + Normalization
 // GPT validates/chooses from candidates instead of inventing series names
+// API/GPT sources are now prioritized over file metadata to prevent corrupted tags from overriding
 
-use super::types::{AudioFile, BookGroup, BookMetadata, MetadataChange, MetadataSource, MetadataSources, ScanStatus, ScanMode};
+use super::types::{AudioFile, BookGroup, BookMetadata, MetadataChange, MetadataSource, MetadataSources, ScanStatus, ScanMode, SelectiveRefreshFields};
 use crate::cache;
 use crate::config::Config;
 use crate::normalize;
@@ -144,6 +145,17 @@ pub async fn process_all_groups(
     cancel_flag: Option<Arc<AtomicBool>>,
     scan_mode: ScanMode,
 ) -> Result<Vec<BookGroup>, Box<dyn std::error::Error + Send + Sync>> {
+    process_all_groups_with_options(groups, config, cancel_flag, scan_mode, None).await
+}
+
+/// Process all groups with optional selective refresh fields
+pub async fn process_all_groups_with_options(
+    groups: Vec<BookGroup>,
+    config: &Config,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    scan_mode: ScanMode,
+    selective_fields: Option<SelectiveRefreshFields>,
+) -> Result<Vec<BookGroup>, Box<dyn std::error::Error + Send + Sync>> {
     let total = groups.len();
     let start_time = std::time::Instant::now();
 
@@ -154,6 +166,7 @@ pub async fn process_all_groups(
     let processed = Arc::new(AtomicUsize::new(0));
     let covers_found = Arc::new(AtomicUsize::new(0));
     let config = Arc::new(config.clone());
+    let selective_fields = Arc::new(selective_fields);
 
     // Process with controlled concurrency
     let results: Vec<BookGroup> = stream::iter(groups)
@@ -162,23 +175,31 @@ pub async fn process_all_groups(
             let cancel_flag = cancel_flag.clone();
             let processed = processed.clone();
             let covers_found = covers_found.clone();
+            let selective_fields = selective_fields.clone();
             let total = total;
             let scan_mode = scan_mode;
 
             async move {
-                let result = process_book_group(group, &config, cancel_flag, covers_found.clone(), scan_mode).await;
-                
+                let result = process_book_group_with_options(
+                    group,
+                    &config,
+                    cancel_flag,
+                    covers_found.clone(),
+                    scan_mode,
+                    (*selective_fields).clone()
+                ).await;
+
                 let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
                 let covers = covers_found.load(Ordering::Relaxed);
-                
+
                 if done % 5 == 0 || done == total {
                     let elapsed = start_time.elapsed().as_secs_f64();
                     let rate = done as f64 / elapsed;
-                    crate::progress::update_progress(done, total, 
+                    crate::progress::update_progress(done, total,
                         &format!("{} books ({} covers) - {:.1}/sec", done, covers, rate)
                     );
                 }
-                
+
                 result
             }
         })
@@ -186,23 +207,37 @@ pub async fn process_all_groups(
         .filter_map(|r| async { r.ok() })
         .collect()
         .await;
-    
+
     let elapsed = start_time.elapsed();
     let final_covers = covers_found.load(Ordering::Relaxed);
     let books_per_sec = results.len() as f64 / elapsed.as_secs_f64();
-    
-    println!("✅ Done: {} books, {} covers in {:.1}s ({:.1}/sec)", 
+
+    println!("✅ Done: {} books, {} covers in {:.1}s ({:.1}/sec)",
         results.len(), final_covers, elapsed.as_secs_f64(), books_per_sec);
-    
+
     Ok(results)
 }
 
 async fn process_book_group(
+    group: BookGroup,
+    config: &Config,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    covers_found: Arc<AtomicUsize>,
+    scan_mode: ScanMode,
+) -> Result<BookGroup, Box<dyn std::error::Error + Send + Sync>> {
+    process_book_group_with_options(group, config, cancel_flag, covers_found, scan_mode, None).await
+}
+
+/// Process a single book group with optional selective refresh
+/// When selective_fields is provided, only those fields will be refreshed from API sources
+/// All other fields will be preserved from the existing metadata
+async fn process_book_group_with_options(
     mut group: BookGroup,
     config: &Config,
     cancel_flag: Option<Arc<AtomicBool>>,
     covers_found: Arc<AtomicUsize>,
     scan_mode: ScanMode,
+    selective_fields: Option<SelectiveRefreshFields>,
 ) -> Result<BookGroup, Box<dyn std::error::Error + Send + Sync>> {
 
     if let Some(ref flag) = cancel_flag {
@@ -210,6 +245,9 @@ async fn process_book_group(
             return Ok(group);
         }
     }
+
+    // Store existing metadata for selective refresh
+    let existing_metadata = group.metadata.clone();
 
     // Handle skip logic based on scan mode
     match scan_mode {
@@ -235,27 +273,44 @@ async fn process_book_group(
             }
         }
         ScanMode::SelectiveRefresh => {
-            // Selective refresh - bypass metadata.json, use cache
+            // Selective refresh - bypass metadata.json, use cache for non-selected fields
             if group.scan_status == ScanStatus::LoadedFromFile {
-                println!("   🔄 Selective refresh for '{}' (refreshing specific fields)", group.metadata.title);
+                let fields_str = if let Some(ref fields) = selective_fields {
+                    let mut f = Vec::new();
+                    if fields.all { f.push("all"); }
+                    else {
+                        if fields.authors { f.push("authors"); }
+                        if fields.narrators { f.push("narrators"); }
+                        if fields.description { f.push("description"); }
+                        if fields.series { f.push("series"); }
+                        if fields.genres { f.push("genres"); }
+                    }
+                    f.join(", ")
+                } else {
+                    "none".to_string()
+                };
+                println!("   🔄 Selective refresh for '{}' (fields: {})", group.metadata.title, fields_str);
             }
         }
     }
 
     let cache_key = format!("book_{}", group.group_name);
 
-    // Check cache first
-    if let Some(cached_metadata) = cache::get::<BookMetadata>(&cache_key) {
-        group.metadata = cached_metadata;
-        group.scan_status = ScanStatus::NewScan; // Mark as scanned (from cache)
-        group.total_changes = calculate_changes(&mut group);
-        return Ok(group);
+    // For selective refresh, don't use full cache - we need fresh API data for specific fields
+    // For normal modes, check cache first
+    if scan_mode != ScanMode::SelectiveRefresh {
+        if let Some(cached_metadata) = cache::get::<BookMetadata>(&cache_key) {
+            group.metadata = cached_metadata;
+            group.scan_status = ScanStatus::NewScan; // Mark as scanned (from cache)
+            group.total_changes = calculate_changes(&mut group);
+            return Ok(group);
+        }
     }
-    
+
     // Read first file's tags
     let sample_file = &group.files[0];
     let file_tags = read_file_tags(&sample_file.path);
-    
+
     let raw_file = RawFileData {
         path: sample_file.path.clone(),
         filename: sample_file.filename.clone(),
@@ -266,31 +321,42 @@ async fn process_book_group(
             .to_string(),
         tags: file_tags.clone(),
     };
-    
+
     if let Some(ref flag) = cancel_flag {
         if flag.load(Ordering::Relaxed) {
             return Ok(group);
         }
     }
-    
-    // Extract title/author with GPT
-    let (extracted_title, extracted_author) = extract_book_info_with_gpt(
-        &raw_file,
-        &group.group_name,
-        config.openai_api_key.as_deref()
-    ).await;
-    
+
+    // For selective refresh, use existing metadata as base for title/author
+    // unless we're refreshing authors specifically
+    let (extracted_title, extracted_author) = if scan_mode == ScanMode::SelectiveRefresh
+        && !existing_metadata.title.is_empty()
+        && selective_fields.as_ref().map(|f| !f.authors && !f.all).unwrap_or(true)
+    {
+        // Use existing title/author for searching APIs
+        (existing_metadata.title.clone(), existing_metadata.author.clone())
+    } else {
+        // Extract title/author with INVERTED PRIORITY:
+        // First try folder name (reliable), then GPT/API validation, file tags are LAST resort
+        extract_book_info_with_priority(
+            &raw_file,
+            &group.group_name,
+            config.openai_api_key.as_deref()
+        ).await
+    };
+
     if let Some(ref flag) = cancel_flag {
         if flag.load(Ordering::Relaxed) {
             return Ok(group);
         }
     }
-    
+
     // Fetch Google Books AND Audible in parallel
     let title_clone = extracted_title.clone();
     let author_clone = extracted_author.clone();
     let google_api_key = config.google_books_api_key.clone();
-    
+
     let google_future = async {
         if let Some(ref api_key) = google_api_key {
             fetch_google_books_data(&title_clone, &author_clone, api_key).await.ok().flatten()
@@ -298,13 +364,13 @@ async fn process_book_group(
             None
         }
     };
-    
+
     let title_clone2 = extracted_title.clone();
     let author_clone2 = extracted_author.clone();
     let audible_future = fetch_audible_metadata(&title_clone2, &author_clone2);
-    
+
     let (google_data, audible_data) = tokio::join!(google_future, audible_future);
-    
+
     // Log what we got from each source
     println!("📊 Data sources for '{}':", extracted_title);
     println!("   Google Books: {}", if google_data.is_some() { "✅ Found" } else { "❌ None" });
@@ -313,34 +379,41 @@ async fn process_book_group(
         if !aud.series.is_empty() {
             println!("   Audible series: {:?}", aud.series);
         }
+        println!("   Audible authors: {:?}", aud.authors);
+        println!("   Audible narrators: {:?}", aud.narrators);
     }
-    
+
     if let Some(ref flag) = cancel_flag {
         if flag.load(Ordering::Relaxed) {
             return Ok(group);
         }
     }
-    
-    // Fetch cover art
+
+    // Fetch cover art (only if selective_fields includes cover or we're doing a full scan)
+    let should_fetch_cover = selective_fields.as_ref().map(|f| f.cover || f.all).unwrap_or(true);
     let asin = audible_data.as_ref().and_then(|d| d.asin.clone());
-    let cover_art = match crate::cover_art::fetch_and_download_cover(
-        &extracted_title,
-        &extracted_author,
-        asin.as_deref(),
-        config.google_books_api_key.as_deref(),
-    ).await {
-        Ok(cover) if cover.data.is_some() => {
-            if let Some(ref data) = cover.data {
-                let cover_cache_key = format!("cover_{}", group.id);
-                let mime_type = cover.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
-                let _ = cache::set(&cover_cache_key, &(data.clone(), mime_type));
-                covers_found.fetch_add(1, Ordering::Relaxed);
+    let cover_art = if should_fetch_cover {
+        match crate::cover_art::fetch_and_download_cover(
+            &extracted_title,
+            &extracted_author,
+            asin.as_deref(),
+            config.google_books_api_key.as_deref(),
+        ).await {
+            Ok(cover) if cover.data.is_some() => {
+                if let Some(ref data) = cover.data {
+                    let cover_cache_key = format!("cover_{}", group.id);
+                    let mime_type = cover.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
+                    let _ = cache::set(&cover_cache_key, &(data.clone(), mime_type));
+                    covers_found.fetch_add(1, Ordering::Relaxed);
+                }
+                Some(cover)
             }
-            Some(cover)
+            _ => None
         }
-        _ => None
+    } else {
+        None
     };
-    
+
     let needs_gpt_enrichment = google_data.is_none() && audible_data.is_none();
 
     // PERFORMANCE: Check if Audible data is complete enough to skip GPT entirely
@@ -357,7 +430,7 @@ async fn process_book_group(
         }
     }
 
-    // Merge metadata with IMPROVED series handling
+    // Merge metadata with IMPROVED priority: API/GPT first, file tags LAST
     let mut final_metadata = if audible_is_complete && config.openai_api_key.is_none() {
         // FAST PATH: Audible has complete data and no GPT key, skip entirely
         println!("   ⚡ Fast path: Complete Audible data, no GPT needed");
@@ -381,13 +454,18 @@ async fn process_book_group(
             config.openai_api_key.as_deref()
         ).await
     };
-    
+
+    // For selective refresh, merge only the requested fields with existing metadata
+    if scan_mode == ScanMode::SelectiveRefresh {
+        final_metadata = merge_selective_fields(existing_metadata, final_metadata, selective_fields);
+    }
+
     // Add cover URL to metadata
     if let Some(cover) = cover_art {
         final_metadata.cover_url = cover.url;
         final_metadata.cover_mime = cover.mime_type;
     }
-    
+
     group.metadata = final_metadata;
 
     // Cache the result
@@ -400,6 +478,187 @@ async fn process_book_group(
     group.total_changes = calculate_changes(&mut group);
 
     Ok(group)
+}
+
+/// Merge only the selected fields from new_metadata into existing_metadata
+/// Fields not selected are preserved from existing_metadata
+fn merge_selective_fields(
+    existing: BookMetadata,
+    new: BookMetadata,
+    fields: Option<SelectiveRefreshFields>,
+) -> BookMetadata {
+    let fields = match fields {
+        Some(f) if f.any_selected() => f,
+        _ => return existing, // No fields selected, keep existing
+    };
+
+    let mut result = existing.clone();
+    let mut sources = result.sources.clone().unwrap_or_default();
+
+    // If 'all' is selected, replace everything
+    if fields.all {
+        return new;
+    }
+
+    // Selectively replace fields
+    if fields.authors {
+        result.author = new.author;
+        result.authors = new.authors;
+        if let Some(ref new_sources) = new.sources {
+            sources.author = new_sources.author;
+        }
+        println!("   📝 Updated authors from API");
+    }
+
+    if fields.narrators {
+        result.narrator = new.narrator;
+        result.narrators = new.narrators;
+        if let Some(ref new_sources) = new.sources {
+            sources.narrator = new_sources.narrator;
+        }
+        println!("   📝 Updated narrators from API");
+    }
+
+    if fields.description {
+        result.description = new.description;
+        if let Some(ref new_sources) = new.sources {
+            sources.description = new_sources.description;
+        }
+        println!("   📝 Updated description from API");
+    }
+
+    if fields.series {
+        result.series = new.series;
+        result.sequence = new.sequence;
+        if let Some(ref new_sources) = new.sources {
+            sources.series = new_sources.series;
+            sources.sequence = new_sources.sequence;
+        }
+        println!("   📝 Updated series from API");
+    }
+
+    if fields.genres {
+        result.genres = new.genres;
+        if let Some(ref new_sources) = new.sources {
+            sources.genres = new_sources.genres;
+        }
+        println!("   📝 Updated genres from API");
+    }
+
+    if fields.publisher {
+        result.publisher = new.publisher;
+        if let Some(ref new_sources) = new.sources {
+            sources.publisher = new_sources.publisher;
+        }
+        println!("   📝 Updated publisher from API");
+    }
+
+    if fields.cover {
+        result.cover_url = new.cover_url;
+        result.cover_mime = new.cover_mime;
+        if let Some(ref new_sources) = new.sources {
+            sources.cover = new_sources.cover;
+        }
+        println!("   📝 Updated cover from API");
+    }
+
+    result.sources = Some(sources);
+    result
+}
+
+/// Extract book info with INVERTED priority: folder name first, GPT validation, file tags LAST
+/// This prevents corrupted file tags from overriding correct metadata
+async fn extract_book_info_with_priority(
+    sample_file: &RawFileData,
+    folder_name: &str,
+    api_key: Option<&str>
+) -> (String, String) {
+    // STEP 1: Parse folder name for title/author (most reliable)
+    let (folder_title, folder_author) = parse_folder_for_book_info(folder_name);
+
+    // STEP 2: Read file tags (may be corrupted)
+    let file_title = sample_file.tags.title.clone();
+    let file_artist = sample_file.tags.artist.clone();
+
+    // STEP 3: Decide priority
+    // If folder name gives us a clear title/author, use that
+    // If file tags match folder pattern, they're probably good
+    // If file tags differ significantly from folder, prefer folder (file may be corrupted)
+
+    let final_title: String;
+    let final_author: String;
+
+    // Trust folder name over file tags for author (common corruption point)
+    if !folder_author.is_empty() && folder_author.to_lowercase() != "unknown" {
+        final_author = folder_author.clone();
+        println!("   📁 Using folder author: '{}'", final_author);
+
+        // Warn if file tag differs significantly
+        if let Some(ref artist) = file_artist {
+            if !crate::normalize::authors_match(&folder_author, artist) {
+                println!("   ⚠️ File tag author '{}' differs from folder '{}' - using folder (file may be corrupted)",
+                    artist, folder_author);
+            }
+        }
+    } else if let Some(ref artist) = file_artist {
+        if artist.to_lowercase() != "unknown" && !artist.is_empty() {
+            final_author = artist.clone();
+        } else {
+            final_author = "Unknown".to_string();
+        }
+    } else {
+        final_author = "Unknown".to_string();
+    }
+
+    // For title, prefer file tag if clean, else folder name
+    if let Some(ref title) = file_title {
+        let clean_title = title.replace(" - Part 1", "").replace(" - Part 2", "").trim().to_string();
+        if tags_are_clean(Some(&clean_title), Some(&final_author)) {
+            final_title = clean_title;
+        } else {
+            final_title = folder_title;
+        }
+    } else {
+        final_title = folder_title;
+    }
+
+    // STEP 4: If we have GPT, validate and clean up
+    if let Some(key) = api_key {
+        if !key.is_empty() {
+            // Use GPT to validate/clean but NOT to discover new author
+            // The author is already determined from folder/file above
+            return (
+                normalize::normalize_title(&final_title),
+                normalize::clean_author_name(&final_author)
+            );
+        }
+    }
+
+    (final_title, final_author)
+}
+
+/// Parse folder name for book info (Author - Title or Title (Author) patterns)
+fn parse_folder_for_book_info(folder_name: &str) -> (String, String) {
+    // Pattern 1: "Author - Title" or "Author_-_Title"
+    let author_title_patterns = [
+        regex::Regex::new(r"^([^-]+?)\s*[-–]\s*(.+)$").ok(),
+    ];
+
+    for pattern in author_title_patterns.iter().flatten() {
+        if let Some(caps) = pattern.captures(folder_name) {
+            if let (Some(author), Some(title)) = (caps.get(1), caps.get(2)) {
+                let author_str = author.as_str().trim().to_string();
+                let title_str = title.as_str().trim().to_string();
+                // Only use if author looks like a name (not a series name or number)
+                if author_str.len() >= 3 && !author_str.chars().all(|c| c.is_numeric() || c.is_whitespace()) {
+                    return (title_str, author_str);
+                }
+            }
+        }
+    }
+
+    // Pattern 2: Just title, no author in folder
+    (folder_name.to_string(), String::new())
 }
 
 // ============================================================================
