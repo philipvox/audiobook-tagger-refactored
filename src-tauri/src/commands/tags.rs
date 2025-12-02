@@ -142,14 +142,27 @@ pub async fn write_tags(
             async move {
                 // Get metadata from first file's changes
                 let (file_id, file_path, changes) = &files[0];
-                
+
                 // Build metadata from changes
                 let metadata = build_metadata_from_changes(changes);
-                
+
                 // Write metadata.json to the book folder
                 let json_path = Path::new(&folder_path).join("metadata.json");
-                
-                match write_metadata_json(&json_path, &metadata) {
+
+                let write_result = write_metadata_json(&json_path, &metadata);
+
+                // Try to save cover art if available
+                // The cover is cached by book_id during scanning
+                if let Some(cover_url_change) = changes.get("cover_url") {
+                    if !cover_url_change.new.is_empty() {
+                        // Try to find cached cover by looking for a matching cache entry
+                        // The cache key format is "cover_{book_id}" but we don't have book_id here
+                        // Instead, try to download and save the cover from the URL
+                        let _ = save_cover_to_folder(&folder_path, &cover_url_change.new).await;
+                    }
+                }
+
+                match write_result {
                     Ok(()) => {
                         success_count.fetch_add(1, Ordering::Relaxed);
                     }
@@ -203,62 +216,149 @@ pub async fn write_tags(
 }
 
 fn build_metadata_from_changes(changes: &HashMap<String, scanner::MetadataChange>) -> AbsMetadata {
+    // CRITICAL FIX: Use the new JSON array fields for proper data transfer
+    // Previously used splitting which lost data and caused empty values
+
+    // Title - must ALWAYS be present
     let title = changes.get("title")
         .map(|c| c.new.clone())
         .unwrap_or_default();
-    
-    let author = changes.get("author")
-        .map(|c| c.new.clone())
-        .unwrap_or_default();
-    
-    let authors: Vec<String> = author
-        .split(&[',', '&'][..])
-        .map(|a| a.trim().to_string())
-        .filter(|a| !a.is_empty())
-        .collect();
-    
-    let narrator = changes.get("narrator")
-        .map(|c| c.new.replace("Narrated by ", "").trim().to_string());
-    
-    let narrators: Vec<String> = narrator
-        .map(|n| vec![n])
-        .unwrap_or_default();
-    
-    let genres: Vec<String> = changes.get("genre")
-        .map(|c| c.new.split(", ").map(|g| g.to_string()).collect())
-        .unwrap_or_default();
-    
+
+    // Authors - use the pre-serialized JSON array from calculate_changes
+    let authors: Vec<String> = changes.get("authors_json")
+        .and_then(|c| serde_json::from_str(&c.new).ok())
+        .unwrap_or_else(|| {
+            // Fallback: split from single author field
+            changes.get("author")
+                .map(|c| {
+                    c.new.split(" & ")
+                        .flat_map(|part| part.split(", "))
+                        .map(|a| a.trim().to_string())
+                        .filter(|a| !a.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+
+    // Narrators - use the pre-serialized JSON array from calculate_changes
+    let narrators: Vec<String> = changes.get("narrators_json")
+        .and_then(|c| serde_json::from_str(&c.new).ok())
+        .unwrap_or_else(|| {
+            // Fallback: split from single narrator field (semicolon-separated)
+            changes.get("narrator")
+                .map(|c| {
+                    c.new.replace("Narrated by ", "")
+                        .split("; ")
+                        .map(|n| n.trim().to_string())
+                        .filter(|n| !n.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+
+    // Genres - use the pre-serialized JSON array from calculate_changes
+    let genres: Vec<String> = changes.get("genres_json")
+        .and_then(|c| serde_json::from_str(&c.new).ok())
+        .unwrap_or_else(|| {
+            // Fallback: split from comma-separated genre field
+            changes.get("genre")
+                .map(|c| {
+                    c.new.split(", ")
+                        .map(|g| g.trim().to_string())
+                        .filter(|g| !g.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+
+    // Series
     let series_name = changes.get("series").map(|c| c.new.clone());
     let sequence = changes.get("sequence").map(|c| c.new.clone());
-    
+
     let series = if let Some(name) = series_name {
-        vec![AbsSeries { name, sequence }]
+        if !name.is_empty() {
+            vec![AbsSeries { name, sequence }]
+        } else {
+            vec![]
+        }
     } else {
         vec![]
     };
-    
+
+    // Language - use from changes if available, otherwise default to English
+    let language = changes.get("language")
+        .map(|c| c.new.clone())
+        .or_else(|| Some("en".to_string()));
+
     AbsMetadata {
         title,
-        subtitle: changes.get("subtitle").map(|c| c.new.clone()),
+        subtitle: changes.get("subtitle").map(|c| c.new.clone()).filter(|s| !s.is_empty()),
         authors,
         narrators,
         series,
         genres,
-        published_year: changes.get("year").map(|c| c.new.clone()),
-        publisher: changes.get("publisher").map(|c| c.new.clone()),
-        description: changes.get("description").map(|c| c.new.clone()),
-        isbn: changes.get("isbn").map(|c| c.new.clone()),
-        language: Some("en".to_string()),
+        published_year: changes.get("year").map(|c| c.new.clone()).filter(|y| !y.is_empty()),
+        publisher: changes.get("publisher").map(|c| c.new.clone()).filter(|p| !p.is_empty()),
+        description: changes.get("description").map(|c| c.new.clone()).filter(|d| !d.is_empty()),
+        isbn: changes.get("isbn").map(|c| c.new.clone()).filter(|i| !i.is_empty()),
+        language,
     }
 }
 
 fn write_metadata_json(path: &Path, metadata: &AbsMetadata) -> Result<(), String> {
     let json = serde_json::to_string_pretty(metadata)
         .map_err(|e| format!("JSON serialize error: {}", e))?;
-    
+
     std::fs::write(path, json)
         .map_err(|e| format!("Write error: {}", e))?;
-    
+
+    Ok(())
+}
+
+/// Download and save cover art to the book folder as cover.jpg/cover.png
+async fn save_cover_to_folder(folder_path: &str, cover_url: &str) -> Result<(), String> {
+    // Skip if cover.jpg or cover.png already exists
+    let cover_jpg = Path::new(folder_path).join("cover.jpg");
+    let cover_png = Path::new(folder_path).join("cover.png");
+    if cover_jpg.exists() || cover_png.exists() {
+        return Ok(());
+    }
+
+    // Download the cover
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let response = client.get(cover_url).send().await
+        .map_err(|e| format!("Failed to download cover: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Cover download failed with status: {}", response.status()));
+    }
+
+    let content_type = response.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let bytes = response.bytes().await
+        .map_err(|e| format!("Failed to read cover data: {}", e))?;
+
+    // Validate it's an image
+    if bytes.len() < 100 {
+        return Err("Cover image too small".to_string());
+    }
+
+    // Determine file extension based on mime type
+    let extension = if content_type.contains("png") { "png" } else { "jpg" };
+    let cover_path = Path::new(folder_path).join(format!("cover.{}", extension));
+
+    std::fs::write(&cover_path, &bytes)
+        .map_err(|e| format!("Failed to write cover file: {}", e))?;
+
+    println!("   🖼️  Saved cover to {}", cover_path.display());
     Ok(())
 }
 
