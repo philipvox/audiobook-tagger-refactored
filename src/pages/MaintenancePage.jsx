@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Upload, RefreshCw, Book, Wrench, Folder, AlertCircle, ChevronRight, Trash2, Database, Tag, BarChart3, Server } from 'lucide-react';
+import { Upload, RefreshCw, Book, Wrench, Folder, AlertCircle, ChevronRight, Trash2, Database, Tag, BarChart3, Server, User } from 'lucide-react';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { useApp } from '../context/AppContext';
 
@@ -9,6 +9,7 @@ export function MaintenancePage() {
   const [confirmModal, setConfirmModal] = useState(null);
   const [cacheStats, setCacheStats] = useState(null);
   const [genreStats, setGenreStats] = useState(null);
+  const [authorStats, setAuthorStats] = useState(null);
   const [loading, setLoading] = useState({});
 
   const showConfirm = (config) => {
@@ -21,12 +22,14 @@ export function MaintenancePage() {
 
   const refreshStats = async () => {
     try {
-      const [cache, genres] = await Promise.all([
+      const [cache, genres, authors] = await Promise.all([
         invoke('get_cache_stats').catch(() => null),
-        invoke('get_genre_stats').catch(() => null)
+        invoke('get_genre_stats').catch(() => null),
+        invoke('get_author_stats').catch(() => null)
       ]);
       setCacheStats(cache);
       setGenreStats(genres);
+      setAuthorStats(authors);
     } catch (e) {
       console.error('Failed to fetch stats:', e);
     }
@@ -63,8 +66,8 @@ export function MaintenancePage() {
             </div>
 
             {/* Stats Row */}
-            {(cacheStats || genreStats) && (
-              <div className="mt-4 pt-4 border-t border-gray-200 flex gap-6 text-sm">
+            {(cacheStats || genreStats || authorStats) && (
+              <div className="mt-4 pt-4 border-t border-gray-200 flex flex-wrap gap-6 text-sm">
                 {cacheStats && (
                   <div className="flex items-center gap-2 text-gray-600">
                     <Database className="w-4 h-4" />
@@ -74,7 +77,13 @@ export function MaintenancePage() {
                 {genreStats && (
                   <div className="flex items-center gap-2 text-gray-600">
                     <Tag className="w-4 h-4" />
-                    <span>ABS: {genreStats}</span>
+                    <span>Genres: {genreStats}</span>
+                  </div>
+                )}
+                {authorStats && (
+                  <div className="flex items-center gap-2 text-gray-600">
+                    <User className="w-4 h-4" />
+                    <span>Authors: {authorStats}</span>
                   </div>
                 )}
               </div>
@@ -349,6 +358,87 @@ export function MaintenancePage() {
                   </div>
                 </div>
                 <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-indigo-600 transition-colors" />
+              </button>
+            </div>
+          </div>
+
+          {/* Author Management (ABS) */}
+          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div className="bg-gradient-to-r from-red-50 to-orange-50 px-6 py-4 border-b border-gray-200">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-red-100 rounded-lg">
+                  <User className="w-5 h-5 text-red-600" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900">ABS Author Management</h3>
+                  <p className="text-sm text-gray-600">Fix author mismatches in AudiobookShelf by comparing with file tags</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-3">
+              <button
+                onClick={() => showConfirm({
+                  title: "Fix Author Mismatches",
+                  message: "This will compare authors in AudiobookShelf with the author tags embedded in your audio files. If they don't match (e.g., ABS shows 'J.K. Rowling' but file says 'Will Wight'), it will update ABS to match your file tags. This is useful if previous scans assigned wrong authors. Continue?",
+                  confirmText: "Fix Authors",
+                  type: "warning",
+                  onConfirm: async () => {
+                    try {
+                      setButtonLoading('fixAuthors', true);
+                      startGlobalProgress({
+                        message: 'Fixing author mismatches in AudiobookShelf...',
+                        type: 'warning'
+                      });
+                      const result = await invoke('fix_author_mismatches');
+                      endGlobalProgress();
+                      alert(result);
+                      refreshStats();
+                    } catch (error) {
+                      endGlobalProgress();
+                      alert('Failed: ' + error);
+                    } finally {
+                      setButtonLoading('fixAuthors', false);
+                    }
+                  }
+                })}
+                disabled={loading.fixAuthors}
+                className="w-full flex items-center justify-between px-4 py-3 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors group disabled:opacity-50"
+              >
+                <div className="flex items-center gap-3">
+                  <Wrench className={`w-5 h-5 text-red-600 ${loading.fixAuthors ? 'animate-spin' : ''}`} />
+                  <div className="text-left">
+                    <div className="font-medium text-gray-900">Fix Author Mismatches</div>
+                    <div className="text-sm text-gray-600">Update ABS authors to match your file tags</div>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-red-600 transition-colors" />
+              </button>
+
+              <button
+                onClick={async () => {
+                  try {
+                    setButtonLoading('authorStats', true);
+                    const stats = await invoke('get_author_stats');
+                    setAuthorStats(stats);
+                    alert(stats);
+                  } catch (error) {
+                    alert('Failed: ' + error);
+                  } finally {
+                    setButtonLoading('authorStats', false);
+                  }
+                }}
+                disabled={loading.authorStats}
+                className="w-full flex items-center justify-between px-4 py-3 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg transition-colors group disabled:opacity-50"
+              >
+                <div className="flex items-center gap-3">
+                  <BarChart3 className="w-5 h-5 text-orange-600" />
+                  <div className="text-left">
+                    <div className="font-medium text-gray-900">View Author Statistics</div>
+                    <div className="text-sm text-gray-600">See how many author mismatches exist</div>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-orange-600 transition-colors" />
               </button>
             </div>
           </div>
