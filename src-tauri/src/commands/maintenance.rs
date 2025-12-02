@@ -401,17 +401,18 @@ pub async fn get_author_stats() -> Result<String, String> {
 
 /// Read author from audio file tags
 fn read_author_from_file(path: &str) -> Option<String> {
-    use lofty::{Probe, TaggedFileExt, Accessor};
+    use lofty::probe::Probe;
+    use lofty::file::TaggedFileExt;
+    use lofty::tag::{Accessor, ItemKey};
 
     let tagged_file = Probe::open(path).ok()?.read().ok()?;
     let tag = tagged_file.primary_tag()?;
 
     // Try album artist first (more reliable for audiobooks), then artist
-    tag.get_string(&lofty::ItemKey::AlbumArtist)
+    tag.get_string(&ItemKey::AlbumArtist)
         .map(|s| s.to_string())
         .or_else(|| tag.artist().map(|s| s.to_string()))
 }
-
 /// Fix author mismatches by reading actual file tags from disk
 /// This will update ABS entries where the author doesn't match the file tags
 #[tauri::command]
