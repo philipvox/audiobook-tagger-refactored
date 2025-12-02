@@ -2372,7 +2372,7 @@ fn calculate_title_match_score(slug: &str, expected_title: &str) -> i32 {
     // Bonus for exact prefix match
     let slug_joined = slug_words.join(" ").to_lowercase();
     if slug_joined.starts_with(&expected_lower) || expected_lower.starts_with(&slug_joined) {
-        return (score + 20).min(100);
+        return (score + 20).min(100) as i32;
     }
 
     score as i32
