@@ -637,27 +637,85 @@ async fn extract_book_info_with_priority(
     (final_title, final_author)
 }
 
-/// Parse folder name for book info (Author - Title or Title (Author) patterns)
-fn parse_folder_for_book_info(folder_name: &str) -> (String, String) {
-    // Pattern 1: "Author - Title" or "Author_-_Title"
-    let author_title_patterns = [
-        regex::Regex::new(r"^([^-]+?)\s*[-–]\s*(.+)$").ok(),
-    ];
+/// Check if a string looks like a valid author name
+/// Returns true for patterns like "John Smith", "J.K. Rowling", "Stephen King"
+fn looks_like_author_name(name: &str) -> bool {
+    let name = name.trim();
 
-    for pattern in author_title_patterns.iter().flatten() {
+    // Too short to be a real name
+    if name.len() < 5 {
+        return false;
+    }
+
+    // Starts with a number - probably a track/chapter number
+    if name.chars().next().map(|c| c.is_numeric()).unwrap_or(false) {
+        return false;
+    }
+
+    // Common false positives - series names, descriptors, etc.
+    let false_positives = [
+        "the ", "a ", "an ", "book", "volume", "vol", "part", "chapter",
+        "audiobook", "audio", "unabridged", "abridged", "complete",
+        "series", "trilogy", "saga", "collection", "tales", "stories",
+        "magic", "dark", "light", "world", "house", "mystery", "spooky",
+    ];
+    let name_lower = name.to_lowercase();
+    for fp in &false_positives {
+        if name_lower.starts_with(fp) {
+            return false;
+        }
+    }
+
+    // Should contain at least one space (first and last name) or period (initials)
+    if !name.contains(' ') && !name.contains('.') {
+        return false;
+    }
+
+    // Should start with an uppercase letter
+    if !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        return false;
+    }
+
+    // Count words - a name should have 2-4 words typically
+    let words: Vec<&str> = name.split_whitespace().collect();
+    if words.len() < 2 || words.len() > 5 {
+        return false;
+    }
+
+    // Each word should start with uppercase (or be an initial like "J.")
+    for word in &words {
+        let first_char = word.chars().next();
+        if let Some(c) = first_char {
+            // Allow lowercase for small words like "de", "van", "von", etc.
+            if !c.is_uppercase() && word.len() > 3 {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Parse folder name for book info (Author - Title patterns)
+/// Only extracts author if it clearly looks like a person's name
+fn parse_folder_for_book_info(folder_name: &str) -> (String, String) {
+    // Pattern: "Author Name - Book Title" (with clear author name)
+    if let Ok(pattern) = regex::Regex::new(r"^([^-]+?)\s*[-–]\s*(.+)$") {
         if let Some(caps) = pattern.captures(folder_name) {
-            if let (Some(author), Some(title)) = (caps.get(1), caps.get(2)) {
-                let author_str = author.as_str().trim().to_string();
+            if let (Some(potential_author), Some(title)) = (caps.get(1), caps.get(2)) {
+                let author_str = potential_author.as_str().trim().to_string();
                 let title_str = title.as_str().trim().to_string();
-                // Only use if author looks like a name (not a series name or number)
-                if author_str.len() >= 3 && !author_str.chars().all(|c| c.is_numeric() || c.is_whitespace()) {
+
+                // Only use if it really looks like an author name
+                if looks_like_author_name(&author_str) {
+                    println!("   📁 Parsed folder: author='{}', title='{}'", author_str, title_str);
                     return (title_str, author_str);
                 }
             }
         }
     }
 
-    // Pattern 2: Just title, no author in folder
+    // No author found in folder - just return the title
     (folder_name.to_string(), String::new())
 }
 
@@ -2300,6 +2358,29 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
 
     // NEW: Check if abridged
     let abridged = detect_abridged(&product_html);
+
+    // VALIDATE: Check if the Audible result matches our expected author
+    // This prevents returning wrong books when search returns irrelevant results
+    let author_validated = if author.to_lowercase() == "unknown" || author.is_empty() {
+        // No author to validate against - accept result
+        true
+    } else if extracted_authors.is_empty() {
+        // No authors extracted - can't validate, accept cautiously
+        true
+    } else {
+        // Check if any extracted author matches expected author
+        extracted_authors.iter().any(|a| {
+            crate::normalize::authors_match(author, a)
+        })
+    };
+
+    if !author_validated {
+        println!("   ⚠️ Audible result rejected: expected author '{}', got {:?}",
+            author, extracted_authors);
+        // Cache this as None to avoid re-fetching
+        let _ = cache::set(&cache_key, &None::<AudibleMetadata>);
+        return None;
+    }
 
     let series_vec = if let Some(name) = series_name {
         vec![AudibleSeries {
