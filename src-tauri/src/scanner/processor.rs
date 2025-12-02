@@ -616,10 +616,16 @@ SOURCES:
 APPROVED GENRES (maximum 3):
 {}
 
+CRITICAL AUTHOR RULE:
+The author '{}' was extracted from file tags/folder name. This is likely the CORRECT author.
+If Google Books or Audible returned a DIFFERENT author, they may have returned the WRONG book.
+ALWAYS prefer the extracted author '{}' unless the folder name was clearly wrong or "Unknown".
+NEVER replace a valid author like "Will Wight" with a completely different author like "J.K. Rowling".
+
 OUTPUT FIELDS:
 * title: Book title only. Remove junk and series markers.
 * subtitle: Use only if provided by Google Books or Audible.
-* author: Clean and standardized.
+* author: CRITICAL - Use '{}' unless it was "Unknown" or clearly wrong.
 * narrator: Use Audible narrators or find in comments.
 * series: SHORT series name only! Examples:
   - "Harry Potter" (NOT "Harry Potter and the Chamber of Secrets")
@@ -671,6 +677,9 @@ JSON:"#,
         file_tags.comment,
         series_instruction,
         crate::genres::APPROVED_GENRES.join(", "),
+        extracted_author, // for CRITICAL AUTHOR RULE line 1
+        extracted_author, // for CRITICAL AUTHOR RULE line 2
+        extracted_author, // for OUTPUT FIELDS author line
         year_instruction
     );
     
@@ -717,6 +726,14 @@ JSON:"#,
                         } else {
                             Some(MetadataSource::GoogleBooks)
                         };
+                    }
+
+                    // VALIDATE author - reject if GPT returned a completely different author
+                    if !crate::normalize::author_is_acceptable(extracted_author, &metadata.author) {
+                        println!("   ⚠️ Rejecting GPT author '{}' (expected '{}' - keeping original)",
+                            metadata.author, extracted_author);
+                        metadata.author = extracted_author.to_string();
+                        sources.author = Some(MetadataSource::Folder);
                     }
 
                     // VALIDATE series - reject if it matches title or looks wrong
@@ -1787,25 +1804,68 @@ async fn fetch_google_books_data(
         .replace('\'', "%27")
         .replace(':', "%3A");
 
+    // Fetch multiple results to find best author match
     let url = format!(
-        "https://www.googleapis.com/books/v1/volumes?q={}&key={}&maxResults=1",
+        "https://www.googleapis.com/books/v1/volumes?q={}&key={}&maxResults=5",
         encoded_query, api_key
     );
 
     let client = reqwest::Client::new();
     let response = client.get(&url).send().await?;
-    
+
     if !response.status().is_success() {
         return Ok(None);
     }
-    
+
     let json: serde_json::Value = response.json().await?;
-    
-    let item = match json["items"].get(0) {
+
+    let items = match json["items"].as_array() {
+        Some(arr) => arr,
+        None => return Ok(None),
+    };
+
+    // Find the best matching result by validating author
+    let expected_author = author.to_lowercase();
+    let mut best_match: Option<&serde_json::Value> = None;
+    let mut best_score = 0;
+
+    for item in items {
+        let volume_info = &item["volumeInfo"];
+        let item_authors: Vec<String> = volume_info["authors"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+
+        // Check if any author matches
+        let author_matches = item_authors.iter().any(|a| {
+            crate::normalize::authors_match(author, a)
+        });
+
+        if author_matches {
+            // Perfect match - use this one
+            best_match = Some(item);
+            best_score = 100;
+            break;
+        } else if best_score == 0 {
+            // Keep first result as fallback if no author match found
+            best_match = Some(item);
+        }
+    }
+
+    let item = match best_match {
         Some(i) => i,
         None => return Ok(None),
     };
-    
+
+    // Log if we're using a fallback (no author match)
+    if best_score == 0 && !expected_author.is_empty() && expected_author != "unknown" {
+        let found_authors: Vec<String> = item["volumeInfo"]["authors"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        println!("   ⚠️ Google Books: No exact author match for '{}'. Found: {:?}", author, found_authors);
+    }
+
     let volume_info = &item["volumeInfo"];
 
     let result = GoogleBookData {
