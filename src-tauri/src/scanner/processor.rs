@@ -2242,6 +2242,142 @@ async fn fetch_google_books_data(
     Ok(Some(result))
 }
 
+/// Clean a title for Audible search by removing chapter indicators
+fn clean_title_for_search(title: &str) -> String {
+    let mut clean = title.to_string();
+
+    // Remove leading track/chapter numbers like "1 - ", "01 - ", "Track 1 - "
+    if let Ok(track_regex) = regex::Regex::new(r"^(?:Track\s*)?\d+\s*[-–:]\s*") {
+        clean = track_regex.replace(&clean, "").to_string();
+    }
+
+    // Remove common chapter suffixes like ": Opening Credits", ": Chapter 1", etc.
+    let suffixes_to_remove = [
+        ": Opening Credits",
+        ": Closing Credits",
+        ": Credits",
+        ": Chapter 1",
+        ": Chapitre 1",
+        ": Unit 1",
+        ": Part 1",
+        ": Introduction",
+        ": Prologue",
+        " - Part 1",
+        " - Part 2",
+        " (Unabridged)",
+        " [Unabridged]",
+    ];
+    for suffix in &suffixes_to_remove {
+        if let Some(idx) = clean.to_lowercase().find(&suffix.to_lowercase()) {
+            clean = clean[..idx].to_string();
+        }
+    }
+
+    // Remove ASIN patterns like [B002V0QDN0]
+    if let Ok(asin_regex) = regex::Regex::new(r"\s*\[[A-Z0-9]{10}\]\s*$") {
+        clean = asin_regex.replace(&clean, "").to_string();
+    }
+
+    // Remove year patterns like [1998] or (1998)
+    if let Ok(year_regex) = regex::Regex::new(r"\s*[\[\(]\d{4}[\]\)]\s*$") {
+        clean = year_regex.replace(&clean, "").to_string();
+    }
+
+    clean.trim().to_string()
+}
+
+/// Find the best matching ASIN from Audible search results
+/// Extracts multiple candidates and scores them by title/author match
+fn find_best_matching_asin(html: &str, expected_title: &str, expected_author: &str) -> Option<String> {
+    // Extract ASINs from product links in the search results
+    // Look specifically for the productListItem container to avoid sidebar/promoted content
+    let asin_regex = regex::Regex::new(r#"/pd/([^/]+)/([A-Z0-9]{10})"#).ok()?;
+
+    // Collect all unique ASINs with their associated titles
+    let mut candidates: Vec<(String, String, i32)> = Vec::new(); // (asin, title_slug, score)
+
+    for caps in asin_regex.captures_iter(html) {
+        if let (Some(title_slug), Some(asin)) = (caps.get(1), caps.get(2)) {
+            let asin_str = asin.as_str().to_string();
+            let title_slug_str = title_slug.as_str().to_string();
+
+            // Skip if we already have this ASIN
+            if candidates.iter().any(|(a, _, _)| a == &asin_str) {
+                continue;
+            }
+
+            // Calculate match score based on title similarity
+            let score = calculate_title_match_score(&title_slug_str, expected_title);
+            candidates.push((asin_str, title_slug_str, score));
+        }
+    }
+
+    if candidates.is_empty() {
+        println!("   ⚠️ No Audible search results found");
+        return None;
+    }
+
+    // Sort by score (highest first)
+    candidates.sort_by(|a, b| b.2.cmp(&a.2));
+
+    // Log candidates for debugging
+    if candidates.len() > 1 {
+        println!("   🔍 Audible candidates:");
+        for (i, (asin, slug, score)) in candidates.iter().take(3).enumerate() {
+            println!("      {}: {} (score: {}) [{}]", i + 1, slug.replace('-', " "), score, asin);
+        }
+    }
+
+    // Return the best match if score is reasonable
+    let (best_asin, best_slug, best_score) = &candidates[0];
+
+    // If score is too low, the search probably didn't find the right book
+    if *best_score < 20 {
+        println!("   ⚠️ Best Audible match '{}' has low score ({}), may be wrong book",
+            best_slug.replace('-', " "), best_score);
+    }
+
+    Some(best_asin.clone())
+}
+
+/// Calculate how well a URL slug matches an expected title
+/// Returns a score from 0-100
+fn calculate_title_match_score(slug: &str, expected_title: &str) -> i32 {
+    // Convert slug to readable format (replace hyphens with spaces)
+    let slug_words: Vec<&str> = slug.split('-')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let expected_lower = expected_title.to_lowercase();
+    let expected_words: Vec<&str> = expected_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty() && s.len() > 2)
+        .collect();
+
+    if expected_words.is_empty() {
+        return 0;
+    }
+
+    // Count how many expected words appear in the slug
+    let mut matches = 0;
+    for expected_word in &expected_words {
+        if slug_words.iter().any(|sw| sw.to_lowercase() == *expected_word) {
+            matches += 1;
+        }
+    }
+
+    // Calculate score as percentage of matching words
+    let score = (matches * 100) / expected_words.len().max(1);
+
+    // Bonus for exact prefix match
+    let slug_joined = slug_words.join(" ").to_lowercase();
+    if slug_joined.starts_with(&expected_lower) || expected_lower.starts_with(&slug_joined) {
+        return (score + 20).min(100);
+    }
+
+    score as i32
+}
+
 async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMetadata> {
     // PERFORMANCE: Cache Audible lookups by title+author
     let cache_key = format!("audible_{}_{}", title.to_lowercase().replace(' ', "_"), author.to_lowercase().replace(' ', "_"));
@@ -2250,11 +2386,15 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
         return cached;
     }
 
+    // Clean the title for better search results
+    // Remove chapter indicators like "1 - ", "Opening Credits", etc.
+    let clean_title = clean_title_for_search(title);
+
     // Don't include "Unknown" in the search - it hurts results
     let search_query = if author.to_lowercase() == "unknown" || author.is_empty() {
-        title.to_string()
+        clean_title.clone()
     } else {
-        format!("{} {}", title, author)
+        format!("{} {}", clean_title, author)
     };
     let encoded_query = search_query
         .replace(' ', "+")
@@ -2272,11 +2412,9 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
     let response = client.get(&search_url).send().await.ok()?;
     let html = response.text().await.ok()?;
 
-    // Parse ASIN from search results
-    let asin_regex = regex::Regex::new(r#"/pd/[^/]+/([A-Z0-9]{10})"#).ok()?;
-    let asin = asin_regex.captures(&html)
-        .and_then(|caps| caps.get(1))
-        .map(|m| m.as_str().to_string())?;
+    // IMPROVED: Extract multiple ASINs from search results and find the best match
+    // Look for ASINs specifically in the product result area, not sidebars
+    let asin = find_best_matching_asin(&html, &clean_title, author)?;
 
     // Fetch product page
     let product_url = format!("https://www.audible.com/pd/{}", asin);
