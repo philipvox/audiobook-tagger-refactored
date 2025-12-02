@@ -124,7 +124,7 @@ async fn fetch_covers_for_groups(
                 group
             }
         })
-        .buffer_unordered(10)  // Fetch 10 covers concurrently
+        .buffer_unordered(30)  // Fetch 30 covers concurrently for faster imports
         .collect()
         .await;
 

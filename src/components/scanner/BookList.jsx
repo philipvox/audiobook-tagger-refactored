@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, Filter, X, Download, FolderPlus, Sparkles, FileJson } from 'lucide-react';
+import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, Filter, X, Download, FolderPlus, Sparkles, FileJson, Zap } from 'lucide-react';
 
 // Virtualized item height (approximate)
 const ITEM_HEIGHT = 140;
@@ -218,32 +218,47 @@ export function BookList({
   if (groups.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center p-8 bg-white">
-        <div className="text-center max-w-sm">
+        <div className="text-center max-w-md">
           <div className="bg-gradient-to-br from-blue-50 to-indigo-100 rounded-2xl p-8 border border-blue-200">
             <Upload className="w-12 h-12 text-blue-400 mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-gray-900 mb-2">No Files Scanned</h3>
             <p className="text-gray-600 mb-6 text-sm">Select a folder to scan for audiobook files and view metadata</p>
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-3">
+              {/* Smart Scan - default */}
               <button
-                onClick={onScan}
+                onClick={() => onScan('normal')}
                 disabled={scanning}
-                className="w-full px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:opacity-50"
+                className="w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:opacity-50 flex items-center justify-center gap-2"
               >
-                {scanning ? 'Scanning...' : 'Scan Library'}
+                <Zap className="w-4 h-4" />
+                {scanning ? 'Scanning...' : 'Smart Scan'}
               </button>
+
+              {/* Clean Scan - secondary */}
+              <button
+                onClick={() => onScan('force_fresh')}
+                disabled={scanning}
+                className="w-full px-4 py-2.5 bg-white border border-blue-300 text-blue-700 rounded-lg hover:bg-blue-50 transition-colors font-medium disabled:opacity-50 flex items-center justify-center gap-2 text-sm"
+              >
+                <Sparkles className="w-4 h-4" />
+                Clean Scan (Clear Caches)
+              </button>
+
               {onImport && (
                 <button
                   onClick={onImport}
                   disabled={scanning}
-                  className="w-full px-4 py-2.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium disabled:opacity-50 text-sm"
+                  className="w-full px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium disabled:opacity-50 text-sm flex items-center justify-center gap-2"
                 >
+                  <FolderPlus className="w-4 h-4" />
                   Import Without Scanning
                 </button>
               )}
             </div>
-            <p className="text-xs text-gray-500 mt-3">
-              Import adds folders without fetching metadata from online sources
-            </p>
+            <div className="mt-4 text-xs text-gray-500 space-y-1">
+              <p><strong>Smart Scan:</strong> Skips books with existing metadata</p>
+              <p><strong>Clean Scan:</strong> Fetches fresh data for all books</p>
+            </div>
           </div>
         </div>
       </div>

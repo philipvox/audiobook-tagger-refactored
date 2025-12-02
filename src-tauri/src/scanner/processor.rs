@@ -182,7 +182,7 @@ pub async fn process_all_groups(
                 result
             }
         })
-        .buffer_unordered(20)  // Increased concurrency for better throughput
+        .buffer_unordered(50)  // High concurrency for maximum throughput
         .filter_map(|r| async { r.ok() })
         .collect()
         .await;

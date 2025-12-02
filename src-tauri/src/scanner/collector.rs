@@ -127,19 +127,34 @@ pub async fn collect_and_group_files(
     paths: &[String],
     cancel_flag: Option<Arc<AtomicBool>>
 ) -> Result<Vec<BookGroup>, Box<dyn std::error::Error + Send + Sync>> {
+    use futures::stream::{self, StreamExt};
 
-    let mut all_files = Vec::new();
+    // Parallelize collection across multiple root paths
+    let paths_vec: Vec<String> = paths.to_vec();
+    let cancel = cancel_flag.clone();
 
-    for path in paths {
-        if let Some(ref flag) = cancel_flag {
-            if flag.load(Ordering::SeqCst) {
-                println!("Collection cancelled");
-                return Ok(vec![]);
+    let all_files: Vec<RawFileData> = stream::iter(paths_vec)
+        .map(|path| {
+            let cancel = cancel.clone();
+            async move {
+                if let Some(ref flag) = cancel {
+                    if flag.load(Ordering::SeqCst) {
+                        return vec![];
+                    }
+                }
+                collect_audio_files_from_path(&path).unwrap_or_default()
             }
-        }
+        })
+        .buffer_unordered(10)  // Scan up to 10 root paths in parallel
+        .flat_map(|files| stream::iter(files))
+        .collect()
+        .await;
 
-        let files = collect_audio_files_from_path(path)?;
-        all_files.extend(files);
+    if let Some(ref flag) = cancel_flag {
+        if flag.load(Ordering::SeqCst) {
+            println!("Collection cancelled");
+            return Ok(vec![]);
+        }
     }
 
     println!("📁 Collected {} audio files", all_files.len());
