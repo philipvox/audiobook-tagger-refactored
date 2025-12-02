@@ -124,6 +124,96 @@ pub enum ScanMode {
     SelectiveRefresh,
 }
 
+/// Specifies which metadata fields to refresh during a selective rescan
+/// When a field is true, it will be re-fetched from APIs (ignoring cached/file values)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct SelectiveRefreshFields {
+    /// Refresh author/authors from API sources
+    #[serde(default)]
+    pub authors: bool,
+    /// Refresh narrator/narrators from API sources
+    #[serde(default)]
+    pub narrators: bool,
+    /// Refresh description from API sources
+    #[serde(default)]
+    pub description: bool,
+    /// Refresh series/sequence from API sources
+    #[serde(default)]
+    pub series: bool,
+    /// Refresh genres from API sources
+    #[serde(default)]
+    pub genres: bool,
+    /// Refresh publisher from API sources
+    #[serde(default)]
+    pub publisher: bool,
+    /// Refresh cover art
+    #[serde(default)]
+    pub cover: bool,
+    /// Refresh all fields (equivalent to ForceFresh but preserves file structure)
+    #[serde(default)]
+    pub all: bool,
+}
+
+impl SelectiveRefreshFields {
+    /// Returns true if any field is selected for refresh
+    pub fn any_selected(&self) -> bool {
+        self.authors || self.narrators || self.description ||
+        self.series || self.genres || self.publisher || self.cover || self.all
+    }
+
+    /// Create a SelectiveRefreshFields with all fields enabled
+    pub fn all_fields() -> Self {
+        Self {
+            authors: true,
+            narrators: true,
+            description: true,
+            series: true,
+            genres: true,
+            publisher: true,
+            cover: true,
+            all: true,
+        }
+    }
+}
+
+/// Priority order for metadata sources (higher = more trusted)
+/// API sources are now prioritized over file metadata
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SourcePriority {
+    /// File tags are lowest priority (may be corrupted/wrong)
+    FileTag = 1,
+    /// Folder name parsing
+    Folder = 2,
+    /// Unknown source
+    Unknown = 3,
+    /// iTunes/Apple Books API
+    ITunes = 4,
+    /// Google Books API
+    GoogleBooks = 5,
+    /// Audible scraping (highly reliable for audiobooks)
+    Audible = 6,
+    /// GPT-enhanced (validated against APIs)
+    Gpt = 7,
+    /// User manually entered (highest trust)
+    Manual = 8,
+}
+
+impl From<MetadataSource> for SourcePriority {
+    fn from(source: MetadataSource) -> Self {
+        match source {
+            MetadataSource::FileTag => SourcePriority::FileTag,
+            MetadataSource::Folder => SourcePriority::Folder,
+            MetadataSource::Unknown => SourcePriority::Unknown,
+            MetadataSource::ITunes => SourcePriority::ITunes,
+            MetadataSource::GoogleBooks => SourcePriority::GoogleBooks,
+            MetadataSource::Audible => SourcePriority::Audible,
+            MetadataSource::Gpt => SourcePriority::Gpt,
+            MetadataSource::Manual => SourcePriority::Manual,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BookMetadata {
     #[serde(default)]
