@@ -691,6 +691,8 @@ JSON:"#,
                         sources.narrator = Some(MetadataSource::Gpt);
                     }
                     if !metadata.genres.is_empty() {
+                        // Split any combined genres first
+                        metadata.genres = crate::genres::split_combined_genres(&metadata.genres);
                         // Enforce age-specific children's genres
                         crate::genres::enforce_children_age_genres(
                             &mut metadata.genres,
@@ -942,11 +944,12 @@ fn fallback_metadata(
         d.subtitle.clone()
     });
 
+    // Split combined genres (Google Books uses hierarchical format like "Fiction / Thrillers / Suspense")
     let mut genres = google_data.as_ref().map(|d| {
         if !d.genres.is_empty() {
             sources.genres = Some(MetadataSource::GoogleBooks);
         }
-        d.genres.clone()
+        crate::genres::split_combined_genres(&d.genres)
     }).unwrap_or_default();
 
     // Enforce age-specific children's genres
@@ -1127,12 +1130,14 @@ fn create_metadata_from_audible(
         }));
 
     // Genres from Google (Audible doesn't have genres)
+    // Split combined genres (Google Books uses hierarchical format like "Fiction / Thrillers / Suspense")
     let mut genres = google_data.as_ref()
         .map(|d| {
             if !d.genres.is_empty() {
                 sources.genres = Some(MetadataSource::GoogleBooks);
             }
-            d.genres.clone()
+            // Split combined genre strings into individual genres
+            crate::genres::split_combined_genres(&d.genres)
         })
         .unwrap_or_default();
 
@@ -1525,7 +1530,10 @@ JSON:"#,
                     };
 
                     // Get genres
-                    let genres = json.get("genres").map(get_string_array).unwrap_or_default();
+                    // Split any combined genres from GPT response
+                    let genres = crate::genres::split_combined_genres(
+                        &json.get("genres").map(get_string_array).unwrap_or_default()
+                    );
 
                     let narrator = json.get("narrator").and_then(get_string);
                     let publisher = json.get("publisher").and_then(get_string);
