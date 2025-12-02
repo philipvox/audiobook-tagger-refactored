@@ -1,5 +1,5 @@
 // src/context/AppContext.jsx
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
@@ -10,7 +10,22 @@ export function AppProvider({ children }) {
   const [groups, setGroups] = useState([]);
   const [fileStatuses, setFileStatuses] = useState({});
   const [writeProgress, setWriteProgress] = useState({ current: 0, total: 0 });
-  const [isLoadingConfig, setIsLoadingConfig] = useState(true); // ✅ ADD THIS
+  const [isLoadingConfig, setIsLoadingConfig] = useState(true);
+
+  // Global progress state for app-wide operations
+  const [globalProgress, setGlobalProgress] = useState({
+    active: false,
+    current: 0,
+    total: 0,
+    message: '',
+    detail: '',
+    startTime: null,
+    canCancel: false,
+    type: 'info', // 'info', 'warning', 'danger', 'success'
+    cancelFn: null
+  });
+
+  const cancelRef = useRef(null);
 
   // Load config on mount
   useEffect(() => {
@@ -76,6 +91,54 @@ export function AppProvider({ children }) {
     setFileStatuses({});
   };
 
+  // Global progress management functions
+  const startGlobalProgress = useCallback(({ message, total = 0, canCancel = false, type = 'info', cancelFn = null }) => {
+    cancelRef.current = cancelFn;
+    setGlobalProgress({
+      active: true,
+      current: 0,
+      total,
+      message,
+      detail: '',
+      startTime: Date.now(),
+      canCancel,
+      type,
+      cancelFn
+    });
+  }, []);
+
+  const updateGlobalProgress = useCallback(({ current, total, message, detail }) => {
+    setGlobalProgress(prev => ({
+      ...prev,
+      ...(current !== undefined && { current }),
+      ...(total !== undefined && { total }),
+      ...(message !== undefined && { message }),
+      ...(detail !== undefined && { detail })
+    }));
+  }, []);
+
+  const endGlobalProgress = useCallback(() => {
+    cancelRef.current = null;
+    setGlobalProgress({
+      active: false,
+      current: 0,
+      total: 0,
+      message: '',
+      detail: '',
+      startTime: null,
+      canCancel: false,
+      type: 'info',
+      cancelFn: null
+    });
+  }, []);
+
+  const cancelGlobalProgress = useCallback(() => {
+    if (cancelRef.current) {
+      cancelRef.current();
+    }
+    endGlobalProgress();
+  }, [endGlobalProgress]);
+
   const value = {
     config,
     setConfig,
@@ -88,7 +151,13 @@ export function AppProvider({ children }) {
     updateFileStatuses,
     clearFileStatuses,
     writeProgress,
-    setWriteProgress
+    setWriteProgress,
+    // Global progress
+    globalProgress,
+    startGlobalProgress,
+    updateGlobalProgress,
+    endGlobalProgress,
+    cancelGlobalProgress
   };
 
   // ✅ CHANGE THIS - Show loading without unmounting children
