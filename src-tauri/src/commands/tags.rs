@@ -285,10 +285,10 @@ fn build_metadata_from_changes(changes: &HashMap<String, scanner::MetadataChange
         vec![]
     };
 
-    // Language - use from changes if available, otherwise default to English
+    // Language - only use if explicitly provided (don't default to English for non-English books)
     let language = changes.get("language")
         .map(|c| c.new.clone())
-        .or_else(|| Some("en".to_string()));
+        .filter(|l| !l.is_empty());
 
     AbsMetadata {
         title,

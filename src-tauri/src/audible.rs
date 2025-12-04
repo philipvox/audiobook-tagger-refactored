@@ -4,6 +4,7 @@ use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudibleMetadata {
+    pub asin: Option<String>,
     pub title: Option<String>,
     pub subtitle: Option<String>,
     pub authors: Vec<String>,
@@ -12,7 +13,12 @@ pub struct AudibleMetadata {
     pub publisher: Option<String>,
     pub release_date: Option<String>,
     pub description: Option<String>,
-    pub asin: Option<String>,
+    /// ISO language code (e.g., "en", "es")
+    pub language: Option<String>,
+    /// Runtime in minutes
+    pub runtime_minutes: Option<u32>,
+    /// Whether the audiobook is abridged
+    pub abridged: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +123,10 @@ fn parse_response(json: &str) -> Result<AudibleMetadata> {
         release_date: Option<String>,
         publisher_summary: Option<String>,
         asin: Option<String>,
+        language: Option<String>,
+        runtime_length_min: Option<u32>,
+        #[serde(rename = "is_abridged")]
+        abridged: Option<bool>,
     }
     
     #[derive(Deserialize)]
@@ -134,6 +144,7 @@ fn parse_response(json: &str) -> Result<AudibleMetadata> {
     let product = resp.products.first().ok_or_else(|| anyhow::anyhow!("No products"))?;
     
     Ok(AudibleMetadata {
+        asin: product.asin.clone(),
         title: product.title.clone(),
         subtitle: product.subtitle.clone(),
         authors: product.authors.as_ref()
@@ -151,6 +162,8 @@ fn parse_response(json: &str) -> Result<AudibleMetadata> {
         publisher: product.publisher_name.clone(),
         release_date: product.release_date.clone(),
         description: product.publisher_summary.clone(),
-        asin: product.asin.clone(),
+        language: product.language.clone(),
+        runtime_minutes: product.runtime_length_min,
+        abridged: product.abridged,
     })
 }

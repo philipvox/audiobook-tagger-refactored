@@ -89,12 +89,34 @@ async fn fetch_covers_for_groups(
                     }
                 }
 
-                // Only fetch cover if we have enough metadata and no cached cover
+                // Check for cached cover or load from folder
                 let cover_cache_key = format!("cover_{}", group.id);
-                let has_cached_cover: bool = cache::get::<(Vec<u8>, String)>(&cover_cache_key).is_some();
+                let mut has_cached_cover: bool = cache::get::<(Vec<u8>, String)>(&cover_cache_key).is_some();
 
+                // If no cached cover, try to load from folder first (cover.jpg, cover.png, etc.)
+                if !has_cached_cover {
+                    if let Some(first_file) = group.files.first() {
+                        if let Some(folder) = std::path::Path::new(&first_file.path).parent() {
+                            for filename in &["cover.jpg", "cover.jpeg", "cover.png", "folder.jpg", "folder.png"] {
+                                let cover_path = folder.join(filename);
+                                if cover_path.exists() {
+                                    if let Ok(data) = std::fs::read(&cover_path) {
+                                        let mime = if filename.ends_with(".png") { "image/png" } else { "image/jpeg" };
+                                        let _ = cache::set(&cover_cache_key, &(data, mime.to_string()));
+                                        group.metadata.cover_url = Some(cover_path.to_string_lossy().to_string());
+                                        group.metadata.cover_mime = Some(mime.to_string());
+                                        has_cached_cover = true;
+                                        covers_found.fetch_add(1, Ordering::Relaxed);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // If still no cover and we have metadata, fetch from APIs
                 if !has_cached_cover && !group.metadata.title.is_empty() && !group.metadata.author.is_empty() {
-                    // Fetch cover
                     let cover_result = cover_art::fetch_and_download_cover(
                         &group.metadata.title,
                         &group.metadata.author,
@@ -124,7 +146,7 @@ async fn fetch_covers_for_groups(
                 group
             }
         })
-        .buffer_unordered(30)  // Fetch 30 covers concurrently for faster imports
+        .buffer_unordered(10)  // Moderate concurrency to avoid API rate limiting
         .collect()
         .await;
 
@@ -170,12 +192,12 @@ pub async fn scan_directories_with_options(
 
     // Clear cache based on scan mode
     match scan_mode {
-        ScanMode::ForceFresh => {
-            // Full fresh scan - clear all caches
+        ScanMode::ForceFresh | ScanMode::SuperScanner => {
+            // Full fresh scan or Super Scanner - clear all caches
             if let Err(e) = cache::clear() {
                 println!("⚠️ Cache clear failed: {}", e);
             } else {
-                println!("🗑️ Cache cleared for fresh scan");
+                println!("🗑️ Cache cleared for {} scan", if scan_mode == ScanMode::SuperScanner { "super" } else { "fresh" });
             }
         }
         ScanMode::RefreshMetadata | ScanMode::SelectiveRefresh => {
@@ -218,13 +240,24 @@ pub async fn scan_directories_with_options(
     crate::progress::update_progress(0, groups.len(), "Starting processing...");
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let processed_groups = processor::process_all_groups_with_options(
-        groups,
-        &config,
-        cancel_flag.clone(),
-        scan_mode,
-        selective_fields
-    ).await?;
+    // Route to appropriate processor based on scan mode
+    let processed_groups = if scan_mode == ScanMode::SuperScanner {
+        // SuperScanner uses dedicated high-accuracy processor
+        processor::process_all_groups_super_scanner(
+            groups,
+            &config,
+            cancel_flag.clone(),
+        ).await?
+    } else {
+        // All other modes use standard processor
+        processor::process_all_groups_with_options(
+            groups,
+            &config,
+            cancel_flag.clone(),
+            scan_mode,
+            selective_fields
+        ).await?
+    };
 
     Ok(ScanResult {
         total_groups: processed_groups.len(),

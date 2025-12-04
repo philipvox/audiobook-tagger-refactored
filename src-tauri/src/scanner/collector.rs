@@ -90,7 +90,24 @@ fn load_metadata_json(folder_path: &str) -> (Option<BookMetadata>, bool) {
         (None, None)
     };
 
-    println!("   ✅ Loaded metadata.json for '{}'", title);
+    // Check for existing cover file in folder
+    let folder = Path::new(folder_path);
+    let (cover_url, cover_mime) = if folder.join("cover.jpg").exists() {
+        (Some(folder.join("cover.jpg").to_string_lossy().to_string()), Some("image/jpeg".to_string()))
+    } else if folder.join("cover.jpeg").exists() {
+        (Some(folder.join("cover.jpeg").to_string_lossy().to_string()), Some("image/jpeg".to_string()))
+    } else if folder.join("cover.png").exists() {
+        (Some(folder.join("cover.png").to_string_lossy().to_string()), Some("image/png".to_string()))
+    } else if folder.join("folder.jpg").exists() {
+        (Some(folder.join("folder.jpg").to_string_lossy().to_string()), Some("image/jpeg".to_string()))
+    } else if folder.join("folder.png").exists() {
+        (Some(folder.join("folder.png").to_string_lossy().to_string()), Some("image/png".to_string()))
+    } else {
+        (None, None)
+    };
+
+    let has_cover = cover_url.is_some();
+    println!("   ✅ Loaded metadata.json for '{}'{}", title, if has_cover { " (with cover)" } else { "" });
 
     (Some(BookMetadata {
         title,
@@ -105,8 +122,8 @@ fn load_metadata_json(folder_path: &str) -> (Option<BookMetadata>, bool) {
         year: abs_meta.published_year,
         isbn: abs_meta.isbn,
         asin: abs_meta.asin,
-        cover_url: None,
-        cover_mime: None,
+        cover_url,
+        cover_mime,
         authors: abs_meta.authors,
         narrators: abs_meta.narrators,
         language: abs_meta.language,
@@ -118,6 +135,7 @@ fn load_metadata_json(folder_path: &str) -> (Option<BookMetadata>, bool) {
         // Collection fields - detected later in processing
         is_collection: false,
         collection_books: vec![],
+        confidence: None,
     }), true)
 }
 
@@ -300,6 +318,7 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                     // Collection fields - detected later in processing
                     is_collection: false,
                     collection_books: vec![],
+                    confidence: None,
                 }, ScanStatus::NotScanned)
             };
 

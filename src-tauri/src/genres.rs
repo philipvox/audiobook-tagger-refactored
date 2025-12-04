@@ -422,52 +422,85 @@ JSON:"#,
         approved_genres
     );
     
-    println!("          📤 Sending to OpenAI...");
-    
+    println!("          📤 Sending to OpenAI Responses API...");
+
+    // GPT-5.1-codex-mini uses the Responses API endpoint
+    let system_prompt = "You clean audiobook metadata. Return ONLY valid JSON, no markdown.";
+    let full_prompt = format!("{}\n\n{}", system_prompt, prompt);
+
     let client = reqwest::Client::new();
     let response = client
-        .post("https://api.openai.com/v1/chat/completions")
+        .post("https://api.openai.com/v1/responses")
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
-            "model": "gpt-5-nano",
-            "messages": [{"role": "user", "content": prompt}],
-            "verbosity": "low",
-            "reasoning_effort": "minimal"
+            "model": "gpt-5.1-codex-mini",
+            "input": full_prompt,
+            "max_output_tokens": 1000,
+            "reasoning": {
+                "effort": "low"
+            }
         }))
         .send()
         .await?;
-    
+
     if !response.status().is_success() {
         let error_text = response.text().await?;
         println!("          ❌ API error: {}", error_text);
         anyhow::bail!("API error");
     }
-    
+
     let response_text = response.text().await?;
-    let openai_response: OpenAIResponse = serde_json::from_str(&response_text)?;
-    
-    if let Some(choice) = openai_response.choices.first() {
-        let content = &choice.message.content;
-        let json_str = content.trim()
-            .trim_start_matches("```json").trim_start_matches("```")
-            .trim_end_matches("```").trim();
-        
-        match serde_json::from_str::<CleanedMetadata>(json_str) {
-            Ok(cleaned) => {
-                println!("          ✅ AI: Title={:?}, Author={:?}, Narrator={:?}, Genre={:?}", 
-                    cleaned.title, cleaned.author, cleaned.narrator, cleaned.genre);
-                crate::genre_cache::set_metadata_cached(&cache_key, cleaned.clone());
-                Ok(cleaned)
-            }
-            Err(e) => {
-                println!("          ❌ Parse error: {}", e);
-                println!("          JSON: {}", json_str);
-                anyhow::bail!("Parse failed")
-            }
+
+    // Parse the Responses API format
+    #[derive(serde::Deserialize)]
+    struct ResponsesApiResponse {
+        output: Vec<OutputItem>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OutputItem {
+        content: Option<Vec<ContentItem>>,
+        #[serde(rename = "type")]
+        item_type: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ContentItem {
+        text: Option<String>,
+        #[serde(rename = "type")]
+        content_type: String,
+    }
+
+    let responses_result: ResponsesApiResponse = serde_json::from_str(&response_text)
+        .map_err(|e| anyhow::anyhow!("Failed to parse Responses API: {}. Raw: {}", e, response_text))?;
+
+    // Extract text content from the response
+    let content = responses_result.output.iter()
+        .filter(|item| item.item_type == "message")
+        .filter_map(|item| item.content.as_ref())
+        .flatten()
+        .filter(|c| c.content_type == "output_text")
+        .filter_map(|c| c.text.as_ref())
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No text content in Responses API response"))?;
+
+    let json_str = content.trim()
+        .trim_start_matches("```json").trim_start_matches("```")
+        .trim_end_matches("```").trim();
+
+    match serde_json::from_str::<CleanedMetadata>(json_str) {
+        Ok(cleaned) => {
+            println!("          ✅ AI: Title={:?}, Author={:?}, Narrator={:?}, Genre={:?}",
+                cleaned.title, cleaned.author, cleaned.narrator, cleaned.genre);
+            crate::genre_cache::set_metadata_cached(&cache_key, cleaned.clone());
+            Ok(cleaned)
         }
-    } else {
-        anyhow::bail!("No response")
+        Err(e) => {
+            println!("          ❌ Parse error: {}", e);
+            println!("          JSON: {}", json_str);
+            anyhow::bail!("Parse failed")
+        }
     }
 }
 

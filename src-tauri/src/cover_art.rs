@@ -372,14 +372,14 @@ async fn fetch_itunes_cover(title: &str, author: &str) -> Option<CoverArt> {
                             let high_res_url = artwork_url
                                 .replace("100x100", "2048x2048")
                                 .replace("100x100bb", "2048x2048bb");
-                            
+
                             if let Ok(cover) = download_cover(&high_res_url).await {
                                 if cover.data.is_some() {
                                     println!("   ✅ iTunes cover found");
                                     return Some(cover);
                                 }
                             }
-                            
+
                             // Fallback to original size
                             if let Ok(cover) = download_cover(artwork_url).await {
                                 if cover.data.is_some() {
@@ -392,7 +392,12 @@ async fn fetch_itunes_cover(title: &str, author: &str) -> Option<CoverArt> {
                 }
             }
         }
-        _ => {}
+        Ok(response) => {
+            println!("   ⚠️  iTunes API returned status: {}", response.status());
+        }
+        Err(e) => {
+            println!("   ⚠️  iTunes API error: {}", e);
+        }
     }
     
     println!("   ⚠️  No iTunes cover found");
@@ -401,46 +406,79 @@ async fn fetch_itunes_cover(title: &str, author: &str) -> Option<CoverArt> {
 
 async fn fetch_audible_cover(asin: &str) -> Option<CoverArt> {
     println!("   🎧 Trying Audible cover (ASIN: {})...", asin);
-    
-    // Try to fetch the Audible product page and extract the actual image URL
-    // The ASIN alone doesn't give us the image ID - we need to scrape it
-    let product_url = format!("https://www.audible.com/pd/{}", asin);
-    
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
         .build()
         .ok()?;
-    
+
+    // Strategy 1: Use Audible's API-style image endpoint (faster, no HTML parsing)
+    // This URL pattern often works for Audible ASINs
+    let api_image_url = format!("https://m.media-amazon.com/images/I/{}._SL500_.jpg", asin);
+    if let Ok(cover) = download_cover(&api_image_url).await {
+        if cover.data.is_some() {
+            println!("   ✅ Audible cover found (direct ASIN)");
+            return Some(cover);
+        }
+    }
+
+    // Strategy 2: Fetch the product page to find og:image
+    let product_url = format!("https://www.audible.com/pd/{}", asin);
     let response = client.get(&product_url).send().await.ok()?;
     if !response.status().is_success() {
         println!("   ⚠️  No Audible cover found");
         return None;
     }
-    
+
+    // Get page text - Audible pages are typically 100-200KB
     let html = response.text().await.ok()?;
-    
-    // Look for the cover image URL in the page
-    // Audible uses patterns like: https://m.media-amazon.com/images/I/XXXXXXXXXX._SL500_.jpg
+
+    // Look for og:image meta tag (usually in first few KB)
+    if let Some(start) = html.find(r#"og:image" content=""#) {
+        let substr = &html[start + 20..];
+        if let Some(end) = substr.find('"') {
+            let image_url = &substr[..end];
+            if image_url.contains("media-amazon.com") {
+                let high_res_url = image_url
+                    .replace("._SL500_.", "._SL2400_.")
+                    .replace("._SL300_.", "._SL2400_.")
+                    .replace("._SL200_.", "._SL2400_.");
+
+                if let Ok(cover) = download_cover(&high_res_url).await {
+                    if cover.data.is_some() {
+                        println!("   ✅ Audible cover found (high-res from og:image)");
+                        return Some(cover);
+                    }
+                }
+
+                if let Ok(cover) = download_cover(image_url).await {
+                    if cover.data.is_some() {
+                        println!("   ✅ Audible cover found (from og:image)");
+                        return Some(cover);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: Look for any Amazon image URL in the partial HTML
     if let Some(start) = html.find("https://m.media-amazon.com/images/I/") {
         let substr = &html[start..];
         if let Some(end) = substr.find(".jpg") {
             let image_url = &substr[..end + 4];
-            
-            // Try to get a higher resolution version
             let high_res_url = image_url
                 .replace("._SL500_.", "._SL2400_.")
                 .replace("._SL300_.", "._SL2400_.")
                 .replace("._SL200_.", "._SL2400_.");
-            
+
             if let Ok(cover) = download_cover(&high_res_url).await {
                 if cover.data.is_some() {
                     println!("   ✅ Audible cover found (high-res)");
                     return Some(cover);
                 }
             }
-            
-            // Fallback to original size
+
             if let Ok(cover) = download_cover(image_url).await {
                 if cover.data.is_some() {
                     println!("   ✅ Audible cover found");
@@ -449,7 +487,7 @@ async fn fetch_audible_cover(asin: &str) -> Option<CoverArt> {
             }
         }
     }
-    
+
     println!("   ⚠️  No Audible cover found");
     None
 }

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { FileAudio, RefreshCw, Wrench, Settings, FileSearch, ChevronDown, Zap, Sparkles } from 'lucide-react';
+import { FileAudio, RefreshCw, Wrench, Settings, FileSearch, ChevronDown, Zap, Sparkles, Shield } from 'lucide-react';
 import { AppProvider } from './context/AppContext';
 import { ScannerPage } from './pages/ScannerPage';
 import { MaintenancePage } from './pages/MaintenancePage';
@@ -11,6 +11,7 @@ import { GlobalProgressBar } from './components/GlobalProgressBar';
 const SCAN_MODES = [
   { id: 'normal', label: 'Smart Scan', description: 'Skip books with existing metadata', icon: Zap },
   { id: 'force_fresh', label: 'Clean Scan', description: 'Clear caches and fetch all fresh data', icon: Sparkles },
+  { id: 'super_scanner', label: 'Super Scanner', description: 'Maximum accuracy - retries, validation, GPT on all', icon: Shield },
 ];
 
 function AppContent() {

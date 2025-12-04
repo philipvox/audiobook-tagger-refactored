@@ -3,7 +3,8 @@
 // GPT validates/chooses from candidates instead of inventing series names
 // API/GPT sources are now prioritized over file metadata to prevent corrupted tags from overriding
 
-use super::types::{AudioFile, BookGroup, BookMetadata, MetadataChange, MetadataSource, MetadataSources, ScanStatus, ScanMode, SelectiveRefreshFields};
+use super::types::{AudioFile, BookGroup, BookMetadata, MetadataChange, MetadataConfidence, MetadataSource, MetadataSources, ScanStatus, ScanMode, SelectiveRefreshFields};
+use crate::audible::{AudibleMetadata, AudibleSeries};
 use crate::cache;
 use crate::config::Config;
 use crate::normalize;
@@ -14,6 +15,8 @@ use lofty::tag::Accessor;
 use lofty::file::TaggedFileExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::future::Future;
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 struct FileTags {
@@ -32,6 +35,180 @@ struct RawFileData {
     #[allow(dead_code)]
     parent_dir: String,
     tags: FileTags,
+}
+
+/// Cross-validation result between multiple sources
+#[derive(Debug, Clone, Default)]
+struct SourceValidation {
+    title_confidence: u8,
+    author_confidence: u8,
+    narrator_confidence: u8,
+    series_confidence: u8,
+    conflicts: Vec<String>,
+}
+
+/// Retry wrapper for API calls with exponential backoff
+/// Used by SuperScanner mode for maximum reliability
+async fn with_retry<T, F, Fut>(
+    operation_name: &str,
+    max_retries: u32,
+    base_delay_ms: u64,
+    mut operation: F,
+) -> Option<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<T>>,
+{
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            let delay = base_delay_ms * 2u64.pow(attempt - 1);
+            println!("   ⏳ Retry {} for {} (waiting {}ms)", attempt, operation_name, delay);
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+
+        match operation().await {
+            Some(result) => {
+                if attempt > 0 {
+                    println!("   ✅ {} succeeded on retry {}", operation_name, attempt);
+                }
+                return Some(result);
+            }
+            None => {
+                if attempt < max_retries {
+                    println!("   ⚠️ {} attempt {} failed, will retry...", operation_name, attempt + 1);
+                }
+            }
+        }
+    }
+    println!("   ❌ {} failed after {} retries", operation_name, max_retries + 1);
+    None
+}
+
+/// Simple string similarity check for titles
+fn titles_similar(a: &str, b: &str) -> bool {
+    let a = a.trim().to_lowercase();
+    let b = b.trim().to_lowercase();
+    if a == b { return true; }
+    // Check if one contains the other (for subtitle variations)
+    if a.contains(&b) || b.contains(&a) { return true; }
+    // Check word overlap
+    let a_words: std::collections::HashSet<&str> = a.split_whitespace().collect();
+    let b_words: std::collections::HashSet<&str> = b.split_whitespace().collect();
+    let overlap = a_words.intersection(&b_words).count();
+    let total = a_words.len().max(b_words.len());
+    if total > 0 && overlap as f32 / total as f32 > 0.7 { return true; }
+    false
+}
+
+/// Simple author name matching
+fn authors_similar(a: &str, b: &str) -> bool {
+    let a = a.trim().to_lowercase();
+    let b = b.trim().to_lowercase();
+    if a == b { return true; }
+    // Check if one contains the other
+    if a.contains(&b) || b.contains(&a) { return true; }
+    // Check last name match
+    let a_parts: Vec<&str> = a.split_whitespace().collect();
+    let b_parts: Vec<&str> = b.split_whitespace().collect();
+    if let (Some(a_last), Some(b_last)) = (a_parts.last(), b_parts.last()) {
+        if a_last == b_last { return true; }
+    }
+    false
+}
+
+/// Cross-validate metadata from multiple sources to detect conflicts
+/// Returns confidence scores and a list of conflicts for GPT to resolve
+fn cross_validate_sources(
+    folder_meta: &BookMetadata,
+    audible: Option<&AudibleMetadata>,
+    google: Option<&GoogleBookData>,
+) -> SourceValidation {
+    let mut validation = SourceValidation::default();
+    let mut title_matches = 0u8;
+    let mut author_matches = 0u8;
+
+    // Compare titles (Audible has title, Google doesn't have title field in this struct)
+    let folder_title = folder_meta.title.to_lowercase();
+    if let Some(aud) = audible {
+        if let Some(ref aud_title) = aud.title {
+            if titles_similar(&folder_title, aud_title) {
+                title_matches += 1;
+            } else {
+                validation.conflicts.push(format!(
+                    "Title mismatch: Folder='{}' vs Audible='{}'",
+                    folder_meta.title, aud_title
+                ));
+            }
+        }
+    }
+
+    // Compare authors
+    let folder_author = folder_meta.author.to_lowercase();
+    if let Some(aud) = audible {
+        let aud_authors: Vec<String> = aud.authors.iter().map(|a| a.to_lowercase()).collect();
+        if aud_authors.iter().any(|a| authors_similar(&folder_author, a)) {
+            author_matches += 1;
+        } else if !aud.authors.is_empty() {
+            validation.conflicts.push(format!(
+                "Author mismatch: Folder='{}' vs Audible='{:?}'",
+                folder_meta.author, aud.authors
+            ));
+        }
+    }
+    if let Some(goog) = google {
+        let goog_authors_lower: Vec<String> = goog.authors.iter().map(|a| a.to_lowercase()).collect();
+        if goog_authors_lower.iter().any(|a| authors_similar(&folder_author, a)) {
+            author_matches += 1;
+        } else if !goog.authors.is_empty() {
+            validation.conflicts.push(format!(
+                "Author mismatch: Folder='{}' vs Google='{:?}'",
+                folder_meta.author, goog.authors
+            ));
+        }
+    }
+
+    // Calculate confidence based on source agreement
+    let num_sources = (audible.is_some() as u8) + (google.is_some() as u8) + 1; // +1 for folder
+    validation.title_confidence = if num_sources > 0 { ((title_matches + 1) * 100) / num_sources } else { 50 };
+    validation.author_confidence = if num_sources > 0 { ((author_matches + 1) * 100) / num_sources } else { 50 };
+
+    // Narrator confidence (only from Audible)
+    validation.narrator_confidence = if audible.map(|a| !a.narrators.is_empty()).unwrap_or(false) {
+        90 // Audible is authoritative for narrators
+    } else {
+        0
+    };
+
+    // Series confidence - check if sources agree
+    let mut series_names: Vec<String> = vec![];
+    if let Some(aud) = audible {
+        for s in &aud.series {
+            series_names.push(s.name.to_lowercase());
+        }
+    }
+    if let Some(ref folder_series) = folder_meta.series {
+        series_names.push(folder_series.to_lowercase());
+    }
+
+    // Dedupe and check agreement
+    series_names.sort();
+    series_names.dedup();
+    validation.series_confidence = match series_names.len() {
+        0 => 0,   // No series found
+        1 => 85,  // Single source
+        _ => {
+            // Check if series names are similar
+            let first = &series_names[0];
+            if series_names.iter().all(|s| titles_similar(s, first)) {
+                95 // Sources agree
+            } else {
+                validation.conflicts.push(format!("Series conflict: {:?}", series_names));
+                50 // Conflict
+            }
+        }
+    };
+
+    validation
 }
 
 fn read_file_tags(path: &str) -> FileTags {
@@ -203,7 +380,7 @@ pub async fn process_all_groups_with_options(
                 result
             }
         })
-        .buffer_unordered(50)  // High concurrency for maximum throughput
+        .buffer_unordered(15)  // Moderate concurrency to avoid API rate limiting
         .filter_map(|r| async { r.ok() })
         .collect()
         .await;
@@ -253,10 +430,21 @@ async fn process_book_group_with_options(
     match scan_mode {
         ScanMode::Normal => {
             // SKIP API CALLS if metadata was loaded from existing metadata.json
+            // BUT still fetch cover if missing
             if group.scan_status == ScanStatus::LoadedFromFile {
-                println!("   ⚡ Skipping API calls for '{}' (metadata.json exists)", group.metadata.title);
-                group.total_changes = calculate_changes(&mut group);
-                return Ok(group);
+                // Check if cover exists in cache or metadata
+                let cover_cache_key = format!("cover_{}", group.id);
+                let has_cached_cover = cache::get::<(Vec<u8>, String)>(&cover_cache_key).is_some();
+                let has_cover_url = group.metadata.cover_url.is_some();
+
+                if has_cached_cover || has_cover_url {
+                    println!("   ⚡ Skipping API calls for '{}' (metadata.json + cover exist)", group.metadata.title);
+                    group.total_changes = calculate_changes(&mut group);
+                    return Ok(group);
+                } else {
+                    // Continue to fetch cover only - don't skip entirely
+                    println!("   📷 Will fetch cover for '{}' (metadata.json exists but no cover)", group.metadata.title);
+                }
             }
         }
         ScanMode::RefreshMetadata => {
@@ -292,9 +480,20 @@ async fn process_book_group_with_options(
                 println!("   🔄 Selective refresh for '{}' (fields: {})", group.metadata.title, fields_str);
             }
         }
+        ScanMode::SuperScanner => {
+            // SuperScanner mode: Maximum accuracy - handled by separate function
+            // This case should not be reached as SuperScanner uses process_group_super_scanner
+            println!("   🔬 Super Scanner for '{}' (max accuracy mode)", group.metadata.title);
+        }
     }
 
-    let cache_key = format!("book_{}", group.group_name);
+    // Use the first file's parent directory path for cache key to ensure uniqueness
+    // This prevents collisions when different directories have the same folder name
+    let parent_path = std::path::Path::new(&group.files[0].path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| group.group_name.clone());
+    let cache_key = format!("book_{}", parent_path);
 
     // For selective refresh, don't use full cache - we need fresh API data for specific fields
     // For normal modes, check cache first
@@ -359,8 +558,15 @@ async fn process_book_group_with_options(
 
     let google_future = async {
         if let Some(ref api_key) = google_api_key {
-            fetch_google_books_data(&title_clone, &author_clone, api_key).await.ok().flatten()
+            match fetch_google_books_data(&title_clone, &author_clone, api_key).await {
+                Ok(data) => data,
+                Err(e) => {
+                    println!("   🔴 Google Books error: {}", e);
+                    None
+                }
+            }
         } else {
+            println!("   ⚠️ No Google Books API key configured");
             None
         }
     };
@@ -657,18 +863,20 @@ fn looks_like_author_name(name: &str) -> bool {
     }
 
     // Contains "Book" followed by a number or # - series info, not author
-    if let Ok(book_num_regex) = regex::Regex::new(r"(?i)book\s*[#]?\d") {
-        if book_num_regex.is_match(name) {
-            return false;
-        }
+    lazy_static::lazy_static! {
+        static ref BOOK_NUM_REGEX: regex::Regex = regex::Regex::new(r"(?i)book\s*[#]?\d").unwrap();
+    }
+    if BOOK_NUM_REGEX.is_match(name) {
+        return false;
     }
 
     // Common false positives - series names, descriptors, etc.
+    // NOTE: Removed words that could be legitimate names (Magic, Dark, Light, etc.)
+    // as they could match authors like "Magic Johnson" or "Light Yagami"
     let false_positives = [
-        "the ", "a ", "an ", "book", "volume", "vol", "part", "chapter",
-        "audiobook", "audio", "unabridged", "abridged", "complete",
-        "series", "trilogy", "saga", "collection", "tales", "stories",
-        "magic", "dark", "light", "world", "house", "mystery", "spooky",
+        "the ", "a ", "an ", "book ", "volume ", "vol ", "part ", "chapter ",
+        "audiobook", "audio ", "unabridged", "abridged", "complete ",
+        "series", "trilogy", "saga ", "collection", "tales ", "stories ",
     ];
     let name_lower = name.to_lowercase();
     for fp in &false_positives {
@@ -724,17 +932,18 @@ fn looks_like_author_name(name: &str) -> bool {
 /// Only extracts author if it clearly looks like a person's name
 fn parse_folder_for_book_info(folder_name: &str) -> (String, String) {
     // Pattern: "Author Name - Book Title" (with clear author name)
-    if let Ok(pattern) = regex::Regex::new(r"^([^-]+?)\s*[-–]\s*(.+)$") {
-        if let Some(caps) = pattern.captures(folder_name) {
-            if let (Some(potential_author), Some(title)) = (caps.get(1), caps.get(2)) {
-                let author_str = potential_author.as_str().trim().to_string();
-                let title_str = title.as_str().trim().to_string();
+    lazy_static::lazy_static! {
+        static ref AUTHOR_TITLE_PATTERN: regex::Regex = regex::Regex::new(r"^([^-]+?)\s*[-–]\s*(.+)$").unwrap();
+    }
+    if let Some(caps) = AUTHOR_TITLE_PATTERN.captures(folder_name) {
+        if let (Some(potential_author), Some(title)) = (caps.get(1), caps.get(2)) {
+            let author_str = potential_author.as_str().trim().to_string();
+            let title_str = title.as_str().trim().to_string();
 
-                // Only use if it really looks like an author name
-                if looks_like_author_name(&author_str) {
-                    println!("   📁 Parsed folder: author='{}', title='{}'", author_str, title_str);
-                    return (title_str, author_str);
-                }
+            // Only use if it really looks like an author name
+            if looks_like_author_name(&author_str) {
+                println!("   📁 Parsed folder: author='{}', title='{}'", author_str, title_str);
+                return (title_str, author_str);
             }
         }
     }
@@ -753,7 +962,6 @@ struct SeriesCandidate {
     name: String,
     position: Option<String>,
     source: String,  // "audible", "google", "folder", "gpt"
-    confidence: u8,  // 0-100
 }
 
 /// Collect series candidates from all available sources
@@ -781,7 +989,6 @@ fn collect_series_candidates(
                 name: series.name.clone(),
                 position: series.position.clone(),
                 source: "audible".to_string(),
-                confidence: 90,
             });
         }
     }
@@ -796,7 +1003,6 @@ fn collect_series_candidates(
                 name: series_name,
                 position,
                 source: "folder".to_string(),
-                confidence: 60,
             });
         }
     }
@@ -1024,7 +1230,7 @@ JSON:"#,
         year_instruction
     );
     
-    match call_gpt_api(&prompt, api_key, "gpt-4o-mini", 1000).await {
+    match call_gpt_api(&prompt, api_key, "gpt-5.1-codex-mini", 1000).await {
         Ok(json_str) => {
             match serde_json::from_str::<BookMetadata>(&json_str) {
                 Ok(mut metadata) => {
@@ -1196,29 +1402,7 @@ JSON:"#,
 // SUPPORTING FUNCTIONS (mostly unchanged)
 // ============================================================================
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
-struct AudibleMetadata {
-    asin: Option<String>,
-    title: Option<String>,
-    authors: Vec<String>,
-    narrators: Vec<String>,
-    series: Vec<AudibleSeries>,
-    publisher: Option<String>,
-    release_date: Option<String>,
-    description: Option<String>,
-    /// ISO language code (e.g., "en", "es")
-    language: Option<String>,
-    /// Runtime in minutes
-    runtime_minutes: Option<u32>,
-    /// Whether the audiobook is abridged
-    abridged: Option<bool>,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
-struct AudibleSeries {
-    name: String,
-    position: Option<String>,
-}
+// AudibleMetadata and AudibleSeries are now imported from crate::audible
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 struct GoogleBookData {
@@ -1408,6 +1592,7 @@ fn fallback_metadata(
         // Collection fields - detection happens in normalize_metadata
         is_collection: false,
         collection_books: vec![],
+        confidence: None,
     }
 }
 
@@ -1565,6 +1750,7 @@ fn create_metadata_from_audible(
         // Collection fields - detection happens in normalize_metadata
         is_collection: false,
         collection_books: vec![],
+        confidence: None,
     })
 }
 
@@ -1771,6 +1957,7 @@ pub async fn enrich_with_gpt(
                 // Collection fields
                 is_collection: false,
                 collection_books: vec![],
+                confidence: None,
             };
         }
     };
@@ -1849,7 +2036,7 @@ JSON:"#,
         crate::genres::APPROVED_GENRES.join(", ")
     );
     
-    match call_gpt_api(&prompt, api_key, "gpt-4o-mini", 800).await {
+    match call_gpt_api(&prompt, api_key, "gpt-5.1-codex-mini", 800).await {
         Ok(json_str) => {
             match serde_json::from_str::<serde_json::Value>(&json_str) {
                 Ok(json) => {
@@ -1951,6 +2138,7 @@ JSON:"#,
                         // Collection fields
                         is_collection: false,
                         collection_books: vec![],
+                        confidence: None,
                     })
                 }
                 Err(e) => {
@@ -1992,6 +2180,7 @@ JSON:"#,
                         // Collection fields
                         is_collection: false,
                         collection_books: vec![],
+                        confidence: None,
                     })
                 }
             }
@@ -2034,6 +2223,7 @@ JSON:"#,
                 // Collection fields
                 is_collection: false,
                 collection_books: vec![],
+                confidence: None,
             })
         }
     }
@@ -2046,71 +2236,137 @@ async fn call_gpt_api(
     max_tokens: u32
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::new();
-    
+
+    // GPT-5.1-codex models use the Responses API, others use Chat Completions
+    let is_gpt5_codex = model.contains("codex");
     let is_gpt5 = model.starts_with("gpt-5");
-    
-    let body = if is_gpt5 {
-        serde_json::json!({
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You extract audiobook metadata. Return ONLY valid JSON, no markdown."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
+
+    let (endpoint, body) = if is_gpt5_codex {
+        // GPT-5.1-codex models use the /v1/responses endpoint
+        let system_prompt = "You extract audiobook metadata. Return ONLY valid JSON, no markdown.";
+        let full_prompt = format!("{}\n\n{}", system_prompt, prompt);
+        (
+            "https://api.openai.com/v1/responses",
+            serde_json::json!({
+                "model": model,
+                "input": full_prompt,
+                "max_output_tokens": max_tokens,
+                "reasoning": {
+                    "effort": "low"
                 }
-            ],
-            "max_completion_tokens": max_tokens + 2000,
-            "reasoning_effort": "high"
-        })
+            })
+        )
+    } else if is_gpt5 {
+        // Non-codex GPT-5 models use Chat Completions with specific params
+        (
+            "https://api.openai.com/v1/chat/completions",
+            serde_json::json!({
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You extract audiobook metadata. Return ONLY valid JSON, no markdown."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "max_completion_tokens": max_tokens + 2000,
+                "reasoning_effort": "high"
+            })
+        )
     } else {
-        serde_json::json!({
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You extract audiobook metadata. Return ONLY valid JSON, no markdown."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "temperature": 0.3,
-            "max_tokens": max_tokens
-        })
+        // GPT-4 and earlier use Chat Completions with temperature
+        (
+            "https://api.openai.com/v1/chat/completions",
+            serde_json::json!({
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You extract audiobook metadata. Return ONLY valid JSON, no markdown."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0.3,
+                "max_tokens": max_tokens
+            })
+        )
     };
-    
+
     let response = client
-        .post("https://api.openai.com/v1/chat/completions")
+        .post(endpoint)
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&body)
         .send()
         .await?;
-    
+
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
         return Err(format!("GPT API error: {}", error_text).into());
     }
-    
+
     let response_text = response.text().await?;
-    
-    #[derive(serde::Deserialize)]
-    struct Response { choices: Vec<Choice> }
-    
-    #[derive(serde::Deserialize)]
-    struct Choice { message: Message }
-    
-    #[derive(serde::Deserialize)]
-    struct Message { content: String }
-    
-    let result: Response = serde_json::from_str(&response_text)?;
-    
-    let content = result.choices.first()
-        .ok_or("No GPT response")?
-        .message.content.trim();
+
+    // Parse response based on API type
+    let content = if is_gpt5_codex {
+        // Responses API format
+        #[derive(serde::Deserialize)]
+        struct ResponsesApiResponse {
+            output: Vec<OutputItem>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct OutputItem {
+            content: Option<Vec<ContentItem>>,
+            #[serde(rename = "type")]
+            item_type: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ContentItem {
+            text: Option<String>,
+            #[serde(rename = "type")]
+            content_type: String,
+        }
+
+        let result: ResponsesApiResponse = serde_json::from_str(&response_text)
+            .map_err(|e| format!("Failed to parse Responses API response: {}. Raw: {}", e, response_text))?;
+
+        // Find the message output and extract text
+        result.output.iter()
+            .filter(|item| item.item_type == "message")
+            .filter_map(|item| item.content.as_ref())
+            .flatten()
+            .filter(|c| c.content_type == "output_text")
+            .filter_map(|c| c.text.as_ref())
+            .next()
+            .ok_or("No text content in Responses API response")?
+            .trim()
+            .to_string()
+    } else {
+        // Chat Completions API format
+        #[derive(serde::Deserialize)]
+        struct ChatResponse { choices: Vec<Choice> }
+
+        #[derive(serde::Deserialize)]
+        struct Choice { message: Message }
+
+        #[derive(serde::Deserialize)]
+        struct Message { content: String }
+
+        let result: ChatResponse = serde_json::from_str(&response_text)?;
+
+        result.choices.first()
+            .ok_or("No GPT response")?
+            .message.content.trim().to_string()
+    };
+
+    let content = content.as_str();
     
     let json_str = content
         .trim_start_matches("```json")
@@ -2556,6 +2812,7 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
     let result = AudibleMetadata {
         asin: Some(asin),
         title: extracted_title,
+        subtitle: None,  // Audible scraping doesn't extract subtitles
         authors: extracted_authors,
         narrators: extracted_narrators,
         series: series_vec,
@@ -2984,7 +3241,7 @@ JSON:"#,
     );
     
     for attempt in 1..=2 {
-        match call_gpt_api(&prompt, api_key, "gpt-4o-mini", 300).await {
+        match call_gpt_api(&prompt, api_key, "gpt-5.1-codex-mini", 300).await {
             Ok(json_str) => {
                 match serde_json::from_str::<serde_json::Value>(&json_str) {
                     Ok(json) => {
@@ -3206,4 +3463,635 @@ fn calculate_changes(group: &mut BookGroup) -> usize {
     }
 
     total_changes
+}
+
+// ============================================================================
+// SUPER SCANNER MODE - Maximum accuracy with retries and multi-source validation
+// ============================================================================
+
+/// Process all book groups using SuperScanner mode
+/// This mode prioritizes accuracy over speed with:
+/// - Retry logic for all API calls (3 retries with exponential backoff)
+/// - Cross-validation between multiple sources
+/// - GPT verification on all books (not just incomplete ones)
+/// - Confidence scoring for metadata fields
+pub async fn process_all_groups_super_scanner(
+    groups: Vec<BookGroup>,
+    config: &Config,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<Vec<BookGroup>, Box<dyn std::error::Error + Send + Sync>> {
+    let total = groups.len();
+    let start_time = std::time::Instant::now();
+
+    println!("🔬 Super Scanner: Processing {} book groups (max accuracy mode)", total);
+    println!("   ⚙️ Retries: 3 per API, GPT validation: all books, Multi-source: enabled");
+
+    crate::progress::update_progress(0, total, "Super Scanner starting...");
+
+    let processed = Arc::new(AtomicUsize::new(0));
+    let covers_found = Arc::new(AtomicUsize::new(0));
+    let config = Arc::new(config.clone());
+
+    // Process with lower concurrency for Super Scanner (more API-intensive)
+    let results: Vec<BookGroup> = stream::iter(groups)
+        .map(|group| {
+            let config = config.clone();
+            let cancel_flag = cancel_flag.clone();
+            let processed = processed.clone();
+            let covers_found = covers_found.clone();
+            let total = total;
+
+            async move {
+                let result = process_group_super_scanner(
+                    group,
+                    &config,
+                    cancel_flag,
+                    covers_found.clone(),
+                ).await;
+
+                let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                let covers = covers_found.load(Ordering::Relaxed);
+
+                if done % 3 == 0 || done == total {
+                    let elapsed = start_time.elapsed().as_secs_f64();
+                    let rate = done as f64 / elapsed;
+                    crate::progress::update_progress(done, total,
+                        &format!("🔬 {}/{} books ({} covers) - {:.1}/sec", done, total, covers, rate)
+                    );
+                }
+
+                result
+            }
+        })
+        .buffer_unordered(5)  // Lower concurrency for Super Scanner (more thorough per book)
+        .filter_map(|r| async { r.ok() })
+        .collect()
+        .await;
+
+    let elapsed = start_time.elapsed();
+    let final_covers = covers_found.load(Ordering::Relaxed);
+    let books_per_sec = results.len() as f64 / elapsed.as_secs_f64();
+
+    println!("✅ Super Scanner complete: {} books, {} covers in {:.1}s ({:.2}/sec)",
+        results.len(), final_covers, elapsed.as_secs_f64(), books_per_sec);
+
+    Ok(results)
+}
+
+/// Process a single book group with SuperScanner mode
+/// Maximum accuracy: retries, cross-validation, GPT on all
+async fn process_group_super_scanner(
+    mut group: BookGroup,
+    config: &Config,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    covers_found: Arc<AtomicUsize>,
+) -> Result<BookGroup, Box<dyn std::error::Error + Send + Sync>> {
+    println!("🔬 Super Scanner: '{}'", group.group_name);
+
+    if let Some(ref flag) = cancel_flag {
+        if flag.load(Ordering::Relaxed) {
+            return Ok(group);
+        }
+    }
+
+    // Read first file's tags
+    let sample_file = &group.files[0];
+    let file_tags = read_file_tags(&sample_file.path);
+
+    let raw_file = RawFileData {
+        path: sample_file.path.clone(),
+        filename: sample_file.filename.clone(),
+        parent_dir: std::path::Path::new(&sample_file.path)
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .to_string_lossy()
+            .to_string(),
+        tags: file_tags.clone(),
+    };
+
+    // Extract title/author from folder (most reliable base)
+    let (extracted_title, extracted_author) = extract_book_info_with_priority(
+        &raw_file,
+        &group.group_name,
+        config.openai_api_key.as_deref()
+    ).await;
+
+    println!("   📂 Extracted: '{}' by '{}'", extracted_title, extracted_author);
+
+    if let Some(ref flag) = cancel_flag {
+        if flag.load(Ordering::Relaxed) {
+            return Ok(group);
+        }
+    }
+
+    // SUPER SCANNER: Fetch from ALL sources with retries
+    let title_clone = extracted_title.clone();
+    let author_clone = extracted_author.clone();
+    let google_api_key = config.google_books_api_key.clone();
+
+    // Audible with retries
+    let title_for_audible = extracted_title.clone();
+    let author_for_audible = extracted_author.clone();
+    let audible_data = with_retry("Audible", 3, 2000, || {
+        let t = title_for_audible.clone();
+        let a = author_for_audible.clone();
+        async move {
+            fetch_audible_metadata(&t, &a).await
+        }
+    }).await;
+
+    // Google Books with retries
+    let google_data = if let Some(ref api_key) = google_api_key {
+        let key = api_key.clone();
+        with_retry("Google Books", 3, 2000, || {
+            let t = title_clone.clone();
+            let a = author_clone.clone();
+            let k = key.clone();
+            async move {
+                match fetch_google_books_data(&t, &a, &k).await {
+                    Ok(data) => data,
+                    Err(e) => {
+                        println!("   🔴 Google Books error: {}", e);
+                        None
+                    }
+                }
+            }
+        }).await
+    } else {
+        println!("   ⚠️ No Google Books API key configured");
+        None
+    };
+
+    // Log source results
+    println!("   📊 Sources:");
+    println!("      Audible: {}", if audible_data.is_some() { "✅ Found" } else { "❌ None" });
+    println!("      Google:  {}", if google_data.is_some() { "✅ Found" } else { "❌ None" });
+
+    if let Some(ref flag) = cancel_flag {
+        if flag.load(Ordering::Relaxed) {
+            return Ok(group);
+        }
+    }
+
+    // SUPER SCANNER: Cross-validate sources
+    let validation = cross_validate_sources(
+        &group.metadata,
+        audible_data.as_ref(),
+        google_data.as_ref(),
+    );
+
+    if !validation.conflicts.is_empty() {
+        println!("   ⚠️ Conflicts detected:");
+        for conflict in &validation.conflicts {
+            println!("      - {}", conflict);
+        }
+    }
+
+    // SUPER SCANNER: ALWAYS use GPT for validation (with retries)
+    let final_metadata = if config.openai_api_key.is_some() {
+        let api_key = config.openai_api_key.clone();
+        let title = extracted_title.clone();
+        let author = extracted_author.clone();
+        let aud = audible_data.clone();
+        let goog = google_data.clone();
+        let val = validation.clone();
+        let file_tags_clone = file_tags.clone();
+        let folder_name = group.group_name.clone();
+
+        let gpt_result = with_retry("GPT validation", 3, 3000, || {
+            let api_key = api_key.clone();
+            let title = title.clone();
+            let author = author.clone();
+            let aud = aud.clone();
+            let goog = goog.clone();
+            let val = val.clone();
+            let file_tags = file_tags_clone.clone();
+            let folder = folder_name.clone();
+
+            async move {
+                merge_with_gpt_super_scanner(
+                    &title,
+                    &author,
+                    &folder,
+                    &file_tags,
+                    aud.as_ref(),
+                    goog.as_ref(),
+                    &val,
+                    api_key.as_deref(),
+                ).await
+            }
+        }).await;
+
+        match gpt_result {
+            Some(meta) => {
+                println!("   ✅ GPT validation complete");
+                meta
+            }
+            None => {
+                println!("   ⚠️ GPT failed, using fallback merge");
+                create_fallback_metadata_super(
+                    &extracted_title,
+                    &extracted_author,
+                    audible_data.as_ref(),
+                    google_data.as_ref(),
+                    &validation,
+                )
+            }
+        }
+    } else {
+        println!("   ⚠️ No OpenAI API key, using rule-based merge");
+        create_fallback_metadata_super(
+            &extracted_title,
+            &extracted_author,
+            audible_data.as_ref(),
+            google_data.as_ref(),
+            &validation,
+        )
+    };
+
+    group.metadata = final_metadata;
+    group.scan_status = ScanStatus::NewScan;
+
+    if let Some(ref flag) = cancel_flag {
+        if flag.load(Ordering::Relaxed) {
+            return Ok(group);
+        }
+    }
+
+    // SUPER SCANNER: Fetch cover with retries from multiple sources
+    let asin = group.metadata.asin.clone();
+    let isbn = group.metadata.isbn.clone();
+    let cover_title = group.metadata.title.clone();
+    let cover_author = group.metadata.author.clone();
+    let google_key = config.google_books_api_key.clone();
+
+    let cover = with_retry("Cover art", 3, 1500, || {
+        let asin = asin.clone();
+        let title = cover_title.clone();
+        let author = cover_author.clone();
+        let key = google_key.clone();
+
+        async move {
+            match crate::cover_art::fetch_and_download_cover(
+                &title,
+                &author,
+                asin.as_deref(),
+                key.as_deref(),
+            ).await {
+                Ok(cover) if cover.data.is_some() => Some(cover),
+                _ => None
+            }
+        }
+    }).await;
+
+    if let Some(cover) = cover {
+        if let Some(ref data) = cover.data {
+            let cover_cache_key = format!("cover_{}", group.id);
+            let mime_type = cover.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
+            let _ = cache::set(&cover_cache_key, &(data.clone(), mime_type.clone()));
+            group.metadata.cover_url = cover.url;
+            group.metadata.cover_mime = Some(mime_type);
+            covers_found.fetch_add(1, Ordering::Relaxed);
+            println!("   🖼️ Cover found");
+        }
+    } else {
+        println!("   ⚠️ No cover found");
+    }
+
+    // Cache the result
+    let parent_path = std::path::Path::new(&group.files[0].path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| group.group_name.clone());
+    let cache_key = format!("book_{}", parent_path);
+    let _ = cache::set(&cache_key, &group.metadata);
+
+    group.total_changes = calculate_changes(&mut group);
+
+    Ok(group)
+}
+
+/// GPT merge specifically for SuperScanner mode
+/// Includes conflict resolution and confidence scoring
+async fn merge_with_gpt_super_scanner(
+    extracted_title: &str,
+    extracted_author: &str,
+    folder_name: &str,
+    file_tags: &FileTags,
+    audible: Option<&AudibleMetadata>,
+    google: Option<&GoogleBookData>,
+    validation: &SourceValidation,
+    api_key: Option<&str>,
+) -> Option<BookMetadata> {
+    let api_key = api_key?;
+
+    // Build comprehensive prompt with all sources and conflicts
+    let audible_summary = if let Some(aud) = audible {
+        format!(
+            "Title: {:?}\nAuthors: {:?}\nNarrators: {:?}\nSeries: {:?}\nDescription: {:?}\nPublisher: {:?}\nASIN: {:?}",
+            aud.title, aud.authors, aud.narrators, aud.series,
+            aud.description.as_ref().map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d.clone() }),
+            aud.publisher, aud.asin
+        )
+    } else {
+        "Not found".to_string()
+    };
+
+    let google_summary = if let Some(goog) = google {
+        format!(
+            "Subtitle: {:?}\nDescription: {:?}\nPublisher: {:?}\nYear: {:?}\nGenres: {:?}\nISBN: {:?}",
+            goog.subtitle,
+            goog.description.as_ref().map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d.clone() }),
+            goog.publisher, goog.year, goog.genres, goog.isbn
+        )
+    } else {
+        "Not found".to_string()
+    };
+
+    let conflicts_summary = if validation.conflicts.is_empty() {
+        "None - sources agree".to_string()
+    } else {
+        validation.conflicts.join("\n")
+    };
+
+    let prompt = format!(r#"You are an audiobook metadata expert. Analyze these sources and provide the MOST ACCURATE metadata.
+
+FOLDER NAME: {}
+FILE TAGS:
+- Title: {:?}
+- Artist: {:?}
+- Album: {:?}
+- Genre: {:?}
+
+EXTRACTED:
+- Title: {}
+- Author: {}
+
+AUDIBLE DATA (trust for narrators, series, audiobook-specific):
+{}
+
+GOOGLE BOOKS DATA (trust for ISBN, publisher, description):
+{}
+
+CONFLICTS DETECTED:
+{}
+
+RULES:
+1. If sources conflict, prefer Audible for audiobook-specific data (narrators, runtime, ASIN)
+2. If sources conflict, prefer Google Books for print data (ISBN, publisher)
+3. Series name must NOT equal the book title
+4. Narrator must be a person's name, not "Recorded Books" or similar company names
+5. Author must be a real author name, not publisher or narrator
+6. Clean the title - remove series info, "Unabridged", narrator names
+7. For confidence scores: 90+ if multiple sources agree, 70-89 if single reliable source, below 70 if uncertain
+
+Return ONLY valid JSON (no markdown, no explanation):
+{{
+  "title": "cleaned book title",
+  "author": "primary author name",
+  "authors": ["all", "author", "names"],
+  "narrator": "primary narrator",
+  "narrators": ["all", "narrator", "names"],
+  "series": "series name or null",
+  "sequence": "book number or null",
+  "subtitle": "subtitle or null",
+  "description": "book description",
+  "publisher": "publisher name or null",
+  "year": "YYYY or null",
+  "genres": ["genre1", "genre2"],
+  "isbn": "ISBN-13 or null",
+  "asin": "ASIN or null",
+  "language": "en",
+  "confidence": {{
+    "title": 95,
+    "author": 90,
+    "narrator": 85,
+    "series": 75,
+    "overall": 85
+  }}
+}}"#,
+        folder_name,
+        file_tags.title, file_tags.artist, file_tags.album, file_tags.genre,
+        extracted_title, extracted_author,
+        audible_summary,
+        google_summary,
+        conflicts_summary
+    );
+
+    // Call GPT API
+    let response = match call_gpt_api(&prompt, api_key, "gpt-5.1-codex-mini", 1200).await {
+        Ok(r) => r,
+        Err(e) => {
+            println!("   ⚠️ GPT API error: {}", e);
+            return None;
+        }
+    };
+
+    // Parse response
+    parse_super_scanner_gpt_response(&response, extracted_title, extracted_author, audible, google)
+}
+
+/// Parse GPT response for SuperScanner mode
+fn parse_super_scanner_gpt_response(
+    response: &str,
+    fallback_title: &str,
+    fallback_author: &str,
+    audible: Option<&AudibleMetadata>,
+    google: Option<&GoogleBookData>,
+) -> Option<BookMetadata> {
+    // Try to extract JSON from response
+    let json_str = if let Some(start) = response.find('{') {
+        if let Some(end) = response.rfind('}') {
+            &response[start..=end]
+        } else {
+            response
+        }
+    } else {
+        response
+    };
+
+    let parsed: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("   ⚠️ Failed to parse GPT response: {}", e);
+            return None;
+        }
+    };
+
+    // Extract fields with fallbacks
+    let title = parsed["title"].as_str()
+        .filter(|t| !t.is_empty())
+        .unwrap_or(fallback_title)
+        .to_string();
+
+    let author = parsed["author"].as_str()
+        .filter(|a| !a.is_empty())
+        .unwrap_or(fallback_author)
+        .to_string();
+
+    let authors: Vec<String> = parsed["authors"].as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_else(|| vec![author.clone()]);
+
+    let narrator = parsed["narrator"].as_str().map(|s| s.to_string());
+    let narrators: Vec<String> = parsed["narrators"].as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    let series = parsed["series"].as_str()
+        .filter(|s| !s.is_empty() && s.to_lowercase() != title.to_lowercase())
+        .map(|s| s.to_string());
+
+    let sequence = parsed["sequence"].as_str().map(|s| s.to_string());
+
+    let subtitle = parsed["subtitle"].as_str().map(|s| s.to_string());
+
+    let description = parsed["description"].as_str().map(|s| s.to_string());
+
+    let publisher = parsed["publisher"].as_str().map(|s| s.to_string());
+
+    let year = parsed["year"].as_str().map(|s| s.to_string());
+
+    let genres: Vec<String> = parsed["genres"].as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    let isbn = parsed["isbn"].as_str().map(|s| s.to_string())
+        .or_else(|| google.and_then(|g| g.isbn.clone()));
+
+    let asin = parsed["asin"].as_str().map(|s| s.to_string())
+        .or_else(|| audible.and_then(|a| a.asin.clone()));
+
+    let language = parsed["language"].as_str().map(|s| s.to_string());
+
+    // Parse confidence scores
+    let confidence = if let Some(conf_obj) = parsed["confidence"].as_object() {
+        Some(MetadataConfidence {
+            title: conf_obj.get("title").and_then(|v| v.as_u64()).unwrap_or(75) as u8,
+            author: conf_obj.get("author").and_then(|v| v.as_u64()).unwrap_or(75) as u8,
+            narrator: conf_obj.get("narrator").and_then(|v| v.as_u64()).unwrap_or(0) as u8,
+            series: conf_obj.get("series").and_then(|v| v.as_u64()).unwrap_or(0) as u8,
+            overall: conf_obj.get("overall").and_then(|v| v.as_u64()).unwrap_or(70) as u8,
+            sources_used: vec!["GPT".to_string(), "Audible".to_string(), "Google Books".to_string()],
+        })
+    } else {
+        Some(MetadataConfidence {
+            title: 75,
+            author: 75,
+            narrator: if narrator.is_some() { 70 } else { 0 },
+            series: if series.is_some() { 60 } else { 0 },
+            overall: 70,
+            sources_used: vec!["GPT".to_string()],
+        })
+    };
+
+    // Get additional fields from Audible if available
+    let (runtime_minutes, abridged, explicit) = audible
+        .map(|a| (a.runtime_minutes, a.abridged, None::<bool>))
+        .unwrap_or((None, None, None));
+
+    Some(BookMetadata {
+        title,
+        author,
+        authors,
+        subtitle,
+        narrator,
+        narrators,
+        series,
+        sequence,
+        genres,
+        description,
+        publisher,
+        year,
+        isbn,
+        asin,
+        cover_url: None,
+        cover_mime: None,
+        language,
+        abridged,
+        runtime_minutes,
+        explicit,
+        publish_date: None,
+        sources: None,
+        is_collection: false,
+        collection_books: vec![],
+        confidence,
+    })
+}
+
+/// Create fallback metadata when GPT fails in SuperScanner mode
+fn create_fallback_metadata_super(
+    title: &str,
+    author: &str,
+    audible: Option<&AudibleMetadata>,
+    google: Option<&GoogleBookData>,
+    validation: &SourceValidation,
+) -> BookMetadata {
+    // Prefer Audible for audiobook-specific fields
+    let narrator = audible.and_then(|a| a.narrators.first().cloned());
+    let narrators = audible.map(|a| a.narrators.clone()).unwrap_or_default();
+    let series = audible.and_then(|a| a.series.first().map(|s| s.name.clone()));
+    let sequence = audible.and_then(|a| a.series.first().and_then(|s| s.position.clone()));
+    let asin = audible.and_then(|a| a.asin.clone());
+    let runtime_minutes = audible.and_then(|a| a.runtime_minutes);
+    let abridged = audible.and_then(|a| a.abridged);
+
+    // Prefer Google for print-specific fields
+    let subtitle = google.and_then(|g| g.subtitle.clone());
+    let description = audible.and_then(|a| a.description.clone())
+        .or_else(|| google.and_then(|g| g.description.clone()));
+    let publisher = audible.and_then(|a| a.publisher.clone())
+        .or_else(|| google.and_then(|g| g.publisher.clone()));
+    let year = audible.and_then(|a| a.release_date.as_ref().and_then(|d| d.get(0..4).map(|s| s.to_string())))
+        .or_else(|| google.and_then(|g| g.year.clone()));
+    let genres = google.map(|g| g.genres.clone()).unwrap_or_default();
+    let isbn = google.and_then(|g| g.isbn.clone());
+    let language = audible.and_then(|a| a.language.clone());
+
+    // Authors - prefer Audible
+    let authors = audible.map(|a| a.authors.clone())
+        .unwrap_or_else(|| vec![author.to_string()]);
+
+    // Build confidence based on validation
+    let confidence = Some(MetadataConfidence {
+        title: validation.title_confidence,
+        author: validation.author_confidence,
+        narrator: validation.narrator_confidence,
+        series: validation.series_confidence,
+        overall: (validation.title_confidence + validation.author_confidence) / 2,
+        sources_used: {
+            let mut sources = vec!["Folder".to_string()];
+            if audible.is_some() { sources.push("Audible".to_string()); }
+            if google.is_some() { sources.push("Google Books".to_string()); }
+            sources
+        },
+    });
+
+    BookMetadata {
+        title: title.to_string(),
+        author: author.to_string(),
+        authors,
+        subtitle,
+        narrator,
+        narrators,
+        series,
+        sequence,
+        genres,
+        description,
+        publisher,
+        year,
+        isbn,
+        asin,
+        cover_url: None,
+        cover_mime: None,
+        language,
+        abridged,
+        runtime_minutes,
+        explicit: None,
+        publish_date: None,
+        sources: None,
+        is_collection: false,
+        collection_books: vec![],
+        confidence,
+    }
 }
