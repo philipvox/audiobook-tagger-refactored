@@ -96,7 +96,8 @@ export function useScan() {
         covers_found: 0,
       });
 
-      // Poll for progress
+      // Poll for progress - use 1 second interval to reduce IPC overhead
+      // Progress updates don't need to be more frequent than this
       progressIntervalRef.current = setInterval(async () => {
         try {
           const progress = await invoke('get_scan_progress');
@@ -115,7 +116,7 @@ export function useScan() {
         } catch (error) {
           // Ignore polling errors
         }
-      }, 500);
+      }, 1000);
 
       try {
         // Pass scan mode to backend
@@ -306,23 +307,22 @@ export function useScan() {
         } catch (error) {
           // Ignore
         }
-      }, 500);
+      }, 1000);
 
       try {
+        // Batch all paths in a single scan_library call for better performance
+        // The Rust backend handles parallel processing internally
         let allNewGroups = [];
-        for (const path of paths) {
-          try {
-            // Pass scan_mode parameter for configurable rescan behavior
-            const result = await invoke('scan_library', {
-              paths: [path],
-              scanMode: scanMode
-            });
-            if (result && result.groups) {
-              allNewGroups.push(...result.groups);
-            }
-          } catch (error) {
-            console.error(`Failed to scan ${path}:`, error);
+        try {
+          const result = await invoke('scan_library', {
+            paths: paths,  // Pass all paths at once
+            scanMode: scanMode
+          });
+          if (result && result.groups) {
+            allNewGroups = result.groups;
           }
+        } catch (error) {
+          console.error('Failed to scan paths:', error);
         }
 
         setGroups(prevGroups => {

@@ -84,7 +84,8 @@ fn write_m4a_tags_sync(
                 }
             },
             "year" => {
-                if let Ok(_year) = change.new.parse::<u32>() {
+                // Validate year is a valid number before setting
+                if change.new.parse::<u32>().is_ok() {
                     tag.set_year(change.new.clone());
                 }
             },

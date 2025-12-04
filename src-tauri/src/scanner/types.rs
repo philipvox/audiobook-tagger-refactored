@@ -122,6 +122,8 @@ pub enum ScanMode {
     ForceFresh,
     /// Re-fetch only specified fields (selective refresh)
     SelectiveRefresh,
+    /// Maximum accuracy mode: retries, multi-source validation, GPT on all books
+    SuperScanner,
 }
 
 /// Specifies which metadata fields to refresh during a selective rescan
@@ -175,6 +177,30 @@ impl SelectiveRefreshFields {
             all: true,
         }
     }
+}
+
+/// Confidence scores for metadata fields (0-100)
+/// Used by SuperScanner to indicate data quality
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MetadataConfidence {
+    /// Confidence in title accuracy (0-100)
+    #[serde(default)]
+    pub title: u8,
+    /// Confidence in author accuracy (0-100)
+    #[serde(default)]
+    pub author: u8,
+    /// Confidence in narrator accuracy (0-100)
+    #[serde(default)]
+    pub narrator: u8,
+    /// Confidence in series accuracy (0-100)
+    #[serde(default)]
+    pub series: u8,
+    /// Overall metadata confidence (0-100)
+    #[serde(default)]
+    pub overall: u8,
+    /// List of sources that contributed to this metadata
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources_used: Vec<String>,
 }
 
 /// Priority order for metadata sources (higher = more trusted)
@@ -279,6 +305,11 @@ pub struct BookMetadata {
     /// List of individual book titles if this is a collection
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collection_books: Vec<String>,
+
+    // CONFIDENCE TRACKING (SuperScanner)
+    /// Confidence scores for metadata accuracy (only set by SuperScanner mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<MetadataConfidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -38,7 +38,7 @@ pub async fn import_folders(paths: Vec<String>) -> Result<scanner::ScanResult, S
 }
 
 /// Scan library with configurable scan mode
-/// - scan_mode: "normal", "refresh_metadata", "force_fresh", or "selective_refresh"
+/// - scan_mode: "normal", "refresh_metadata", "force_fresh", "selective_refresh", or "super_scanner"
 /// - force: Legacy parameter, if true uses force_fresh mode
 /// - selective_fields: Optional JSON object specifying which fields to refresh (for selective_refresh mode)
 #[tauri::command]
@@ -55,6 +55,7 @@ pub async fn scan_library(
             "refresh_metadata" => ScanMode::RefreshMetadata,
             "force_fresh" => ScanMode::ForceFresh,
             "selective_refresh" => ScanMode::SelectiveRefresh,
+            "super_scanner" => ScanMode::SuperScanner,
             _ => {
                 println!("⚠️ Unknown scan mode '{}', using normal", mode_str);
                 ScanMode::Normal
