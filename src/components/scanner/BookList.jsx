@@ -1,10 +1,83 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, Filter, X, Download, FolderPlus, Sparkles, FileJson, Zap } from 'lucide-react';
+import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, Filter, X, Download, FolderPlus, Sparkles, FileJson, Zap, Cloud, Tag, ArrowRight } from 'lucide-react';
 
 // Virtualized item height (approximate)
 const ITEM_HEIGHT = 140;
 const BUFFER_SIZE = 10;
+
+// Inline change preview tooltip component
+function ChangePreviewTooltip({ group, position }) {
+  if (!group || !group.files) return null;
+
+  // Collect all changes from all files in the group
+  const allChanges = {};
+  group.files.forEach(file => {
+    if (file.changes) {
+      Object.entries(file.changes).forEach(([field, change]) => {
+        // Use the first file's change for each field as representative
+        if (!allChanges[field]) {
+          allChanges[field] = change;
+        }
+      });
+    }
+  });
+
+  const changeEntries = Object.entries(allChanges);
+  if (changeEntries.length === 0) return null;
+
+  const fieldColors = {
+    title: 'text-blue-600',
+    author: 'text-purple-600',
+    narrator: 'text-green-600',
+    genre: 'text-orange-600',
+    year: 'text-gray-600',
+    series: 'text-indigo-600',
+    publisher: 'text-pink-600',
+  };
+
+  return (
+    <div
+      className="absolute z-50 bg-white border border-gray-200 rounded-lg shadow-xl p-3 w-72 pointer-events-none"
+      style={{
+        left: position.x,
+        top: position.y,
+        transform: 'translateX(-50%)',
+      }}
+    >
+      <div className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
+        <span className="w-2 h-2 bg-amber-400 rounded-full"></span>
+        Pending Changes Preview
+      </div>
+      <div className="space-y-2 max-h-48 overflow-y-auto">
+        {changeEntries.slice(0, 5).map(([field, change]) => (
+          <div key={field} className="text-xs">
+            <span className={`font-semibold capitalize ${fieldColors[field] || 'text-gray-600'}`}>
+              {field}:
+            </span>
+            <div className="flex items-start gap-1 mt-0.5 pl-2">
+              <span className="text-red-500 line-through truncate max-w-[100px]" title={change.old || '(empty)'}>
+                {change.old || <em className="text-gray-400">(empty)</em>}
+              </span>
+              <ArrowRight className="w-3 h-3 text-gray-400 flex-shrink-0 mt-0.5" />
+              <span className="text-green-600 truncate max-w-[100px] font-medium" title={change.new || '(empty)'}>
+                {change.new || <em className="text-gray-400">(empty)</em>}
+              </span>
+            </div>
+          </div>
+        ))}
+        {changeEntries.length > 5 && (
+          <div className="text-[10px] text-gray-500 italic pt-1 border-t border-gray-100">
+            +{changeEntries.length - 5} more changes...
+          </div>
+        )}
+      </div>
+      <div className="text-[10px] text-gray-400 mt-2 pt-2 border-t border-gray-100">
+        Click to view full details
+      </div>
+    </div>
+  );
+}
 
 export function BookList({
   groups,
@@ -20,6 +93,8 @@ export function BookList({
   onSelectFile,
   onScan,
   onImport,
+  onImportFromAbs,
+  onCleanupAllGenres,
   scanning,
   onSelectAll,
   onClearSelection,
@@ -31,6 +106,10 @@ export function BookList({
   const coverLoadingRef = useRef(new Set());
   const blobUrlsRef = useRef(new Map());
 
+  // Hover preview state
+  const [hoverPreview, setHoverPreview] = useState({ group: null, position: { x: 0, y: 0 } });
+  const hoverTimeoutRef = useRef(null);
+
   // Search and filter state
   const [searchQuery, setSearchQuery] = useState('');
   const [showFilters, setShowFilters] = useState(false);
@@ -40,7 +119,26 @@ export function BookList({
     hasChanges: null,  // null = all, true = has changes, false = no changes
     genre: '',         // empty = all, or specific genre
     scanStatus: '',    // empty = all, 'new_scan' = freshly scanned, 'loaded_from_file' = loaded from metadata.json
+    confidenceLevel: '', // empty = all, 'low' = <60%, 'medium' = 60-84%, 'high' = 85%+
   });
+
+  // Calculate confidence statistics for triage view
+  const confidenceStats = useMemo(() => {
+    let low = 0, medium = 0, high = 0, noConfidence = 0;
+    groups.forEach(group => {
+      const confidence = group.metadata?.confidence?.overall;
+      if (confidence === undefined || confidence === null) {
+        noConfidence++;
+      } else if (confidence < 60) {
+        low++;
+      } else if (confidence < 85) {
+        medium++;
+      } else {
+        high++;
+      }
+    });
+    return { low, medium, high, noConfidence, total: groups.length };
+  }, [groups]);
 
   // Get unique genres from all groups
   const availableGenres = useMemo(() => {
@@ -99,6 +197,14 @@ export function BookList({
         if (filters.scanStatus !== group.scan_status) return false;
       }
 
+      // Confidence level filter
+      if (filters.confidenceLevel) {
+        const confidence = metadata.confidence?.overall;
+        if (filters.confidenceLevel === 'low' && (confidence === undefined || confidence >= 60)) return false;
+        if (filters.confidenceLevel === 'medium' && (confidence === undefined || confidence < 60 || confidence >= 85)) return false;
+        if (filters.confidenceLevel === 'high' && (confidence === undefined || confidence < 85)) return false;
+      }
+
       return true;
     });
   }, [groups, searchQuery, filters, coverCache]);
@@ -112,11 +218,54 @@ export function BookList({
       hasChanges: null,
       genre: '',
       scanStatus: '',
+      confidenceLevel: '',
     });
   };
 
   const hasActiveFilters = searchQuery || filters.hasCover !== null ||
-    filters.hasSeries !== null || filters.hasChanges !== null || filters.genre || filters.scanStatus;
+    filters.hasSeries !== null || filters.hasChanges !== null || filters.genre ||
+    filters.scanStatus || filters.confidenceLevel;
+
+  // Hover preview handlers
+  const handleChangesBadgeHover = useCallback((group, event) => {
+    if (group.total_changes === 0) return;
+
+    // Clear any pending timeout
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+    }
+
+    // Delay showing tooltip slightly for better UX
+    hoverTimeoutRef.current = setTimeout(() => {
+      const rect = event.target.getBoundingClientRect();
+      const listRect = listRef.current?.getBoundingClientRect() || { left: 0, top: 0 };
+
+      setHoverPreview({
+        group,
+        position: {
+          x: rect.left - listRect.left + rect.width / 2,
+          y: rect.bottom - listRect.top + 8,
+        },
+      });
+    }, 300);
+  }, []);
+
+  const handleChangesBadgeLeave = useCallback(() => {
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+      hoverTimeoutRef.current = null;
+    }
+    setHoverPreview({ group: null, position: { x: 0, y: 0 } });
+  }, []);
+
+  // Cleanup hover timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (hoverTimeoutRef.current) {
+        clearTimeout(hoverTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Cleanup blob URLs on unmount
   useEffect(() => {
@@ -153,11 +302,15 @@ export function BookList({
   // Debounced scroll handler
   const scrollTimeoutRef = useRef(null);
   const debouncedScroll = useCallback((e) => {
+    // Dismiss hover preview on scroll
+    if (hoverPreview.group) {
+      setHoverPreview({ group: null, position: { x: 0, y: 0 } });
+    }
     if (scrollTimeoutRef.current) {
       cancelAnimationFrame(scrollTimeoutRef.current);
     }
     scrollTimeoutRef.current = requestAnimationFrame(() => handleScroll(e));
-  }, [handleScroll]);
+  }, [handleScroll, hoverPreview.group]);
 
   // Load covers only for visible groups
   useEffect(() => {
@@ -254,10 +407,21 @@ export function BookList({
                   Import Without Scanning
                 </button>
               )}
+              {onImportFromAbs && (
+                <button
+                  onClick={onImportFromAbs}
+                  disabled={scanning}
+                  className="w-full px-4 py-2 bg-gradient-to-r from-purple-500 to-indigo-500 text-white rounded-lg hover:from-purple-600 hover:to-indigo-600 transition-colors font-medium disabled:opacity-50 text-sm flex items-center justify-center gap-2"
+                >
+                  <Cloud className="w-4 h-4" />
+                  Import from ABS Library
+                </button>
+              )}
             </div>
             <div className="mt-4 text-xs text-gray-500 space-y-1">
               <p><strong>Smart Scan:</strong> Skips books with existing metadata</p>
               <p><strong>Clean Scan:</strong> Fetches fresh data for all books</p>
+              <p><strong>Import from ABS:</strong> Load books from AudiobookShelf</p>
             </div>
           </div>
         </div>
@@ -294,6 +458,70 @@ export function BookList({
             )}
           </div>
         </div>
+
+        {/* Triage Quick Filters */}
+        {(confidenceStats.low > 0 || confidenceStats.medium > 0 || confidenceStats.high > 0) && (
+          <div className="px-3 pb-2 flex items-center gap-2">
+            <span className="text-[10px] text-gray-500 uppercase font-semibold">Triage:</span>
+            <button
+              onClick={() => setFilters(f => ({ ...f, confidenceLevel: f.confidenceLevel === 'low' ? '' : 'low' }))}
+              className={`px-2 py-1 text-xs rounded-md transition-all flex items-center gap-1.5 ${
+                filters.confidenceLevel === 'low'
+                  ? 'bg-red-100 text-red-700 border border-red-300 shadow-sm'
+                  : 'bg-white border border-gray-200 text-gray-600 hover:bg-red-50 hover:border-red-200'
+              }`}
+              title="Show low confidence books that need review"
+            >
+              <span>🔴</span>
+              <span>Needs Review</span>
+              {confidenceStats.low > 0 && (
+                <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                  filters.confidenceLevel === 'low' ? 'bg-red-200 text-red-800' : 'bg-gray-100 text-gray-600'
+                }`}>
+                  {confidenceStats.low}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => setFilters(f => ({ ...f, confidenceLevel: f.confidenceLevel === 'medium' ? '' : 'medium' }))}
+              className={`px-2 py-1 text-xs rounded-md transition-all flex items-center gap-1.5 ${
+                filters.confidenceLevel === 'medium'
+                  ? 'bg-yellow-100 text-yellow-700 border border-yellow-300 shadow-sm'
+                  : 'bg-white border border-gray-200 text-gray-600 hover:bg-yellow-50 hover:border-yellow-200'
+              }`}
+              title="Show medium confidence books to verify"
+            >
+              <span>🟡</span>
+              <span>Verify</span>
+              {confidenceStats.medium > 0 && (
+                <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                  filters.confidenceLevel === 'medium' ? 'bg-yellow-200 text-yellow-800' : 'bg-gray-100 text-gray-600'
+                }`}>
+                  {confidenceStats.medium}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => setFilters(f => ({ ...f, confidenceLevel: f.confidenceLevel === 'high' ? '' : 'high' }))}
+              className={`px-2 py-1 text-xs rounded-md transition-all flex items-center gap-1.5 ${
+                filters.confidenceLevel === 'high'
+                  ? 'bg-green-100 text-green-700 border border-green-300 shadow-sm'
+                  : 'bg-white border border-gray-200 text-gray-600 hover:bg-green-50 hover:border-green-200'
+              }`}
+              title="Show high confidence books ready to write"
+            >
+              <span>🟢</span>
+              <span>Ready</span>
+              {confidenceStats.high > 0 && (
+                <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                  filters.confidenceLevel === 'high' ? 'bg-green-200 text-green-800' : 'bg-gray-100 text-gray-600'
+                }`}>
+                  {confidenceStats.high}
+                </span>
+              )}
+            </button>
+          </div>
+        )}
 
         {/* Filter Toggle & Stats */}
         <div className="px-3 pb-3 flex items-center justify-between">
@@ -332,6 +560,28 @@ export function BookList({
               >
                 <FolderPlus className="w-3 h-3" />
                 Import
+              </button>
+            )}
+            {onImportFromAbs && (
+              <button
+                onClick={onImportFromAbs}
+                disabled={scanning}
+                className="px-2 py-1 text-xs bg-purple-600 hover:bg-purple-700 text-white rounded-md transition-colors flex items-center gap-1 disabled:opacity-50"
+                title="Import books from AudiobookShelf library"
+              >
+                <Cloud className="w-3 h-3" />
+                ABS
+              </button>
+            )}
+            {onCleanupAllGenres && groups.length > 0 && (
+              <button
+                onClick={onCleanupAllGenres}
+                disabled={scanning}
+                className="px-2 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded-md transition-colors flex items-center gap-1 disabled:opacity-50"
+                title="Clean all genres and push to ABS"
+              >
+                <Tag className="w-3 h-3" />
+                Clean & Push
               </button>
             )}
             {onExport && (
@@ -430,9 +680,16 @@ export function BookList({
       {/* Virtualized Book Groups List */}
       <div
         ref={listRef}
-        className="flex-1 overflow-y-auto"
+        className="flex-1 overflow-y-auto relative"
         onScroll={debouncedScroll}
       >
+        {/* Hover preview tooltip */}
+        {hoverPreview.group && (
+          <ChangePreviewTooltip
+            group={hoverPreview.group}
+            position={hoverPreview.position}
+          />
+        )}
         {/* No results message */}
         {filteredGroups.length === 0 && groups.length > 0 && (
           <div className="flex items-center justify-center p-8">
@@ -504,6 +761,22 @@ export function BookList({
                             {metadata.title}
                           </h4>
                           <div className="flex items-center gap-1 flex-shrink-0">
+                            {/* Confidence Badge */}
+                            {metadata.confidence && (
+                              <span
+                                className={`px-1.5 py-0.5 text-[10px] rounded-full font-medium ${
+                                  metadata.confidence.overall >= 85
+                                    ? 'bg-green-100 text-green-700'
+                                    : metadata.confidence.overall >= 60
+                                      ? 'bg-yellow-100 text-yellow-700'
+                                      : 'bg-red-100 text-red-700'
+                                }`}
+                                title={`Confidence: ${metadata.confidence.overall}%`}
+                              >
+                                {metadata.confidence.overall >= 85 ? '🟢' : metadata.confidence.overall >= 60 ? '🟡' : '🔴'}
+                                {metadata.confidence.overall}%
+                              </span>
+                            )}
                             {/* Scan Status Badge */}
                             {group.scan_status === 'new_scan' && (
                               <span className="px-2 py-0.5 bg-cyan-100 text-cyan-700 text-[10px] rounded-full font-medium flex items-center gap-1" title="Freshly scanned from APIs">
@@ -518,7 +791,12 @@ export function BookList({
                               </span>
                             )}
                             {group.total_changes > 0 && (
-                              <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded-full font-medium">
+                              <span
+                                className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded-full font-medium cursor-help hover:bg-yellow-200 transition-colors"
+                                onMouseEnter={(e) => handleChangesBadgeHover(group, e)}
+                                onMouseLeave={handleChangesBadgeLeave}
+                                title={`${group.total_changes} pending changes - hover for preview`}
+                              >
                                 {group.total_changes}
                               </span>
                             )}
@@ -593,10 +871,10 @@ export function BookList({
                     </div>
                   </div>
                   
-                  {/* Expanded Files */}
+                  {/* Expanded Files - Shows chapter order for ABS */}
                   {expandedGroups.has(group.id) && (
                     <div className="bg-gray-50 border-t border-gray-200">
-                      {group.files.map((file) => (
+                      {group.files.map((file, fileIndex) => (
                         <div
                           key={file.id}
                           className="px-4 py-3 hover:bg-gray-100 transition-colors border-b border-gray-200 last:border-b-0"
@@ -610,12 +888,17 @@ export function BookList({
                               }}
                               className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
                             />
-                            
+
+                            {/* Chapter number badge */}
+                            <span className="flex-shrink-0 w-7 h-5 bg-purple-100 text-purple-700 rounded text-xs font-bold flex items-center justify-center">
+                              {fileIndex + 1}
+                            </span>
+
                             <div className="flex items-center gap-2">
                               {getFileStatusIcon(file.id)}
                               <FileAudio className="w-4 h-4 text-gray-400" />
                             </div>
-                            
+
                             <div className="flex-1 min-w-0">
                               <div className="text-sm text-gray-900 truncate">
                                 {file.filename}

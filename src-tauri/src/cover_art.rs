@@ -16,11 +16,12 @@ pub enum CoverSource {
     Audible,
     Amazon,
     GoogleBooks,
-    OpenLibrary,
     LibraryThing,
     UserProvided,
     Embedded,
     Unknown,
+    /// Cover retrieved via AudiobookShelf search API
+    Abs,
 }
 
 impl std::fmt::Display for CoverSource {
@@ -30,11 +31,11 @@ impl std::fmt::Display for CoverSource {
             CoverSource::Audible => write!(f, "Audible"),
             CoverSource::Amazon => write!(f, "Amazon"),
             CoverSource::GoogleBooks => write!(f, "Google Books"),
-            CoverSource::OpenLibrary => write!(f, "Open Library"),
             CoverSource::LibraryThing => write!(f, "LibraryThing"),
             CoverSource::UserProvided => write!(f, "User Provided"),
             CoverSource::Embedded => write!(f, "Embedded"),
             CoverSource::Unknown => write!(f, "Unknown"),
+            CoverSource::Abs => write!(f, "AudiobookShelf"),
         }
     }
 }
@@ -94,9 +95,9 @@ impl CoverCandidate {
         score += match self.source {
             CoverSource::ITunes => 30,       // Most reliable
             CoverSource::Audible => 28,
+            CoverSource::Abs => 28,          // Same as Audible (proxied provider)
             CoverSource::Amazon => 25,
             CoverSource::GoogleBooks => 20,
-            CoverSource::OpenLibrary => 15,
             CoverSource::LibraryThing => 15,
             CoverSource::UserProvided => 30, // Trust user
             CoverSource::Embedded => 25,     // Already in file
@@ -329,20 +330,54 @@ pub async fn fetch_and_download_cover(
     asin: Option<&str>,
     _google_api_key: Option<&str>, // Kept for API compatibility, but unused
 ) -> Result<CoverArt, Box<dyn std::error::Error + Send + Sync>> {
+    // Use the new function with no pre-fetched URL
+    fetch_and_download_cover_with_url(title, author, asin, None).await
+}
+
+/// Fetch cover art, optionally using a pre-fetched cover URL to avoid duplicate API calls
+/// If pre_fetched_url is provided, it will be tried first before searching other sources
+pub async fn fetch_and_download_cover_with_url(
+    title: &str,
+    author: &str,
+    asin: Option<&str>,
+    pre_fetched_url: Option<&str>,
+) -> Result<CoverArt, Box<dyn std::error::Error + Send + Sync>> {
     println!("   🖼️  Searching for cover art...");
-    
-    // PRIORITY 1: iTunes/Apple Books (highest quality, up to 2048x2048, most consistent)
+
+    // PRIORITY 0: Use pre-fetched URL if available (from ABS metadata search)
+    // This avoids duplicate API calls since we already searched ABS for metadata
+    let has_prefetched = pre_fetched_url.map(|u| !u.is_empty()).unwrap_or(false);
+    if let Some(url) = pre_fetched_url {
+        if !url.is_empty() {
+            println!("   ⚡ Using pre-fetched cover URL from metadata: {}", url);
+            if let Ok(cover) = download_cover(url).await {
+                if cover.data.is_some() {
+                    println!("   ✅ Cover downloaded from pre-fetched URL");
+                    return Ok(cover);
+                }
+            }
+            println!("   ⚠️  Pre-fetched cover URL failed, falling back to search...");
+        }
+    }
+
+    // PRIORITY 1: ABS Cover Search (if configured) - uses Audible/Google/iTunes waterfall
+    // Pass has_prefetched to skip the redundant metadata search if we already tried
+    if let Some(cover) = fetch_cover_via_abs_with_flag(title, author, has_prefetched).await {
+        return Ok(cover);
+    }
+
+    // PRIORITY 2: iTunes/Apple Books (highest quality, up to 2048x2048, most consistent)
     if let Some(cover) = fetch_itunes_cover(title, author).await {
         return Ok(cover);
     }
-    
-    // PRIORITY 2: Audible (high quality, up to 2400x2400, but requires ASIN)
+
+    // PRIORITY 3: Audible (high quality, up to 2400x2400, but requires ASIN)
     if let Some(asin_str) = asin {
         if let Some(cover) = fetch_audible_cover(asin_str).await {
             return Ok(cover);
         }
     }
-    
+
     // No cover found
     println!("   ⚠️  No cover art found from any source");
     Ok(CoverArt {
@@ -352,10 +387,85 @@ pub async fn fetch_and_download_cover(
     })
 }
 
+/// Fetch cover via AudiobookShelf search API (preferred when ABS is configured)
+async fn fetch_cover_via_abs(title: &str, author: &str) -> Option<CoverArt> {
+    fetch_cover_via_abs_with_flag(title, author, false).await
+}
+
+/// Fetch cover via AudiobookShelf search API with option to skip metadata search
+/// skip_metadata_search: set to true if we already tried fetching cover from metadata URL
+async fn fetch_cover_via_abs_with_flag(title: &str, author: &str, skip_metadata_search: bool) -> Option<CoverArt> {
+    // Load config to check ABS availability
+    let config = match crate::config::load_config() {
+        Ok(cfg) => cfg,
+        Err(_) => return None,
+    };
+
+    if !crate::abs_search::is_abs_configured(&config) {
+        return None;
+    }
+
+    println!("   🔍 Trying ABS cover search...");
+
+    // Try the cover search endpoint (dedicated cover API)
+    if let Some(result) = crate::abs_search::search_cover_waterfall(&config, title, author).await {
+        // Download the cover from the URL provided by ABS
+        if let Ok(cover) = download_cover(&result.url).await {
+            if cover.data.is_some() {
+                println!("   ✅ ABS cover found (provider: {})", result.provider);
+                return Some(cover);
+            }
+        }
+    }
+
+    // Also check if the metadata search returned a cover URL
+    // SKIP this if we already tried a pre-fetched cover URL from metadata (to avoid duplicate API calls)
+    if !skip_metadata_search {
+        if let Some(meta_result) = crate::abs_search::search_metadata_waterfall(&config, title, author).await {
+            if let Some(cover_url) = meta_result.cover {
+                if !cover_url.is_empty() {
+                    if let Ok(cover) = download_cover(&cover_url).await {
+                        if cover.data.is_some() {
+                            println!("   ✅ ABS cover found from metadata");
+                            return Some(cover);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Clean title for cover search - removes ASINs, ISBNs, and other noise
+fn clean_title_for_cover_search(title: &str) -> String {
+    let mut clean = title.to_string();
+
+    // Remove ASIN patterns like [B09MF5TVBR] or (B09MF5TVBR)
+    if let Ok(asin_regex) = regex::Regex::new(r"\s*[\[\(][A-Z0-9]{10}[\]\)]\s*") {
+        clean = asin_regex.replace_all(&clean, "").to_string();
+    }
+
+    // Remove ISBN patterns like [978-0123456789] or (9780123456789)
+    if let Ok(isbn_regex) = regex::Regex::new(r"\s*[\[\(][\d\-]{10,17}[\]\)]\s*") {
+        clean = isbn_regex.replace_all(&clean, "").to_string();
+    }
+
+    // Remove year patterns like [2022] or (2022)
+    if let Ok(year_regex) = regex::Regex::new(r"\s*[\[\(]\d{4}[\]\)]\s*") {
+        clean = year_regex.replace_all(&clean, "").to_string();
+    }
+
+    clean.trim().to_string()
+}
+
 async fn fetch_itunes_cover(title: &str, author: &str) -> Option<CoverArt> {
     println!("   🍎 Trying iTunes/Apple Books cover...");
-    
-    let search_query = format!("{} {}", title, author);
+
+    // Clean title before searching
+    let clean_title = clean_title_for_cover_search(title);
+    let search_query = format!("{} {}", clean_title, author);
     let search_url = format!(
         "https://itunes.apple.com/search?term={}&media=audiobook&entity=audiobook&limit=1",
         urlencoding::encode(&search_query)
@@ -555,59 +665,8 @@ async fn download_cover(url: &str) -> Result<CoverArt, Box<dyn std::error::Error
 }
 
 // ============================================================================
-// NEW COVER SOURCES
+// ADDITIONAL COVER SOURCES
 // ============================================================================
-
-/// Fetch cover from Open Library using ISBN
-/// URL: https://covers.openlibrary.org/b/isbn/{ISBN}-L.jpg
-/// Sizes: S (small), M (medium), L (large ~500px)
-pub async fn fetch_openlibrary_cover(isbn: &str) -> Option<CoverCandidate> {
-    println!("   📖 Trying Open Library cover (ISBN: {})...", isbn);
-
-    // Clean ISBN - remove hyphens and spaces
-    let clean_isbn = isbn.replace(['-', ' '], "");
-    if clean_isbn.is_empty() {
-        return None;
-    }
-
-    // Try large size first
-    let url = format!("https://covers.openlibrary.org/b/isbn/{}-L.jpg", clean_isbn);
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
-
-    // First do a HEAD request to check if image exists and get size
-    let response = client.head(&url).send().await.ok()?;
-
-    if !response.status().is_success() {
-        println!("   ⚠️  No Open Library cover found");
-        return None;
-    }
-
-    // Check content-length to detect placeholder images (usually very small)
-    let content_length = response
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(0);
-
-    // Open Library returns a 1x1 transparent gif for missing covers (~43 bytes)
-    if content_length < 1000 {
-        println!("   ⚠️  Open Library returned placeholder image");
-        return None;
-    }
-
-    let mut candidate = CoverCandidate::new(url, CoverSource::OpenLibrary)
-        .with_dimensions(500, 500); // Approximate L size
-    candidate.file_size = content_length;
-    candidate.calculate_score();
-
-    println!("   ✅ Open Library cover found");
-    Some(candidate)
-}
 
 /// Fetch cover from LibraryThing using ISBN and dev key
 /// URL: https://covers.librarything.com/devkey/{KEY}/large/isbn/{ISBN}
@@ -898,7 +957,7 @@ pub async fn search_all_cover_sources_with_key(
     let mut candidates = Vec::new();
 
     // Use tokio::join! for parallel fetching
-    let (itunes_result, audible_result, google_result, openlibrary_result, librarything_result) = tokio::join!(
+    let (itunes_result, audible_result, google_result, librarything_result) = tokio::join!(
         fetch_itunes_candidates(title, author),
         async {
             if let Some(asin_str) = asin {
@@ -908,13 +967,6 @@ pub async fn search_all_cover_sources_with_key(
             }
         },
         fetch_google_books_cover(title, author),
-        async {
-            if let Some(isbn_str) = isbn {
-                fetch_openlibrary_cover(isbn_str).await
-            } else {
-                None
-            }
-        },
         async {
             if let (Some(isbn_str), Some(key)) = (isbn, librarything_key) {
                 fetch_librarything_cover(isbn_str, key).await
@@ -929,9 +981,6 @@ pub async fn search_all_cover_sources_with_key(
     candidates.extend(audible_result);
     if let Some(google) = google_result {
         candidates.push(google);
-    }
-    if let Some(openlibrary) = openlibrary_result {
-        candidates.push(openlibrary);
     }
     if let Some(librarything) = librarything_result {
         candidates.push(librarything);

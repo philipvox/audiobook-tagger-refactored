@@ -16,6 +16,89 @@ const SOURCE_CONFIG = {
   unknown: { label: '?', color: 'bg-gray-100 text-gray-500 border-gray-200', icon: Database },
 };
 
+// Confidence level configuration
+const getConfidenceConfig = (score) => {
+  if (score >= 85) return { label: 'High', color: 'bg-green-500', textColor: 'text-green-700', bgColor: 'bg-green-50', borderColor: 'border-green-200', emoji: '🟢' };
+  if (score >= 60) return { label: 'Medium', color: 'bg-yellow-500', textColor: 'text-yellow-700', bgColor: 'bg-yellow-50', borderColor: 'border-yellow-200', emoji: '🟡' };
+  return { label: 'Low', color: 'bg-red-500', textColor: 'text-red-700', bgColor: 'bg-red-50', borderColor: 'border-red-200', emoji: '🔴' };
+};
+
+// Confidence indicator component
+function ConfidenceIndicator({ confidence }) {
+  if (!confidence) return null;
+
+  const config = getConfidenceConfig(confidence.overall);
+
+  return (
+    <div className={`rounded-xl border ${config.borderColor} ${config.bgColor} p-4`}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-lg">{config.emoji}</span>
+          <span className={`font-semibold ${config.textColor}`}>
+            {config.label} Confidence
+          </span>
+        </div>
+        <span className={`text-2xl font-bold ${config.textColor}`}>
+          {confidence.overall}%
+        </span>
+      </div>
+
+      {/* Progress bar */}
+      <div className="h-2 bg-gray-200 rounded-full overflow-hidden mb-3">
+        <div
+          className={`h-full ${config.color} transition-all duration-300`}
+          style={{ width: `${confidence.overall}%` }}
+        />
+      </div>
+
+      {/* Per-field breakdown */}
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500">Title</span>
+          <span className={`font-medium ${getConfidenceConfig(confidence.title).textColor}`}>
+            {confidence.title}%
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500">Author</span>
+          <span className={`font-medium ${getConfidenceConfig(confidence.author).textColor}`}>
+            {confidence.author}%
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500">Narrator</span>
+          <span className={`font-medium ${getConfidenceConfig(confidence.narrator).textColor}`}>
+            {confidence.narrator}%
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500">Series</span>
+          <span className={`font-medium ${getConfidenceConfig(confidence.series).textColor}`}>
+            {confidence.series}%
+          </span>
+        </div>
+      </div>
+
+      {/* Sources used */}
+      {confidence.sources_used && confidence.sources_used.length > 0 && (
+        <div className="mt-3 pt-3 border-t border-gray-200">
+          <div className="text-xs text-gray-500 mb-1">Sources</div>
+          <div className="flex flex-wrap gap-1">
+            {confidence.sources_used.map((source, idx) => (
+              <span
+                key={idx}
+                className="px-2 py-0.5 bg-white rounded text-xs font-medium text-gray-600 border border-gray-200"
+              >
+                {source}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Small badge showing data source
 function SourceBadge({ source }) {
   if (!source) return null;
@@ -391,31 +474,32 @@ export function MetadataPanel({ group, onEdit }) {
                 </div>
               )}
 
-              {/* File Details */}
+              {/* File Details - Shows chapter order for ABS */}
               {group && group.files && group.files.length > 0 && (
                 <div className="pt-6 border-t border-gray-200">
                   <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">
-                    Files ({group.files.length})
+                    Chapter Order ({group.files.length} files)
                   </div>
-                  <div className="space-y-2">
-                    {group.files.slice(0, 5).map((file, idx) => (
-                      <div key={idx} className="text-sm text-gray-600 truncate font-mono bg-gray-50 px-3 py-2 rounded-lg border border-gray-100">
-                        {file.filename}
+                  <div className="space-y-1">
+                    {group.files.map((file, idx) => (
+                      <div key={idx} className="text-sm text-gray-600 truncate font-mono bg-gray-50 px-3 py-2 rounded-lg border border-gray-100 flex items-center gap-2">
+                        <span className="flex-shrink-0 w-8 h-6 bg-purple-100 text-purple-700 rounded text-xs font-bold flex items-center justify-center">
+                          {idx + 1}
+                        </span>
+                        <span className="truncate">{file.filename}</span>
                       </div>
                     ))}
-                    {group.files.length > 5 && (
-                      <div className="text-sm text-gray-500 italic pl-3">
-                        + {group.files.length - 5} more files
-                      </div>
-                    )}
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Right Column - Cover Art */}
+            {/* Right Column - Cover Art & Confidence */}
             <div className="lg:col-span-1">
               <div className="sticky top-6 space-y-4">
+                {/* Confidence Indicator */}
+                <ConfidenceIndicator confidence={metadata.confidence} />
+
                 <div className="aspect-[2/3] bg-gradient-to-br from-gray-100 to-gray-200 rounded-2xl shadow-xl overflow-hidden border-4 border-white ring-1 ring-gray-200 relative">
                   {coverUrl ? (
                     <>

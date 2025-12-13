@@ -2,13 +2,42 @@
 // ULTRA-FAST: Write metadata.json files instead of modifying audio tags
 
 use crate::{scanner, tag_inspector};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::Emitter;
 use futures::stream::{self, StreamExt};
 use std::path::Path;
+
+/// Stores information needed to undo a write operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoEntry {
+    pub folder_path: String,
+    pub original_content: Option<String>,  // None if file didn't exist
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoState {
+    pub entries: Vec<UndoEntry>,
+    pub write_timestamp: u64,
+    pub books_written: usize,
+}
+
+impl Default for UndoState {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            write_timestamp: 0,
+            books_written: 0,
+        }
+    }
+}
+
+/// Global undo state - stores the last write operation for undo
+static UNDO_STATE: Lazy<Mutex<UndoState>> = Lazy::new(|| Mutex::new(UndoState::default()));
 
 #[derive(Debug, Deserialize)]
 pub struct WriteRequest {
@@ -74,8 +103,12 @@ pub async fn write_tags(
     request: WriteRequest
 ) -> Result<WriteResult, String> {
     let total_files = request.file_ids.len();
-    
-    println!("⚡ FAST JSON WRITE: {} files", total_files);
+
+    // Load config for concurrency settings
+    let config = crate::config::Config::load().unwrap_or_default();
+    let json_write_concurrency = config.get_concurrency(crate::config::ConcurrencyOp::JsonWrites);
+
+    println!("⚡ FAST JSON WRITE: {} files (concurrency: {})", total_files, json_write_concurrency);
     
     // ✅ PHASE 1: Grouping files
     let _ = window.emit("write_progress", serde_json::json!({
@@ -126,9 +159,50 @@ pub async fn write_tags(
     let success_count = Arc::new(AtomicUsize::new(0));
     let failed_count = Arc::new(AtomicUsize::new(0));
     let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
-    
+
     // Process each book folder - write ONE metadata.json per book
     let books_vec: Vec<_> = books.into_iter().collect();
+
+    // ✅ PHASE 1.5: Save undo state BEFORE writing
+    let _ = window.emit("write_progress", serde_json::json!({
+        "phase": "preparing_undo",
+        "message": "Saving original state for undo capability...",
+        "current": 0,
+        "total": total_books
+    }));
+
+    let undo_entries: Vec<UndoEntry> = books_vec.iter()
+        .map(|(folder_path, _)| {
+            let json_path = Path::new(folder_path).join("metadata.json");
+            let original_content = if json_path.exists() {
+                std::fs::read_to_string(&json_path).ok()
+            } else {
+                None
+            };
+            UndoEntry {
+                folder_path: folder_path.clone(),
+                original_content,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            }
+        })
+        .collect();
+
+    // Store undo state before writing
+    if let Ok(mut undo_state) = UNDO_STATE.lock() {
+        *undo_state = UndoState {
+            entries: undo_entries,
+            write_timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            books_written: total_books,
+        };
+    }
+
+    println!("   💾 Saved undo state for {} book folders", total_books);
     
     stream::iter(books_vec)
         .map(|(folder_path, files)| {
@@ -191,7 +265,7 @@ pub async fn write_tags(
                 }
             }
         })
-        .buffer_unordered(100)  // 100 concurrent JSON writes - super fast!
+        .buffer_unordered(json_write_concurrency)
         .collect::<Vec<_>>()
         .await;
     
@@ -365,4 +439,152 @@ async fn save_cover_to_folder(folder_path: &str, cover_url: &str) -> Result<(), 
 #[tauri::command]
 pub async fn inspect_file_tags(file_path: String) -> Result<tag_inspector::RawTags, String> {
     tag_inspector::inspect_file_tags(&file_path).map_err(|e| e.to_string())
+}
+
+/// Get undo status - returns info about the last write operation that can be undone
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoStatus {
+    pub available: bool,
+    pub books_count: usize,
+    pub timestamp: u64,
+    pub age_seconds: u64,
+}
+
+#[tauri::command]
+pub async fn get_undo_status() -> Result<UndoStatus, String> {
+    let undo_state = UNDO_STATE.lock()
+        .map_err(|e| format!("Failed to lock undo state: {}", e))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let age_seconds = now.saturating_sub(undo_state.write_timestamp);
+
+    // Undo is available if we have entries and they're less than 1 hour old
+    let available = !undo_state.entries.is_empty() && age_seconds < 3600;
+
+    Ok(UndoStatus {
+        available,
+        books_count: undo_state.books_written,
+        timestamp: undo_state.write_timestamp,
+        age_seconds,
+    })
+}
+
+/// Undo the last write operation - restores original metadata.json files
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoResult {
+    pub success: usize,
+    pub failed: usize,
+    pub restored: usize,
+    pub deleted: usize,
+    pub errors: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn undo_last_write(window: tauri::Window) -> Result<UndoResult, String> {
+    // Get and clear the undo state
+    let undo_state = {
+        let mut state = UNDO_STATE.lock()
+            .map_err(|e| format!("Failed to lock undo state: {}", e))?;
+        std::mem::take(&mut *state)
+    };
+
+    if undo_state.entries.is_empty() {
+        return Err("No write operation to undo".to_string());
+    }
+
+    let total = undo_state.entries.len();
+    let mut success = 0;
+    let mut failed = 0;
+    let mut restored = 0;
+    let mut deleted = 0;
+    let mut errors = Vec::new();
+
+    println!("⏪ UNDO: Restoring {} book folders...", total);
+
+    let _ = window.emit("undo_progress", serde_json::json!({
+        "phase": "undoing",
+        "message": format!("Undoing changes to {} book folders...", total),
+        "current": 0,
+        "total": total
+    }));
+
+    for (idx, entry) in undo_state.entries.iter().enumerate() {
+        let json_path = Path::new(&entry.folder_path).join("metadata.json");
+
+        let result = match &entry.original_content {
+            Some(content) => {
+                // Restore original content
+                match std::fs::write(&json_path, content) {
+                    Ok(()) => {
+                        restored += 1;
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("{}: {}", json_path.display(), e))
+                }
+            }
+            None => {
+                // File didn't exist before - delete it
+                if json_path.exists() {
+                    match std::fs::remove_file(&json_path) {
+                        Ok(()) => {
+                            deleted += 1;
+                            Ok(())
+                        }
+                        Err(e) => Err(format!("{}: {}", json_path.display(), e))
+                    }
+                } else {
+                    Ok(()) // Already doesn't exist
+                }
+            }
+        };
+
+        match result {
+            Ok(()) => success += 1,
+            Err(e) => {
+                failed += 1;
+                errors.push(e);
+            }
+        }
+
+        // Progress every 50 items
+        if (idx + 1) % 50 == 0 || idx + 1 == total {
+            let _ = window.emit("undo_progress", serde_json::json!({
+                "phase": "undoing",
+                "message": format!("Restoring... {}/{}", idx + 1, total),
+                "current": idx + 1,
+                "total": total
+            }));
+        }
+    }
+
+    let _ = window.emit("undo_progress", serde_json::json!({
+        "phase": "complete",
+        "message": format!("Undo complete: {} restored, {} deleted", restored, deleted),
+        "current": total,
+        "total": total
+    }));
+
+    println!("✅ UNDO COMPLETE: {} restored, {} deleted, {} failed", restored, deleted, failed);
+
+    Ok(UndoResult {
+        success,
+        failed,
+        restored,
+        deleted,
+        errors,
+    })
+}
+
+/// Clear undo state (e.g., after confirming changes are good)
+#[tauri::command]
+pub async fn clear_undo_state() -> Result<(), String> {
+    if let Ok(mut state) = UNDO_STATE.lock() {
+        *state = UndoState::default();
+    }
+    println!("🗑️ Cleared undo state");
+    Ok(())
 }

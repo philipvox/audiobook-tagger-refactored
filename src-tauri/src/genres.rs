@@ -422,9 +422,8 @@ JSON:"#,
         approved_genres
     );
     
-    println!("          📤 Sending to OpenAI Responses API...");
+    println!("          📤 Sending to GPT-5-nano API...");
 
-    // GPT-5.1-codex-mini uses the Responses API endpoint
     let system_prompt = "You clean audiobook metadata. Return ONLY valid JSON, no markdown.";
     let full_prompt = format!("{}\n\n{}", system_prompt, prompt);
 
@@ -434,11 +433,11 @@ JSON:"#,
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
-            "model": "gpt-5.1-codex-mini",
+            "model": "gpt-5-nano",
             "input": full_prompt,
             "max_output_tokens": 1000,
-            "reasoning": {
-                "effort": "low"
+            "text": {
+                "verbosity": "low"
             }
         }))
         .send()
@@ -452,7 +451,7 @@ JSON:"#,
 
     let response_text = response.text().await?;
 
-    // Parse the Responses API format
+    // Parse the OpenAI Responses API format
     #[derive(serde::Deserialize)]
     struct ResponsesApiResponse {
         output: Vec<OutputItem>,
@@ -473,17 +472,17 @@ JSON:"#,
     }
 
     let responses_result: ResponsesApiResponse = serde_json::from_str(&response_text)
-        .map_err(|e| anyhow::anyhow!("Failed to parse Responses API: {}. Raw: {}", e, response_text))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse GPT-5-nano response: {}. Raw: {}", e, response_text))?;
 
     // Extract text content from the response
     let content = responses_result.output.iter()
         .filter(|item| item.item_type == "message")
         .filter_map(|item| item.content.as_ref())
         .flatten()
-        .filter(|c| c.content_type == "output_text")
+        .filter(|c| c.content_type == "output_text" || c.content_type == "text")
         .filter_map(|c| c.text.as_ref())
         .next()
-        .ok_or_else(|| anyhow::anyhow!("No text content in Responses API response"))?;
+        .ok_or_else(|| anyhow::anyhow!("No text content in GPT-5-nano response"))?;
 
     let json_str = content.trim()
         .trim_start_matches("```json").trim_start_matches("```")

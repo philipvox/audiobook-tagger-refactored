@@ -67,6 +67,10 @@ async fn fetch_covers_for_groups(
     groups: Vec<BookGroup>,
     cancel_flag: Option<Arc<AtomicBool>>
 ) -> Vec<BookGroup> {
+    // Load config for concurrency settings
+    let config = Config::load().unwrap_or_default();
+    let file_scan_concurrency = config.get_concurrency(crate::config::ConcurrencyOp::FileScan);
+
     let total = groups.len();
     let processed = Arc::new(AtomicUsize::new(0));
     let covers_found = Arc::new(AtomicUsize::new(0));
@@ -146,7 +150,7 @@ async fn fetch_covers_for_groups(
                 group
             }
         })
-        .buffer_unordered(10)  // Moderate concurrency to avoid API rate limiting
+        .buffer_unordered(file_scan_concurrency)
         .collect()
         .await;
 
@@ -158,16 +162,18 @@ pub async fn scan_directories(
     cancel_flag: Option<Arc<AtomicBool>>,
     scan_mode: ScanMode
 ) -> Result<ScanResult, Box<dyn std::error::Error + Send + Sync>> {
-    scan_directories_with_options(paths, cancel_flag, scan_mode, None).await
+    scan_directories_with_options(paths, cancel_flag, scan_mode, None, false).await
 }
 
 /// Scan directories with selective refresh options
 /// selective_fields: If provided with SelectiveRefresh mode, only these fields will be refreshed
+/// enable_transcription: If true, use Whisper to transcribe audio intros for book verification
 pub async fn scan_directories_with_options(
     paths: &[String],
     cancel_flag: Option<Arc<AtomicBool>>,
     scan_mode: ScanMode,
-    selective_fields: Option<SelectiveRefreshFields>
+    selective_fields: Option<SelectiveRefreshFields>,
+    enable_transcription: bool
 ) -> Result<ScanResult, Box<dyn std::error::Error + Send + Sync>> {
     let fields_desc = if let Some(ref fields) = selective_fields {
         let mut selected = Vec::new();
@@ -185,7 +191,9 @@ pub async fn scan_directories_with_options(
     } else {
         String::new()
     };
-    println!("🔍 Starting scan of {} paths (mode={:?}){}", paths.len(), scan_mode, fields_desc);
+    let transcription_desc = if enable_transcription { " [+audio verification]" } else { "" };
+    println!("🔍 Starting scan of {} paths (mode={:?}){}{}",
+        paths.len(), scan_mode, fields_desc, transcription_desc);
 
     // ✅ THIS LINE MUST BE HERE
     crate::progress::reset_progress();
@@ -247,6 +255,7 @@ pub async fn scan_directories_with_options(
             groups,
             &config,
             cancel_flag.clone(),
+            enable_transcription,
         ).await?
     } else {
         // All other modes use standard processor
@@ -255,7 +264,8 @@ pub async fn scan_directories_with_options(
             &config,
             cancel_flag.clone(),
             scan_mode,
-            selective_fields
+            selective_fields,
+            enable_transcription,
         ).await?
     };
 

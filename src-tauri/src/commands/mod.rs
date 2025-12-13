@@ -11,6 +11,11 @@ pub mod audible;
 pub mod covers;
 pub mod export;
 pub mod chapters;
+pub mod folder_fixer;
+pub mod smart_rename;
+pub mod duplicates;
+pub mod genres;
+pub mod converter;
 
 // Re-export all commands for easy access
 // pub use config::*;

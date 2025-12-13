@@ -17,6 +17,12 @@ mod commands;
 mod cover_art;
 mod normalize;  // Text normalization utilities
 mod chapters;   // Chapter detection and splitting
+mod folder_fixer;  // AI-powered folder organization
+mod smart_rename;  // AI-powered smart rename
+mod abs_search;  // AudiobookShelf search API client
+mod whisper;     // OpenAI Whisper audio transcription
+mod duplicate_finder;  // Find duplicate audiobooks in library
+mod converter;         // MP3 to M4B conversion
 
 // use tauri::Manager;
 
@@ -38,6 +44,9 @@ fn main() {
             commands::scan::rescan_fields,
             commands::tags::write_tags,
             commands::tags::inspect_file_tags,
+            commands::tags::get_undo_status,
+            commands::tags::undo_last_write,
+            commands::tags::clear_undo_state,
             commands::rename::preview_rename,
             commands::rename::rename_files,
             commands::rename::get_rename_templates,
@@ -46,6 +55,9 @@ fn main() {
             commands::abs::force_abs_rescan,
             commands::abs::restart_abs_docker,
             commands::abs::clear_abs_cache,
+            commands::abs::import_from_abs,
+            commands::abs::rescan_abs_imports,
+            commands::abs::push_abs_imports,
             commands::maintenance::clear_cache,
             commands::maintenance::get_cache_stats,
             commands::maintenance::normalize_genres,
@@ -77,6 +89,35 @@ fn main() {
             commands::chapters::merge_chapters,
             commands::chapters::adjust_chapter_boundary,
             commands::chapters::restore_original_file,
+            // Folder Fixer commands
+            commands::folder_fixer::analyze_folders,
+            commands::folder_fixer::apply_fixes,
+            commands::folder_fixer::detect_chapter_folders,
+            commands::folder_fixer::merge_chapter_folders,
+            commands::folder_fixer::preview_organization,
+            commands::folder_fixer::reorganize_to_abs_structure,
+            commands::folder_fixer::restructure_library,
+            // Smart Rename commands
+            commands::smart_rename::analyze_smart_rename,
+            commands::smart_rename::apply_smart_renames,
+            // Duplicate Finder commands
+            commands::duplicates::scan_for_duplicates,
+            commands::duplicates::get_duplicate_details,
+            commands::duplicates::delete_duplicate,
+            commands::duplicates::move_duplicate_to_trash,
+            // Genre cleanup commands
+            commands::genres::cleanup_genres,
+            commands::genres::normalize_genres_local,
+            commands::genres::get_approved_genres,
+            // Converter commands (MP3 to M4B)
+            commands::converter::check_ffmpeg_available,
+            commands::converter::analyze_for_conversion,
+            commands::converter::estimate_output_size,
+            commands::converter::convert_to_m4b,
+            commands::converter::cancel_conversion,
+            commands::converter::delete_source_files_after_conversion,
+            commands::converter::get_quality_presets,
+            commands::converter::get_speed_presets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

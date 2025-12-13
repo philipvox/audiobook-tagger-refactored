@@ -1,6 +1,112 @@
 // src-tauri/src/scanner/types.rs
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+
+/// Helper to deserialize a value that can be either a string or an integer into Option<String>
+/// GPT sometimes returns numbers as integers instead of strings
+fn deserialize_string_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct StringOrIntVisitor;
+
+    impl<'de> Visitor<'de> for StringOrIntVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string, integer, or null")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_any(StringOrIntInnerVisitor)
+        }
+    }
+
+    struct StringOrIntInnerVisitor;
+
+    impl<'de> Visitor<'de> for StringOrIntInnerVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or integer")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(value.to_string()))
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(value))
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(value.to_string()))
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(value.to_string()))
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            // For floats, check if it's a whole number
+            if value.fract() == 0.0 {
+                Ok(Some((value as i64).to_string()))
+            } else {
+                Ok(Some(value.to_string()))
+            }
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_option(StringOrIntVisitor)
+}
 
 /// Metadata source - where did this piece of data come from?
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -12,8 +118,6 @@ pub enum MetadataSource {
     Folder,
     /// Scraped from Audible
     Audible,
-    /// Retrieved from Google Books API
-    GoogleBooks,
     /// Retrieved from iTunes/Apple Books API
     ITunes,
     /// Cleaned/enhanced by GPT
@@ -22,6 +126,8 @@ pub enum MetadataSource {
     Manual,
     /// Unknown/default source
     Unknown,
+    /// Retrieved via AudiobookShelf search API (proxied Audible/Google/iTunes)
+    Abs,
 }
 
 impl Default for MetadataSource {
@@ -215,14 +321,12 @@ pub enum SourcePriority {
     Unknown = 3,
     /// iTunes/Apple Books API
     ITunes = 4,
-    /// Google Books API
-    GoogleBooks = 5,
     /// Audible scraping (highly reliable for audiobooks)
-    Audible = 6,
+    Audible = 5,
     /// GPT-enhanced (validated against APIs)
-    Gpt = 7,
+    Gpt = 6,
     /// User manually entered (highest trust)
-    Manual = 8,
+    Manual = 7,
 }
 
 impl From<MetadataSource> for SourcePriority {
@@ -232,11 +336,30 @@ impl From<MetadataSource> for SourcePriority {
             MetadataSource::Folder => SourcePriority::Folder,
             MetadataSource::Unknown => SourcePriority::Unknown,
             MetadataSource::ITunes => SourcePriority::ITunes,
-            MetadataSource::GoogleBooks => SourcePriority::GoogleBooks,
             MetadataSource::Audible => SourcePriority::Audible,
+            MetadataSource::Abs => SourcePriority::Audible, // Same priority as Audible (proxied)
             MetadataSource::Gpt => SourcePriority::Gpt,
             MetadataSource::Manual => SourcePriority::Manual,
         }
+    }
+}
+
+/// Represents a single series entry with name, position, and source
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SeriesInfo {
+    /// Series name (e.g., "Merlin Missions", "Magic Tree House")
+    pub name: String,
+    /// Position/sequence in this series (e.g., "1", "2.5", "1-3")
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_string_or_int")]
+    pub sequence: Option<String>,
+    /// Where this series info came from
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<MetadataSource>,
+}
+
+impl SeriesInfo {
+    pub fn new(name: String, sequence: Option<String>, source: Option<MetadataSource>) -> Self {
+        Self { name, sequence, source }
     }
 }
 
@@ -252,15 +375,19 @@ pub struct BookMetadata {
     pub narrator: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub series: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_string_or_int")]
     pub sequence: Option<String>,
+    /// Multiple series support - books can belong to multiple series
+    /// e.g., "Magic Tree House: Merlin Missions" belongs to both "Magic Tree House" AND "Merlin Missions"
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub all_series: Vec<SeriesInfo>,
     #[serde(default)]
     pub genres: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_string_or_int")]
     pub year: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isbn: Option<String>,

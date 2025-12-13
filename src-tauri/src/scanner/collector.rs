@@ -6,8 +6,132 @@ use std::path::Path;
 use walkdir::WalkDir;
 use std::collections::HashMap;
 use serde::Deserialize;
+use rayon::prelude::*;
 
 const AUDIO_EXTENSIONS: &[&str] = &["m4b", "m4a", "mp3", "flac", "ogg", "opus", "aac"];
+
+/// Extract a sort key from filename for chapter ordering
+/// Returns a single number for sorting - higher = later in order
+///
+/// Handles various formats:
+/// - "01 - Chapter 1.mp3" -> 1 (track number)
+/// - "1-01 Opening.mp3" -> 101 (disc 1 * 100 + track 1)
+/// - "2-12 End Credits.mp3" -> 212 (disc 2 * 100 + track 12)
+/// - "Track 05.mp3" -> 5
+/// - "Chapter 10.mp3" -> 10
+fn extract_sort_key(filename: &str) -> u32 {
+    let name = filename.to_lowercase();
+
+    // Pattern 1: "D-TT" or "DD-TT" format (disc-track)
+    // e.g., "1-01", "2-12", "01-05"
+    // These are multi-disc rips, sort by disc*100 + track
+    if let Some(caps) = regex::Regex::new(r"^(\d{1,2})-(\d{1,3})\s")
+        .ok()
+        .and_then(|re| re.captures(&name))
+    {
+        let disc: u32 = caps.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(1);
+        let track: u32 = caps.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+        return disc * 100 + track;
+    }
+
+    // Pattern 2: "TT - " format (track with separator)
+    // e.g., "01 - Chapter 1", "12 - Title"
+    if let Some(caps) = regex::Regex::new(r"^(\d{1,3})\s*[-–—]\s*")
+        .ok()
+        .and_then(|re| re.captures(&name))
+    {
+        let track: u32 = caps.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+        return track;
+    }
+
+    // Pattern 3: "Track TT" or "Chapter TT"
+    if let Some(caps) = regex::Regex::new(r"(?:track|chapter|part)\s*(\d{1,3})")
+        .ok()
+        .and_then(|re| re.captures(&name))
+    {
+        let track: u32 = caps.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+        return track;
+    }
+
+    // Pattern 4: Just leading numbers
+    if let Some(caps) = regex::Regex::new(r"^(\d{1,3})")
+        .ok()
+        .and_then(|re| re.captures(&name))
+    {
+        let track: u32 = caps.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+        return track;
+    }
+
+    // No track number found - sort at end
+    u32::MAX
+}
+
+/// Natural sort comparison for filenames
+/// Handles numeric parts correctly: "Chapter 2" < "Chapter 10"
+pub fn natural_sort_key(s: &str) -> Vec<NaturalSortPart> {
+    let mut parts = Vec::new();
+    let mut current_num = String::new();
+    let mut current_str = String::new();
+
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            if !current_str.is_empty() {
+                parts.push(NaturalSortPart::Text(current_str.to_lowercase()));
+                current_str.clear();
+            }
+            current_num.push(c);
+        } else {
+            if !current_num.is_empty() {
+                parts.push(NaturalSortPart::Number(current_num.parse().unwrap_or(0)));
+                current_num.clear();
+            }
+            current_str.push(c);
+        }
+    }
+
+    // Push any remaining parts
+    if !current_num.is_empty() {
+        parts.push(NaturalSortPart::Number(current_num.parse().unwrap_or(0)));
+    }
+    if !current_str.is_empty() {
+        parts.push(NaturalSortPart::Text(current_str.to_lowercase()));
+    }
+
+    parts
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NaturalSortPart {
+    Number(u64),
+    Text(String),
+}
+
+/// Compare two strings using natural sort order
+pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    // First try track-based sorting
+    let key_a = extract_sort_key(a);
+    let key_b = extract_sort_key(b);
+
+    // If both have valid sort keys, use them
+    if key_a != u32::MAX && key_b != u32::MAX {
+        match key_a.cmp(&key_b) {
+            std::cmp::Ordering::Equal => {
+                // Same sort key, fall back to natural sort for tiebreaker
+                natural_sort_key(a).cmp(&natural_sort_key(b))
+            }
+            other => other
+        }
+    } else if key_a != u32::MAX {
+        // a has key, b doesn't - a comes first
+        std::cmp::Ordering::Less
+    } else if key_b != u32::MAX {
+        // b has key, a doesn't - b comes first
+        std::cmp::Ordering::Greater
+    } else {
+        // Neither has a key, fall back to natural sort
+        natural_sort_key(a).cmp(&natural_sort_key(b))
+    }
+}
 
 // AudiobookShelf metadata.json format for reading
 #[derive(Debug, Deserialize)]
@@ -109,6 +233,17 @@ fn load_metadata_json(folder_path: &str) -> (Option<BookMetadata>, bool) {
     let has_cover = cover_url.is_some();
     println!("   ✅ Loaded metadata.json for '{}'{}", title, if has_cover { " (with cover)" } else { "" });
 
+    // Build all_series from series/sequence if present
+    let all_series = if let Some(ref s) = series {
+        vec![super::types::SeriesInfo::new(
+            s.clone(),
+            sequence.clone(),
+            None, // Source unknown from metadata.json
+        )]
+    } else {
+        vec![]
+    };
+
     (Some(BookMetadata {
         title,
         author,
@@ -116,6 +251,7 @@ fn load_metadata_json(folder_path: &str) -> (Option<BookMetadata>, bool) {
         narrator,
         series,
         sequence,
+        all_series,
         genres: abs_meta.genres,
         description: abs_meta.description,
         publisher: abs_meta.publisher,
@@ -145,6 +281,10 @@ pub async fn collect_and_group_files(
 ) -> Result<Vec<BookGroup>, Box<dyn std::error::Error + Send + Sync>> {
     use futures::stream::{self, StreamExt};
 
+    // Load config for concurrency settings
+    let config = crate::config::Config::load().unwrap_or_default();
+    let file_scan_concurrency = config.get_concurrency(crate::config::ConcurrencyOp::FileScan);
+
     // Parallelize collection across multiple root paths
     let paths_vec: Vec<String> = paths.to_vec();
     let cancel = cancel_flag.clone();
@@ -161,7 +301,7 @@ pub async fn collect_and_group_files(
                 collect_audio_files_from_path(&path).unwrap_or_default()
             }
         })
-        .buffer_unordered(10)  // Scan up to 10 root paths in parallel
+        .buffer_unordered(file_scan_concurrency)
         .flat_map(|files| stream::iter(files))
         .collect()
         .await;
@@ -175,7 +315,15 @@ pub async fn collect_and_group_files(
 
     println!("📁 Collected {} audio files", all_files.len());
 
+    // Count unique folders (= number of books)
+    let unique_folders: std::collections::HashSet<_> = all_files.iter()
+        .map(|f| f.parent_dir.clone())
+        .collect();
+    println!("📊 Grouping {} folders into books...", unique_folders.len());
+
+    let start = std::time::Instant::now();
     let groups = group_files_by_book(all_files);
+    println!("✅ Grouped into {} books in {:.2}s", groups.len(), start.elapsed().as_secs_f64());
 
     Ok(groups)
 }
@@ -262,15 +410,43 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
             .push(file);
     }
 
-    groups.into_iter()
+    // Use parallel iteration for faster metadata.json loading (440 folders in parallel!)
+    groups.into_par_iter()
         .map(|(parent_dir, mut files)| {
-            files.sort_by(|a, b| a.filename.cmp(&b.filename));
+            files.sort_by(|a, b| natural_cmp(&a.filename, &b.filename));
 
-            let group_name = Path::new(&parent_dir)
+            // Get the immediate folder name
+            let folder_name = Path::new(&parent_dir)
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
+
+            // If the folder looks like a chapter marker (e.g., "1_ Part I", "Part 1", "Disc 1"),
+            // use the grandparent folder as the real book title
+            let group_name = if is_chapter_folder(&folder_name) {
+                // Try to get grandparent folder name (the actual book title)
+                let grandparent_name = Path::new(&parent_dir)
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string());
+
+                if let Some(ref gp_name) = grandparent_name {
+                    // Only use grandparent if it doesn't also look like a chapter folder
+                    // and isn't empty or a root-level folder
+                    if !gp_name.is_empty() && !is_chapter_folder(gp_name) {
+                        println!("📂 Chapter folder '{}' detected - using grandparent '{}' as book title",
+                            folder_name, gp_name);
+                        gp_name.clone()
+                    } else {
+                        folder_name.clone()
+                    }
+                } else {
+                    folder_name.clone()
+                }
+            } else {
+                folder_name.clone()
+            };
 
             let group_type = detect_group_type(&files);
 
@@ -299,6 +475,7 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                     narrator: None,
                     series: None,
                     sequence: None,
+                    all_series: vec![],
                     genres: vec![],
                     description: None,
                     publisher: None,
@@ -376,6 +553,79 @@ fn is_multi_part_filename(filename: &str) -> bool {
     }
 
     if PART_NUM.is_match(filename) {
+        return true;
+    }
+
+    false
+}
+
+/// Detect if a folder name looks like a chapter/part marker rather than a book title.
+/// Examples: "Chapter 01", "Disc 1", "CD1"
+/// Returns true if folder appears to be a chapter/part subfolder, not a book title.
+///
+/// NOTE: We intentionally do NOT match:
+/// - Folders that start with numbers followed by substantial text (book titles)
+/// - "Part X - [Long Title]" patterns (likely separate works in a collection)
+pub fn is_chapter_folder(name: &str) -> bool {
+    use regex::Regex;
+
+    lazy_static::lazy_static! {
+        // Pattern 1: Just a number with optional separator, nothing substantial after
+        // Matches: "1_", "01-", "1 ", "01", but NOT "12 Weeks to..."
+        static ref JUST_NUMBER: Regex = Regex::new(r"^\d{1,2}[_\-\s]*$").unwrap();
+
+        // Pattern 2: "Part" followed by roman numeral or digit, with SHORT or NO text after
+        // Matches: "Part 1", "Part I", "Part 1 - Intro" (short)
+        // Does NOT match: "Part 1 - Hope Springs Eternal - Rita Hayworth" (long title = separate work)
+        static ref PART_SHORT: Regex = Regex::new(r"(?i)^part\s+[ivxlcdm\d]+\s*$").unwrap();
+        static ref PART_WITH_SHORT_TITLE: Regex = Regex::new(r"(?i)^part\s+[ivxlcdm\d]+\s*[-:]\s*.{1,20}$").unwrap();
+
+        // Pattern 3: "Chapter" followed by number (e.g., "Chapter 1", "Chapter 01")
+        static ref CHAPTER_PATTERN: Regex = Regex::new(r"(?i)^chapter\s+\d+").unwrap();
+
+        // Pattern 4: "Disc" or "Disk" followed by number (e.g., "Disc 1", "Disk 2")
+        // These are ALWAYS chapter folders - discs are physical media divisions
+        static ref DISC_PATTERN: Regex = Regex::new(r"(?i)^dis[ck]\s*\d+").unwrap();
+
+        // Pattern 5: "CD" followed by number (e.g., "CD1", "CD 1")
+        static ref CD_PATTERN: Regex = Regex::new(r"(?i)^cd\s*\d+").unwrap();
+
+        // Pattern 6: "Book" followed by just a number (for multi-book sets like "Book 1", "Book 2")
+        // But NOT "Book Title Here" which would be a book name
+        static ref BOOK_NUM_PATTERN: Regex = Regex::new(r"(?i)^book\s*\d+\s*$").unwrap();
+
+        // Pattern 7: Number followed by underscore and short text (likely chapter marker)
+        // Matches: "1_ Part I", "02_Chapter", but NOT "01 Left Behind - A Novel"
+        static ref NUM_UNDERSCORE: Regex = Regex::new(r"^\d{1,2}_\s*.{0,20}$").unwrap();
+    }
+
+    // Disc/CD patterns are always chapter folders (physical media divisions)
+    if DISC_PATTERN.is_match(name) || CD_PATTERN.is_match(name) {
+        return true;
+    }
+
+    // Chapter pattern
+    if CHAPTER_PATTERN.is_match(name) {
+        return true;
+    }
+
+    // Book N (just number, no title)
+    if BOOK_NUM_PATTERN.is_match(name) {
+        return true;
+    }
+
+    // Part patterns - only match short ones, not "Part 1 - Full Book Title"
+    if PART_SHORT.is_match(name) || PART_WITH_SHORT_TITLE.is_match(name) {
+        return true;
+    }
+
+    // Check if it's just a bare number (very likely a chapter folder)
+    if JUST_NUMBER.is_match(name) {
+        return true;
+    }
+
+    // Check underscore pattern with short text
+    if NUM_UNDERSCORE.is_match(name) {
         return true;
     }
 

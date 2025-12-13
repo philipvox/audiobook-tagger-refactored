@@ -27,7 +27,7 @@ pub const DEFAULT_FILE_TEMPLATE: &str = "{author} - {[series #sequence] }{title}
 pub const DEFAULT_FOLDER_TEMPLATE: &str = "{author}/{series|title}";
 
 /// Sanitize a string for use in a filename
-fn sanitize_filename(s: &str) -> String {
+pub fn sanitize_filename(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
@@ -295,6 +295,7 @@ mod tests {
             series: Some("The Lord of the Rings".to_string()),
             sequence: Some("1".to_string()),
             year: Some("1954".to_string()),
+            narrator: None,
         };
         
         let filename = generate_filename(&metadata, "m4b");
@@ -312,6 +313,7 @@ mod tests {
             series: None,
             sequence: None,
             year: Some("1949".to_string()),
+            narrator: None,
         };
         
         let filename = generate_filename(&metadata, "m4b");

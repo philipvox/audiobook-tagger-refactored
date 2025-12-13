@@ -41,12 +41,14 @@ pub async fn import_folders(paths: Vec<String>) -> Result<scanner::ScanResult, S
 /// - scan_mode: "normal", "refresh_metadata", "force_fresh", "selective_refresh", or "super_scanner"
 /// - force: Legacy parameter, if true uses force_fresh mode
 /// - selective_fields: Optional JSON object specifying which fields to refresh (for selective_refresh mode)
+/// - enable_transcription: Whether to transcribe audio intros for book verification
 #[tauri::command]
 pub async fn scan_library(
     paths: Vec<String>,
     force: Option<bool>,
     scan_mode: Option<String>,
-    selective_fields: Option<SelectiveRefreshFields>
+    selective_fields: Option<SelectiveRefreshFields>,
+    enable_transcription: Option<bool>
 ) -> Result<scanner::ScanResult, String> {
     // Determine scan mode from parameters
     let mode = if let Some(mode_str) = scan_mode.as_deref() {
@@ -68,7 +70,9 @@ pub async fn scan_library(
         ScanMode::Normal
     };
 
-    println!("🔍 scan_library called with {} paths (mode={:?})", paths.len(), mode);
+    let transcription_enabled = enable_transcription.unwrap_or(false);
+    println!("🔍 scan_library called with {} paths (mode={:?}, transcription={})",
+        paths.len(), mode, transcription_enabled);
 
     CANCEL_FLAG.store(false, Ordering::SeqCst);
 
@@ -76,7 +80,8 @@ pub async fn scan_library(
         &paths,
         Some(CANCEL_FLAG.clone()),
         mode,
-        selective_fields
+        selective_fields,
+        transcription_enabled
     )
         .await
         .map_err(|e| {
@@ -116,7 +121,8 @@ pub async fn scan_library(
 #[tauri::command]
 pub async fn rescan_fields(
     paths: Vec<String>,
-    fields: Vec<String>
+    fields: Vec<String>,
+    enable_transcription: Option<bool>
 ) -> Result<scanner::ScanResult, String> {
     // Build selective fields from the list
     let mut selective_fields = SelectiveRefreshFields::default();
@@ -139,7 +145,9 @@ pub async fn rescan_fields(
         return Err("No valid fields specified. Use: authors, narrators, description, series, genres, publisher, cover, or all".to_string());
     }
 
-    println!("🔄 rescan_fields called with {} paths, fields: {:?}", paths.len(), fields);
+    let transcription_enabled = enable_transcription.unwrap_or(false);
+    println!("🔄 rescan_fields called with {} paths, fields: {:?}, transcription={}",
+        paths.len(), fields, transcription_enabled);
 
     CANCEL_FLAG.store(false, Ordering::SeqCst);
 
@@ -147,7 +155,8 @@ pub async fn rescan_fields(
         &paths,
         Some(CANCEL_FLAG.clone()),
         ScanMode::SelectiveRefresh,
-        Some(selective_fields)
+        Some(selective_fields),
+        transcription_enabled
     )
         .await
         .map_err(|e| {

@@ -1,24 +1,27 @@
-import { useState } from 'react';
-import { X, FileAudio, AlertTriangle, CheckCircle, Zap } from 'lucide-react';
+import { useState, useMemo, useCallback } from 'react';
+import { X, FileAudio, AlertTriangle, CheckCircle, Zap, Check, Square, CheckSquare } from 'lucide-react';
 
-export function WritePreviewModal({ 
-  isOpen, 
-  onClose, 
-  onConfirm, 
-  selectedFiles, 
-  groups, 
-  backupEnabled 
+export function WritePreviewModal({
+  isOpen,
+  onClose,
+  onConfirm,
+  selectedFiles,
+  groups,
+  backupEnabled
 }) {
   const [skipBackup, setSkipBackup] = useState(false);
+  // Track excluded changes: Map of "fileId:field" -> true
+  const [excludedChanges, setExcludedChanges] = useState(new Set());
 
   if (!isOpen) return null;
 
-  // Build preview data
+  // Build preview data with file IDs for tracking
   const previewData = [];
   groups.forEach(group => {
     group.files.forEach(file => {
       if (selectedFiles.has(file.id) && Object.keys(file.changes).length > 0) {
         previewData.push({
+          fileId: file.id,
           filename: file.filename,
           path: file.path,
           changes: file.changes
@@ -27,7 +30,56 @@ export function WritePreviewModal({
     });
   });
 
+  // Calculate totals considering exclusions
   const totalChanges = previewData.reduce((sum, file) => sum + Object.keys(file.changes).length, 0);
+  const approvedChanges = previewData.reduce((sum, file) => {
+    return sum + Object.keys(file.changes).filter(field => !excludedChanges.has(`${file.fileId}:${field}`)).length;
+  }, 0);
+
+  // Toggle a specific field change
+  const toggleChange = (fileId, field) => {
+    const key = `${fileId}:${field}`;
+    setExcludedChanges(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  // Toggle all changes for a file
+  const toggleAllForFile = (fileId, changes) => {
+    const fields = Object.keys(changes);
+    const allExcluded = fields.every(field => excludedChanges.has(`${fileId}:${field}`));
+
+    setExcludedChanges(prev => {
+      const next = new Set(prev);
+      fields.forEach(field => {
+        const key = `${fileId}:${field}`;
+        if (allExcluded) {
+          next.delete(key); // Include all
+        } else {
+          next.add(key); // Exclude all
+        }
+      });
+      return next;
+    });
+  };
+
+  // Check if all changes for a file are excluded
+  const isFileFullyExcluded = (fileId, changes) => {
+    return Object.keys(changes).every(field => excludedChanges.has(`${fileId}:${field}`));
+  };
+
+  // Handle confirm with filtered changes
+  const handleConfirm = () => {
+    // Pass the excluded changes to the parent so it can filter
+    onConfirm(skipBackup, excludedChanges);
+    onClose();
+  };
 
   const getChangeTypeColor = (field) => {
     const colors = {
@@ -94,43 +146,76 @@ export function WritePreviewModal({
                 {/* File Header */}
                 <div className="bg-gray-50 px-4 py-3 border-b border-gray-200">
                   <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => toggleAllForFile(file.fileId, file.changes)}
+                      className="p-1 hover:bg-gray-200 rounded transition-colors"
+                      title={isFileFullyExcluded(file.fileId, file.changes) ? "Include all changes" : "Exclude all changes"}
+                    >
+                      {isFileFullyExcluded(file.fileId, file.changes) ? (
+                        <Square className="w-4 h-4 text-gray-400" />
+                      ) : (
+                        <CheckSquare className="w-4 h-4 text-green-600" />
+                      )}
+                    </button>
                     <FileAudio className="w-4 h-4 text-gray-500" />
-                    <span className="font-medium text-gray-900 text-sm">{file.filename}</span>
+                    <span className={`font-medium text-sm ${isFileFullyExcluded(file.fileId, file.changes) ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                      {file.filename}
+                    </span>
                     <span className="text-xs text-gray-500 bg-white px-2 py-1 rounded-full">
-                      {Object.keys(file.changes).length} changes
+                      {Object.keys(file.changes).filter(f => !excludedChanges.has(`${file.fileId}:${f}`)).length} / {Object.keys(file.changes).length} changes
                     </span>
                   </div>
                 </div>
 
                 {/* Changes */}
                 <div className="divide-y divide-gray-100">
-                  {Object.entries(file.changes).map(([field, change], changeIndex) => (
-                    <div key={changeIndex} className="p-4">
-                      <div className="flex items-start gap-4">
-                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getChangeTypeColor(field)}`}>
-                          {field.charAt(0).toUpperCase() + field.slice(1)}
-                        </span>
-                        
-                        <div className="flex-1 min-w-0 space-y-2">
-                          {/* Old Value */}
-                          <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-                            <div className="text-xs font-medium text-red-800 mb-1">Current:</div>
-                            <div className="text-sm text-red-900 font-mono break-words">
-                              {change.old || <span className="text-red-600 italic">(empty)</span>}
+                  {Object.entries(file.changes).map(([field, change], changeIndex) => {
+                    const isExcluded = excludedChanges.has(`${file.fileId}:${field}`);
+                    return (
+                      <div key={changeIndex} className={`p-4 transition-opacity ${isExcluded ? 'opacity-50 bg-gray-50' : ''}`}>
+                        <div className="flex items-start gap-4">
+                          {/* Checkbox */}
+                          <button
+                            onClick={() => toggleChange(file.fileId, field)}
+                            className="p-1 hover:bg-gray-100 rounded transition-colors flex-shrink-0 mt-0.5"
+                            title={isExcluded ? "Include this change" : "Exclude this change"}
+                          >
+                            {isExcluded ? (
+                              <Square className="w-5 h-5 text-gray-400" />
+                            ) : (
+                              <CheckSquare className="w-5 h-5 text-green-600" />
+                            )}
+                          </button>
+
+                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getChangeTypeColor(field)} ${isExcluded ? 'opacity-50' : ''}`}>
+                            {field.charAt(0).toUpperCase() + field.slice(1)}
+                          </span>
+
+                          <div className="flex-1 min-w-0 space-y-2">
+                            {/* Old Value */}
+                            <div className={`bg-red-50 border border-red-200 rounded-lg p-3 ${isExcluded ? 'opacity-60' : ''}`}>
+                              <div className="text-xs font-medium text-red-800 mb-1">Current:</div>
+                              <div className="text-sm text-red-900 font-mono break-words">
+                                {change.old || <span className="text-red-600 italic">(empty)</span>}
+                              </div>
                             </div>
-                          </div>
-                          
-                          {/* New Value */}
-                          <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-                            <div className="text-xs font-medium text-green-800 mb-1">New:</div>
-                            <div className="text-sm text-green-900 font-mono break-words">
-                              {change.new || <span className="text-green-600 italic">(empty)</span>}
+
+                            {/* New Value */}
+                            <div className={`bg-green-50 border border-green-200 rounded-lg p-3 ${isExcluded ? 'opacity-60' : ''}`}>
+                              <div className="text-xs font-medium text-green-800 mb-1">New:</div>
+                              <div className="text-sm text-green-900 font-mono break-words">
+                                {change.new || <span className="text-green-600 italic">(empty)</span>}
+                              </div>
                             </div>
+
+                            {isExcluded && (
+                              <div className="text-xs text-gray-500 italic">This change will be skipped</div>
+                            )}
                           </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ))}
@@ -161,6 +246,14 @@ export function WritePreviewModal({
             </label>
           </div>
 
+          {/* Summary of approved changes */}
+          {excludedChanges.size > 0 && (
+            <div className="text-sm text-gray-600 text-center">
+              <span className="font-medium">{approvedChanges}</span> of <span className="font-medium">{totalChanges}</span> changes will be written
+              <span className="text-gray-400 ml-2">({excludedChanges.size} excluded)</span>
+            </div>
+          )}
+
           {/* Action Buttons */}
           <div className="flex gap-3 justify-end">
             <button
@@ -170,14 +263,16 @@ export function WritePreviewModal({
               Cancel
             </button>
             <button
-              onClick={() => {
-                onConfirm(skipBackup); // ✅ Pass skipBackup to parent
-                onClose();
-              }}
-              className="px-4 py-2 rounded-lg transition-colors font-medium bg-yellow-600 hover:bg-yellow-700 text-white flex items-center gap-2"
+              onClick={handleConfirm}
+              disabled={approvedChanges === 0}
+              className={`px-4 py-2 rounded-lg transition-colors font-medium flex items-center gap-2 ${
+                approvedChanges === 0
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  : 'bg-yellow-600 hover:bg-yellow-700 text-white'
+              }`}
             >
               {skipBackup && <Zap className="w-4 h-4" />}
-              Write {totalChanges} Changes to {previewData.length} File{previewData.length === 1 ? '' : 's'}
+              Write {approvedChanges} Change{approvedChanges === 1 ? '' : 's'}
             </button>
           </div>
         </div>

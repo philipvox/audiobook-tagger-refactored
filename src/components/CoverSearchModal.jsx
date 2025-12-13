@@ -70,7 +70,6 @@ export function CoverSearchModal({ isOpen, onClose, group, onCoverUpdated }) {
       'Audible': { bg: 'bg-orange-50', text: 'text-orange-700', icon: '🎧' },
       'Amazon': { bg: 'bg-yellow-50', text: 'text-yellow-700', icon: '📦' },
       'Google Books': { bg: 'bg-blue-50', text: 'text-blue-700', icon: '📚' },
-      'Open Library': { bg: 'bg-green-50', text: 'text-green-700', icon: '📖' },
     };
     // Check if source starts with any known prefix
     for (const [key, style] of Object.entries(styles)) {
@@ -135,7 +134,7 @@ export function CoverSearchModal({ isOpen, onClose, group, onCoverUpdated }) {
           {searching ? (
             <div className="text-center py-12">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-              <p className="text-gray-600">Searching iTunes, Audible, Google Books, Open Library...</p>
+              <p className="text-gray-600">Searching iTunes, Audible, Google Books...</p>
             </div>
           ) : options.length === 0 ? (
             <div className="text-center py-12">

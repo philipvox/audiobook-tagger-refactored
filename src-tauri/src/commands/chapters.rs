@@ -8,6 +8,7 @@ use crate::chapters::{
     SplitOptions, SplitResult, SilenceDetectionSettings,
     OutputFormat,
 };
+use crate::scanner::collector::natural_cmp;
 
 /// Check if FFmpeg is installed and available
 #[tauri::command]
@@ -306,10 +307,19 @@ pub async fn create_chapters_from_files(
         return Err("FFmpeg is not installed.".to_string());
     }
 
+    // Sort files using natural sort order to ensure correct chapter sequence
+    // e.g., "Chapter 2.mp3" comes before "Chapter 10.mp3"
+    let mut sorted_paths = file_paths.clone();
+    sorted_paths.sort_by(|a, b| {
+        let a_name = std::path::Path::new(a).file_name().and_then(|s| s.to_str()).unwrap_or(a);
+        let b_name = std::path::Path::new(b).file_name().and_then(|s| s.to_str()).unwrap_or(b);
+        natural_cmp(a_name, b_name)
+    });
+
     let mut chapters = Vec::new();
     let mut cumulative_time = 0.0;
 
-    for (idx, file_path) in file_paths.iter().enumerate() {
+    for (idx, file_path) in sorted_paths.iter().enumerate() {
         let duration = chapters::get_file_duration(file_path)
             .map_err(|e| format!("Failed to get duration for {}: {}", file_path, e))?;
 

@@ -243,9 +243,11 @@ export function useScan() {
    * Rescan selected files with configurable scan mode
    * @param {Set} selectedFiles - Set of selected file IDs
    * @param {Array} groups - Array of book groups
-   * @param {string} scanMode - Scan mode: 'normal', 'refresh_metadata', 'force_fresh', 'selective_refresh'
+   * @param {string} scanMode - Scan mode: 'normal', 'refresh_metadata', 'force_fresh', 'selective_refresh', 'super_scanner'
+   * @param {Array} selectiveFields - Optional array of field names to refresh (for selective_refresh mode)
+   * @param {Object} options - Optional options like { enableTranscription: bool }
    */
-  const handleRescan = useCallback(async (selectedFiles, groups, scanMode = 'force_fresh') => {
+  const handleRescan = useCallback(async (selectedFiles, groups, scanMode = 'force_fresh', selectiveFields = null, options = {}) => {
     if (progressIntervalRef.current) {
       clearInterval(progressIntervalRef.current);
       progressIntervalRef.current = null;
@@ -310,14 +312,29 @@ export function useScan() {
       }, 1000);
 
       try {
-        // Batch all paths in a single scan_library call for better performance
+        // Batch all paths in a single call for better performance
         // The Rust backend handles parallel processing internally
         let allNewGroups = [];
         try {
-          const result = await invoke('scan_library', {
-            paths: paths,  // Pass all paths at once
-            scanMode: scanMode
-          });
+          let result;
+          const enableTranscription = options.enableTranscription ?? false;
+          if (selectiveFields && selectiveFields.length > 0) {
+            // Use rescan_fields for selective field refresh
+            console.log(`🔄 Selective rescan for fields: ${selectiveFields.join(', ')}${enableTranscription ? ' (with audio verification)' : ''}`);
+            result = await invoke('rescan_fields', {
+              paths: paths,
+              fields: selectiveFields,
+              enableTranscription: enableTranscription
+            });
+          } else {
+            // Regular scan with mode
+            console.log(`🔄 Scan mode: ${scanMode}${enableTranscription ? ' (with audio verification)' : ''}`);
+            result = await invoke('scan_library', {
+              paths: paths,
+              scanMode: scanMode,
+              enableTranscription: enableTranscription
+            });
+          }
           if (result && result.groups) {
             allNewGroups = result.groups;
           }
@@ -376,6 +393,239 @@ export function useScan() {
     }
   }, [setGroups]);
 
+  // Import books from ABS library (no local file scan)
+  const handleImportFromAbs = useCallback(async () => {
+    if (progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+    }
+
+    if (resetTimeoutRef.current) {
+      clearTimeout(resetTimeoutRef.current);
+      resetTimeoutRef.current = null;
+    }
+
+    try {
+      setScanning(true);
+      const startTime = Date.now();
+      setScanProgress({
+        current: 0,
+        total: 0,
+        currentFile: 'Connecting to AudiobookShelf...',
+        startTime,
+        filesPerSecond: 0,
+        covers_found: 0,
+      });
+
+      console.log('📚 Importing from ABS library...');
+
+      try {
+        const result = await invoke('import_from_abs');
+
+        if (result && result.groups) {
+          console.log(`✅ Imported ${result.groups.length} books from ABS`);
+          setGroups(result.groups);
+        }
+
+        return { success: true, count: result?.total_imported || 0 };
+
+      } finally {
+        setScanning(false);
+
+        resetTimeoutRef.current = setTimeout(() => {
+          setScanProgress({
+            current: 0,
+            total: 0,
+            currentFile: '',
+            startTime: null,
+            filesPerSecond: 0,
+            covers_found: 0,
+          });
+          resetTimeoutRef.current = null;
+        }, 500);
+      }
+    } catch (error) {
+      console.error('ABS import failed:', error);
+      setScanning(false);
+      throw error;
+    }
+  }, [setGroups]);
+
+  // Push ABS-imported books back to ABS library
+  const handlePushAbsImports = useCallback(async (groupsToPush) => {
+    if (!groupsToPush || groupsToPush.length === 0) {
+      return { success: false, updated: 0 };
+    }
+
+    try {
+      console.log(`📤 Pushing ${groupsToPush.length} books to ABS...`);
+
+      const request = {
+        items: groupsToPush.map(g => ({
+          id: g.id,
+          metadata: g.metadata,
+        }))
+      };
+
+      const result = await invoke('push_abs_imports', { request });
+
+      console.log(`✅ ABS push: ${result.updated} updated, ${result.failed} failed`);
+      if (result.errors && result.errors.length > 0) {
+        // Group errors by type
+        const errorTypes = {};
+        result.errors.forEach(err => {
+          const match = err.match(/HTTP (\d+)|timeout|connection|dns/i);
+          const type = match ? match[0] : 'other';
+          errorTypes[type] = (errorTypes[type] || 0) + 1;
+        });
+        console.warn('Push error breakdown:', errorTypes);
+        console.warn('Sample errors:', result.errors.slice(0, 10));
+      }
+
+      return { success: true, updated: result.updated, failed: result.failed };
+
+    } catch (error) {
+      console.error('ABS push failed:', error);
+      throw error;
+    }
+  }, []);
+
+  // Rescan ABS-imported books (no local files needed)
+  // mode: 'force_fresh' = full API search, 'genres_only' = just normalize genres
+  // autoPush: automatically push changes back to ABS after processing
+  // fields: optional array of field names to update (e.g., ['description', 'genres'])
+  const handleRescanAbsImports = useCallback(async (selectedGroups, mode = 'force_fresh', autoPush = true, fields = null) => {
+    if (!selectedGroups || selectedGroups.length === 0) {
+      return { success: false, count: 0 };
+    }
+
+    try {
+      setScanning(true);
+      const startTime = Date.now();
+      setScanProgress({
+        current: 0,
+        total: selectedGroups.length,
+        currentFile: mode === 'genres_only' ? 'Cleaning genres...' : 'Searching APIs...',
+        startTime,
+        filesPerSecond: 0,
+        covers_found: 0,
+      });
+
+      console.log(`🔄 Rescan ABS imports: ${selectedGroups.length} books, mode=${mode}`);
+
+      const request = {
+        groups: selectedGroups.map(g => ({
+          id: g.id,
+          title: g.metadata.title,
+          author: g.metadata.author,
+          series: g.metadata.series || null,
+          sequence: g.metadata.sequence || null,
+          genres: g.metadata.genres || [],
+          subtitle: g.metadata.subtitle || null,
+          narrator: g.metadata.narrator || null,
+          description: g.metadata.description || null,
+          year: g.metadata.year || null,
+          publisher: g.metadata.publisher || null,
+        })),
+        mode,
+        fields: fields, // Optional: only update specific fields
+      };
+
+      const fieldsStr = fields ? fields.join(', ') : 'all';
+      console.log(`📋 Fields to update: ${fieldsStr}`);
+
+      const result = await invoke('rescan_abs_imports', { request });
+
+      // Update groups with rescanned data
+      if (result && result.groups) {
+        setGroups(prevGroups => {
+          const updatedIds = new Set(result.groups.map(g => g.id));
+          const filtered = prevGroups.filter(g => !updatedIds.has(g.id));
+          return [...filtered, ...result.groups];
+        });
+
+        // Auto-push to ABS if enabled
+        if (autoPush && result.groups.length > 0) {
+          console.log(`📤 Auto-pushing ${result.groups.length} books to ABS...`);
+          setScanProgress(prev => ({
+            ...prev,
+            currentFile: 'Pushing to ABS...',
+          }));
+
+          try {
+            const pushResult = await handlePushAbsImports(result.groups);
+            console.log(`✅ Pushed ${pushResult.updated} books to ABS`);
+          } catch (pushError) {
+            console.error('Auto-push failed:', pushError);
+          }
+        }
+      }
+
+      console.log(`✅ ABS rescan: ${result.total_rescanned} rescanned, ${result.total_failed} failed`);
+      return { success: true, count: result.total_rescanned, groups: result.groups };
+
+    } catch (error) {
+      console.error('ABS rescan failed:', error);
+      throw error;
+    } finally {
+      setScanning(false);
+      setScanProgress({
+        current: 0,
+        total: 0,
+        currentFile: '',
+        startTime: null,
+        filesPerSecond: 0,
+        covers_found: 0,
+      });
+    }
+  }, [setGroups, handlePushAbsImports]);
+
+  // Cleanup genres for selected books (no rescan)
+  const handleCleanupGenres = useCallback(async (selectedGroups) => {
+    if (!selectedGroups || selectedGroups.length === 0) {
+      return { success: false, count: 0 };
+    }
+
+    try {
+      console.log(`🧹 Cleaning genres for ${selectedGroups.length} books...`);
+
+      const request = {
+        groups: selectedGroups.map(g => ({
+          id: g.id,
+          title: g.metadata.title,
+          author: g.metadata.author,
+          series: g.metadata.series || null,
+          genres: g.metadata.genres || [],
+        }))
+      };
+
+      const result = await invoke('cleanup_genres', { request });
+
+      // Update groups with cleaned genres
+      setGroups(prevGroups =>
+        prevGroups.map(group => {
+          const cleaned = result.results.find(r => r.id === group.id);
+          if (!cleaned || !cleaned.changed) return group;
+
+          return {
+            ...group,
+            metadata: {
+              ...group.metadata,
+              genres: cleaned.cleaned_genres,
+            }
+          };
+        })
+      );
+
+      console.log(`✅ Genre cleanup: ${result.total_cleaned} cleaned, ${result.total_unchanged} unchanged`);
+      return { success: true, count: result.total_cleaned };
+
+    } catch (error) {
+      console.error('Genre cleanup failed:', error);
+      throw error;
+    }
+  }, [setGroups]);
+
   const cancelScan = useCallback(async () => {
     try {
       await invoke('cancel_scan');
@@ -410,6 +660,10 @@ export function useScan() {
     calculateETA,
     handleScan,
     handleImport,
+    handleImportFromAbs,
+    handleRescanAbsImports,
+    handlePushAbsImports,
+    handleCleanupGenres,
     handleRescan,
     cancelScan,
   };

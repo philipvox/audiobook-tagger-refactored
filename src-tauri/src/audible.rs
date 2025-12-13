@@ -19,6 +19,12 @@ pub struct AudibleMetadata {
     pub runtime_minutes: Option<u32>,
     /// Whether the audiobook is abridged
     pub abridged: Option<bool>,
+    /// Genres/categories from the metadata source
+    #[serde(default)]
+    pub genres: Vec<String>,
+    /// Cover URL from ABS search (to avoid duplicate API calls)
+    #[serde(default)]
+    pub cover_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +106,7 @@ pub async fn search_audible(
         }
         Err(e) => {
             println!("             ⚠️  Parse error: {}", e);
-            println!("             📄 Raw response (first 500 chars): {}", &stdout[..stdout.len().min(500)]);
+            println!("             📄 Raw response (first 500 chars): {}", stdout.chars().take(500).collect::<String>());
             Ok(None)
         }
     }
@@ -165,5 +171,7 @@ fn parse_response(json: &str) -> Result<AudibleMetadata> {
         language: product.language.clone(),
         runtime_minutes: product.runtime_length_min,
         abridged: product.abridged,
+        genres: vec![], // Audible CLI doesn't return genres
+        cover_url: None, // Direct Audible CLI doesn't return cover URL
     })
 }
