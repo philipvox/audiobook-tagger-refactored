@@ -272,6 +272,11 @@ fn load_metadata_json(folder_path: &str) -> (Option<BookMetadata>, bool) {
         is_collection: false,
         collection_books: vec![],
         confidence: None,
+        // Themes/tropes - extracted later
+        themes: vec![],
+        tropes: vec![],
+        themes_source: None,
+        tropes_source: None,
     }), true)
 }
 
@@ -496,6 +501,11 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                     is_collection: false,
                     collection_books: vec![],
                     confidence: None,
+                    // Themes/tropes - extracted later
+                    themes: vec![],
+                    tropes: vec![],
+                    themes_source: None,
+                    tropes_source: None,
                 }, ScanStatus::NotScanned)
             };
 

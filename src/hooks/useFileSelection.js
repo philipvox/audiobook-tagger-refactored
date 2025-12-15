@@ -86,10 +86,17 @@ export function useFileSelection() {
     return selectedFiles;
   }, [allSelected, selectedFiles]);
 
-  // Get count of selected files
-  const getSelectedCount = useCallback((groups) => {
+  // Get count of selected files (or groups for ABS imports with no files)
+  // selectedGroupIds is passed in for ABS imports where we track groups, not files
+  const getSelectedCount = useCallback((groups, selectedGroupIds = null) => {
     if (allSelected) {
-      return groups.reduce((sum, g) => sum + g.files.length, 0);
+      // For ABS imports (no files), count groups instead
+      const totalFiles = groups.reduce((sum, g) => sum + g.files.length, 0);
+      return totalFiles > 0 ? totalFiles : groups.length;
+    }
+    // For ABS imports with group selection, count groups
+    if (selectedFiles.size === 0 && selectedGroupIds && selectedGroupIds.size > 0) {
+      return selectedGroupIds.size;
     }
     return selectedFiles.size;
   }, [allSelected, selectedFiles]);

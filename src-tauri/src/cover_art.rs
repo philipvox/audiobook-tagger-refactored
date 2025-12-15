@@ -334,48 +334,146 @@ pub async fn fetch_and_download_cover(
     fetch_and_download_cover_with_url(title, author, asin, None).await
 }
 
+/// Minimum preferred cover dimension (600x600)
+const MIN_PREFERRED_COVER_SIZE: u32 = 600;
+
+/// Check if a cover meets the preferred minimum size (600x600)
+fn cover_meets_size_preference(cover: &CoverArt) -> bool {
+    if let Some(ref data) = cover.data {
+        let (width, height) = get_image_dimensions_from_data(data);
+        width >= MIN_PREFERRED_COVER_SIZE && height >= MIN_PREFERRED_COVER_SIZE
+    } else {
+        false
+    }
+}
+
+/// Get cover dimensions for logging
+fn get_cover_dimensions(cover: &CoverArt) -> (u32, u32) {
+    if let Some(ref data) = cover.data {
+        get_image_dimensions_from_data(data)
+    } else {
+        (0, 0)
+    }
+}
+
 /// Fetch cover art, optionally using a pre-fetched cover URL to avoid duplicate API calls
 /// If pre_fetched_url is provided, it will be tried first before searching other sources
+/// Prefers covers >= 600x600, but falls back to smaller covers if no large ones found
 pub async fn fetch_and_download_cover_with_url(
     title: &str,
     author: &str,
     asin: Option<&str>,
     pre_fetched_url: Option<&str>,
 ) -> Result<CoverArt, Box<dyn std::error::Error + Send + Sync>> {
-    println!("   🖼️  Searching for cover art...");
+    println!("   🖼️  Searching for cover art (prefer 600x600+)...");
+
+    // Track best fallback cover if we can't find a 600x600+
+    let mut fallback_cover: Option<CoverArt> = None;
+    let mut fallback_dims = (0u32, 0u32);
+
+    // Helper to update fallback if this cover is better (or first valid cover)
+    let mut update_fallback = |cover: CoverArt| {
+        let dims = get_cover_dimensions(&cover);
+        // Store if: no fallback yet, OR this cover has better dimensions
+        // (0,0) means we couldn't read dimensions, but cover might still be valid
+        if fallback_cover.is_none() || dims.0 > fallback_dims.0 || dims.1 > fallback_dims.1 {
+            fallback_dims = dims;
+            fallback_cover = Some(cover);
+        }
+    };
 
     // PRIORITY 0: Use pre-fetched URL if available (from ABS metadata search)
-    // This avoids duplicate API calls since we already searched ABS for metadata
     let has_prefetched = pre_fetched_url.map(|u| !u.is_empty()).unwrap_or(false);
     if let Some(url) = pre_fetched_url {
         if !url.is_empty() {
             println!("   ⚡ Using pre-fetched cover URL from metadata: {}", url);
             if let Ok(cover) = download_cover(url).await {
                 if cover.data.is_some() {
-                    println!("   ✅ Cover downloaded from pre-fetched URL");
-                    return Ok(cover);
+                    let dims = get_cover_dimensions(&cover);
+                    if cover_meets_size_preference(&cover) {
+                        println!("   ✅ Cover downloaded from pre-fetched URL ({}x{})", dims.0, dims.1);
+                        return Ok(cover);
+                    } else {
+                        println!("   ⚠️  Pre-fetched cover too small ({}x{}), looking for larger...", dims.0, dims.1);
+                        update_fallback(cover);
+                    }
                 }
+            } else {
+                println!("   ⚠️  Pre-fetched cover URL failed, falling back to search...");
             }
-            println!("   ⚠️  Pre-fetched cover URL failed, falling back to search...");
         }
     }
 
     // PRIORITY 1: ABS Cover Search (if configured) - uses Audible/Google/iTunes waterfall
-    // Pass has_prefetched to skip the redundant metadata search if we already tried
     if let Some(cover) = fetch_cover_via_abs_with_flag(title, author, has_prefetched).await {
-        return Ok(cover);
+        let dims = get_cover_dimensions(&cover);
+        if cover_meets_size_preference(&cover) {
+            println!("   ✅ ABS cover meets size preference ({}x{})", dims.0, dims.1);
+            return Ok(cover);
+        } else {
+            println!("   ⚠️  ABS cover too small ({}x{}), looking for larger...", dims.0, dims.1);
+            update_fallback(cover);
+        }
     }
 
     // PRIORITY 2: iTunes/Apple Books (highest quality, up to 2048x2048, most consistent)
     if let Some(cover) = fetch_itunes_cover(title, author).await {
-        return Ok(cover);
+        let dims = get_cover_dimensions(&cover);
+        if cover_meets_size_preference(&cover) {
+            println!("   ✅ iTunes cover meets size preference ({}x{})", dims.0, dims.1);
+            return Ok(cover);
+        } else {
+            println!("   ⚠️  iTunes cover too small ({}x{}), looking for larger...", dims.0, dims.1);
+            update_fallback(cover);
+        }
     }
 
     // PRIORITY 3: Audible (high quality, up to 2400x2400, but requires ASIN)
     if let Some(asin_str) = asin {
         if let Some(cover) = fetch_audible_cover(asin_str).await {
-            return Ok(cover);
+            let dims = get_cover_dimensions(&cover);
+            if cover_meets_size_preference(&cover) {
+                println!("   ✅ Audible cover meets size preference ({}x{})", dims.0, dims.1);
+                return Ok(cover);
+            } else {
+                println!("   ⚠️  Audible cover too small ({}x{})", dims.0, dims.1);
+                update_fallback(cover);
+            }
         }
+    }
+
+    // PRIORITY 4: Google Books (good fallback, no ASIN required)
+    if let Some(candidate) = fetch_google_books_cover(title, author).await {
+        if let Ok(cover) = download_cover(&candidate.url).await {
+            if cover.data.is_some() {
+                let dims = get_cover_dimensions(&cover);
+                if cover_meets_size_preference(&cover) {
+                    println!("   ✅ Google Books cover meets size preference ({}x{})", dims.0, dims.1);
+                    return Ok(cover);
+                } else {
+                    println!("   ⚠️  Google Books cover too small ({}x{}), checking fallback...", dims.0, dims.1);
+                    update_fallback(cover);
+                }
+            }
+        }
+    }
+
+    // PRIORITY 5: Open Library (free, no API key, ISBN-based)
+    if let Some(cover) = fetch_open_library_cover(title, author).await {
+        let dims = get_cover_dimensions(&cover);
+        if cover_meets_size_preference(&cover) {
+            println!("   ✅ Open Library cover meets size preference ({}x{})", dims.0, dims.1);
+            return Ok(cover);
+        } else {
+            println!("   ⚠️  Open Library cover too small ({}x{})", dims.0, dims.1);
+            update_fallback(cover);
+        }
+    }
+
+    // Return best fallback if we found any cover (even if too small)
+    if let Some(cover) = fallback_cover {
+        println!("   ⚠️  No 600x600+ cover found, using best available ({}x{})", fallback_dims.0, fallback_dims.1);
+        return Ok(cover);
     }
 
     // No cover found
@@ -599,6 +697,67 @@ async fn fetch_audible_cover(asin: &str) -> Option<CoverArt> {
     }
 
     println!("   ⚠️  No Audible cover found");
+    None
+}
+
+/// Fetch cover from Open Library (free, no API key required)
+async fn fetch_open_library_cover(title: &str, author: &str) -> Option<CoverArt> {
+    println!("   📖 Trying Open Library cover...");
+
+    // Clean title for search
+    let clean_title = clean_title_for_cover_search(title);
+    let search_query = format!("{} {}", clean_title, author);
+
+    // Search Open Library for the book
+    let search_url = format!(
+        "https://openlibrary.org/search.json?q={}&limit=1",
+        urlencoding::encode(&search_query)
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    let response = client.get(&search_url).send().await.ok()?;
+    if !response.status().is_success() {
+        println!("   ⚠️  Open Library API error");
+        return None;
+    }
+
+    let json: serde_json::Value = response.json().await.ok()?;
+    let docs = json["docs"].as_array()?;
+    let first_doc = docs.first()?;
+
+    // Try to get cover ID
+    let cover_id = first_doc["cover_i"].as_i64()
+        .or_else(|| first_doc["cover_edition_key"].as_str().and_then(|_| first_doc["cover_i"].as_i64()));
+
+    if let Some(id) = cover_id {
+        // Open Library cover URL - L = large (max available)
+        let cover_url = format!("https://covers.openlibrary.org/b/id/{}-L.jpg", id);
+
+        if let Ok(cover) = download_cover(&cover_url).await {
+            if cover.data.is_some() {
+                println!("   ✅ Open Library cover found");
+                return Some(cover);
+            }
+        }
+    }
+
+    // Fallback: try ISBN if available
+    if let Some(isbn) = first_doc["isbn"].as_array().and_then(|arr| arr.first()).and_then(|v| v.as_str()) {
+        let isbn_cover_url = format!("https://covers.openlibrary.org/b/isbn/{}-L.jpg", isbn);
+
+        if let Ok(cover) = download_cover(&isbn_cover_url).await {
+            if cover.data.is_some() {
+                println!("   ✅ Open Library cover found (via ISBN)");
+                return Some(cover);
+            }
+        }
+    }
+
+    println!("   ⚠️  No Open Library cover found");
     None
 }
 
@@ -1162,11 +1321,21 @@ pub fn get_image_dimensions_from_data(data: &[u8]) -> (u32, u32) {
         while i < data.len().saturating_sub(9) {
             if data[i] == 0xFF {
                 let marker = data[i + 1];
-                // SOF0, SOF1, SOF2 markers contain dimensions
-                if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 {
+                // SOF markers (Start Of Frame) contain dimensions
+                // SOF0=0xC0 (Baseline), SOF1=0xC1 (Extended Sequential), SOF2=0xC2 (Progressive)
+                // SOF3=0xC3, SOF5-7=0xC5-C7, SOF9-11=0xC9-CB, SOF13-15=0xCD-CF
+                let is_sof = matches!(marker,
+                    0xC0 | 0xC1 | 0xC2 | 0xC3 |
+                    0xC5 | 0xC6 | 0xC7 |
+                    0xC9 | 0xCA | 0xCB |
+                    0xCD | 0xCE | 0xCF
+                );
+                if is_sof && i + 8 < data.len() {
                     let height = ((data[i + 5] as u32) << 8) | (data[i + 6] as u32);
                     let width = ((data[i + 7] as u32) << 8) | (data[i + 8] as u32);
-                    return (width, height);
+                    if width > 0 && height > 0 {
+                        return (width, height);
+                    }
                 }
                 if marker != 0x00 && marker != 0xFF && i + 3 < data.len() {
                     let len = ((data[i + 2] as usize) << 8) | (data[i + 3] as usize);

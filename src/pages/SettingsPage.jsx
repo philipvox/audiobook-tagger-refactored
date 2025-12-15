@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Upload, Settings as SettingsIcon, FileAudio, Zap, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react';
+import { Upload, Settings as SettingsIcon, FileAudio, Zap, AlertCircle, ChevronDown, ChevronUp, Globe, Check, X, Plus, Trash2, RefreshCw } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 // Preset configurations
@@ -30,6 +30,108 @@ export function SettingsPage() {
   const { config, saveConfig } = useApp();
   const [localConfig, setLocalConfig] = useState(config);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [customProviders, setCustomProviders] = useState([]);
+  const [availableProviders, setAvailableProviders] = useState([]);
+  const [showAddProvider, setShowAddProvider] = useState(false);
+  const [testingProvider, setTestingProvider] = useState(null);
+  const [testResult, setTestResult] = useState(null);
+
+  // Load custom providers on mount
+  useEffect(() => {
+    loadProviders();
+    loadAvailableProviders();
+  }, []);
+
+  const loadProviders = async () => {
+    try {
+      const providers = await invoke('get_custom_providers');
+      setCustomProviders(providers);
+    } catch (error) {
+      console.error('Failed to load custom providers:', error);
+    }
+  };
+
+  const loadAvailableProviders = async () => {
+    try {
+      const available = await invoke('get_available_providers');
+      setAvailableProviders(available);
+    } catch (error) {
+      console.error('Failed to load available providers:', error);
+    }
+  };
+
+  const toggleProvider = async (providerId, enabled) => {
+    try {
+      await invoke('toggle_provider', { providerId, enabled });
+      await loadProviders();
+    } catch (error) {
+      alert('Failed to toggle provider: ' + error);
+    }
+  };
+
+  const removeProvider = async (providerId) => {
+    if (!confirm('Remove this provider?')) return;
+    try {
+      await invoke('remove_custom_provider', { providerId });
+      await loadProviders();
+    } catch (error) {
+      alert('Failed to remove provider: ' + error);
+    }
+  };
+
+  const addProvider = async (providerId) => {
+    try {
+      await invoke('add_abs_agg_provider', { providerId });
+      await loadProviders();
+      setShowAddProvider(false);
+    } catch (error) {
+      alert('Failed to add provider: ' + error);
+    }
+  };
+
+  const resetProviders = async () => {
+    if (!confirm('Reset all providers to defaults?')) return;
+    try {
+      await invoke('reset_providers_to_defaults');
+      await loadProviders();
+    } catch (error) {
+      alert('Failed to reset providers: ' + error);
+    }
+  };
+
+  // Provider-specific test queries (each provider has different content)
+  const getTestQuery = (providerId) => {
+    const queries = {
+      'goodreads': { title: 'The Way of Kings', author: 'Sanderson' },
+      'hardcover': { title: 'Mistborn', author: 'Sanderson' },
+      'storytel/language:en': { title: 'The Martian', author: 'Weir' },
+      'storytel/language:de': { title: 'Die Zwerge', author: 'Heitz' },
+      'librivox': { title: 'Pride and Prejudice', author: 'Austen' }, // Public domain
+      'ardaudiothek': { title: 'Krimi', author: '' },
+      'audioteka/lang:pl': { title: 'Wiedzmin', author: 'Sapkowski' },
+      'bigfinish': { title: 'Doctor Who', author: '' }, // Audio dramas
+      'bookbeat/market:austria': { title: 'Thriller', author: '' },
+      'graphicaudio': { title: 'Mistborn', author: 'Sanderson' }, // Full-cast productions
+    };
+    return queries[providerId] || { title: 'The Hobbit', author: 'Tolkien' };
+  };
+
+  const testProvider = async (provider) => {
+    setTestingProvider(provider.provider_id);
+    setTestResult(null);
+    try {
+      const query = getTestQuery(provider.provider_id);
+      const result = await invoke('test_provider', {
+        providerId: provider.provider_id,
+        title: query.title,
+        author: query.author
+      });
+      setTestResult({ success: !!result, provider: provider.provider_id, data: result });
+    } catch (error) {
+      setTestResult({ success: false, provider: provider.provider_id, error: error.toString() });
+    }
+    setTestingProvider(null);
+  };
 
   const handleSave = async () => {
     const result = await saveConfig(localConfig);
@@ -152,12 +254,148 @@ export function SettingsPage() {
                 />
               </div>
               
-              <button 
-                onClick={handleSave} 
+              <button
+                onClick={handleSave}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
               >
                 Save Settings
               </button>
+            </div>
+          </div>
+
+          {/* Custom Metadata Providers */}
+          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div className="bg-gradient-to-r from-orange-50 to-amber-50 px-6 py-4 border-b border-gray-200">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-orange-100 rounded-lg">
+                    <Globe className="w-5 h-5 text-orange-600" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900">Custom Metadata Providers</h3>
+                    <p className="text-sm text-gray-600">Goodreads, Hardcover, Storytel via abs-agg</p>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowAddProvider(!showAddProvider)}
+                    className="flex items-center gap-1 px-3 py-1.5 text-sm bg-orange-100 text-orange-700 rounded-lg hover:bg-orange-200 transition-colors"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add
+                  </button>
+                  <button
+                    onClick={resetProviders}
+                    className="flex items-center gap-1 px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    Reset
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {/* Add Provider Panel */}
+              {showAddProvider && (
+                <div className="p-4 bg-orange-50 border border-orange-200 rounded-lg space-y-3">
+                  <h4 className="font-medium text-gray-900">Add abs-agg Provider</h4>
+                  <div className="grid grid-cols-2 gap-2">
+                    {availableProviders
+                      .filter(ap => !customProviders.some(cp => cp.provider_id === ap.id))
+                      .map(provider => (
+                        <button
+                          key={provider.id}
+                          onClick={() => addProvider(provider.id)}
+                          className="flex flex-col items-start p-3 bg-white border border-gray-200 rounded-lg hover:border-orange-400 hover:bg-orange-50 transition-colors text-left"
+                        >
+                          <span className="font-medium text-gray-900">{provider.name}</span>
+                          <span className="text-xs text-gray-500">{provider.description}</span>
+                        </button>
+                      ))}
+                  </div>
+                  <button
+                    onClick={() => setShowAddProvider(false)}
+                    className="text-sm text-gray-500 hover:text-gray-700"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+
+              {/* Provider List */}
+              {customProviders.length === 0 ? (
+                <p className="text-gray-500 text-center py-4">No custom providers configured. Click "Add" to add one.</p>
+              ) : (
+                <div className="space-y-2">
+                  {customProviders.map(provider => (
+                    <div
+                      key={provider.provider_id}
+                      className={`flex items-center justify-between p-4 rounded-lg border ${
+                        provider.enabled ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => toggleProvider(provider.provider_id, !provider.enabled)}
+                          className={`w-10 h-6 rounded-full transition-colors ${
+                            provider.enabled ? 'bg-green-500' : 'bg-gray-300'
+                          }`}
+                        >
+                          <div className={`w-4 h-4 bg-white rounded-full shadow transform transition-transform mx-1 ${
+                            provider.enabled ? 'translate-x-4' : ''
+                          }`} />
+                        </button>
+                        <div>
+                          <div className="font-medium text-gray-900">{provider.name}</div>
+                          <div className="text-xs text-gray-500">
+                            {provider.base_url}/{provider.provider_id}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {/* Priority Badge */}
+                        <span className="px-2 py-1 text-xs bg-gray-100 text-gray-600 rounded">
+                          Priority: {provider.priority}
+                        </span>
+
+                        {/* Test Result */}
+                        {testResult?.provider === provider.provider_id && (
+                          <span className={`flex items-center gap-1 px-2 py-1 text-xs rounded ${
+                            testResult.success ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                          }`}>
+                            {testResult.success ? <Check className="w-3 h-3" /> : <X className="w-3 h-3" />}
+                            {testResult.success ? 'Works!' : 'Failed'}
+                          </span>
+                        )}
+
+                        {/* Test Button */}
+                        <button
+                          onClick={() => testProvider(provider)}
+                          disabled={testingProvider === provider.provider_id}
+                          className="px-3 py-1.5 text-sm bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 transition-colors disabled:opacity-50"
+                        >
+                          {testingProvider === provider.provider_id ? 'Testing...' : 'Test'}
+                        </button>
+
+                        {/* Remove Button */}
+                        <button
+                          onClick={() => removeProvider(provider.provider_id)}
+                          className="p-1.5 text-red-500 hover:bg-red-100 rounded-lg transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="text-xs text-gray-500 bg-gray-50 p-3 rounded-lg">
+                <p className="font-medium text-gray-700 mb-1">How it works:</p>
+                <p>Custom providers search additional sources (Goodreads, Hardcover, etc.) during scanning to fill in missing metadata like series info, descriptions, and genres. Enabled providers run in parallel with ABS for faster results.</p>
+              </div>
             </div>
           </div>
 

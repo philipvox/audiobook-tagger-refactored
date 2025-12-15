@@ -58,8 +58,8 @@ pub fn is_abs_configured(config: &Config) -> bool {
     !config.abs_base_url.is_empty() && !config.abs_api_token.is_empty()
 }
 
-/// Search for metadata using waterfall strategy: Audible -> Google -> iTunes
-/// Returns the first valid result found
+/// Search for metadata using PARALLEL provider calls: Audible, Google, iTunes simultaneously
+/// Returns the first valid result found (prioritizes Audible > Google > iTunes)
 pub async fn search_metadata_waterfall(
     config: &Config,
     title: &str,
@@ -69,10 +69,27 @@ pub async fn search_metadata_waterfall(
         return None;
     }
 
-    for provider in PROVIDERS {
-        println!("   🔍 ABS search via {} for '{}'...", provider, title);
+    println!("   🔍 ABS parallel search for '{}'...", title);
 
-        if let Some(result) = search_abs_provider(config, provider, title, author).await {
+    // Run all providers in parallel
+    let futures: Vec<_> = PROVIDERS.iter()
+        .map(|provider| {
+            let config = config.clone();
+            let title = title.to_string();
+            let author = author.to_string();
+            let provider = *provider;
+            async move {
+                let result = search_abs_provider(&config, provider, &title, &author).await;
+                (provider, result)
+            }
+        })
+        .collect();
+
+    let results = futures::future::join_all(futures).await;
+
+    // Process results in priority order (Audible > Google > iTunes)
+    for (provider, result) in results {
+        if let Some(result) = result {
             if is_result_valid(&result) {
                 println!("   ✅ ABS {} found: {:?}", provider, result.title);
                 if !result.series.is_empty() {
@@ -83,7 +100,7 @@ pub async fn search_metadata_waterfall(
                 }
                 return Some(result);
             } else {
-                println!("   ⚠️  ABS {} returned incomplete data, trying next...", provider);
+                println!("   ⚠️  ABS {} returned incomplete data", provider);
             }
         }
     }
@@ -396,7 +413,7 @@ fn is_result_valid(result: &AbsSearchResult) -> bool {
     result.title.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
 }
 
-/// Search for cover art using waterfall strategy
+/// Search for cover art using PARALLEL provider calls
 pub async fn search_cover_waterfall(
     config: &Config,
     title: &str,
@@ -406,38 +423,60 @@ pub async fn search_cover_waterfall(
         return None;
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .ok()?;
+    // Run all providers in parallel
+    let futures: Vec<_> = PROVIDERS.iter()
+        .map(|provider| {
+            let config = config.clone();
+            let title = title.to_string();
+            let author = author.to_string();
+            let provider = *provider;
+            async move {
+                let client = match reqwest::Client::builder()
+                    .timeout(Duration::from_secs(15))
+                    .build() {
+                        Ok(c) => c,
+                        Err(_) => return (provider, None),
+                    };
 
-    for provider in PROVIDERS {
-        let url = format!(
-            "{}/api/search/covers?provider={}&title={}&author={}",
-            config.abs_base_url,
-            urlencoding::encode(provider),
-            urlencoding::encode(title),
-            urlencoding::encode(author)
-        );
+                let url = format!(
+                    "{}/api/search/covers?provider={}&title={}&author={}",
+                    config.abs_base_url,
+                    urlencoding::encode(provider),
+                    urlencoding::encode(&title),
+                    urlencoding::encode(&author)
+                );
 
-        if let Ok(response) = client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", config.abs_api_token))
-            .send()
-            .await
-        {
-            if response.status().is_success() {
-                if let Ok(body) = response.text().await {
-                    // Parse cover results
-                    if let Some(cover_url) = parse_cover_response(&body) {
-                        println!("   ✅ ABS cover found via {}", provider);
-                        return Some(AbsCoverResult {
-                            url: cover_url,
-                            provider: provider.to_string(),
-                        });
+                let result = match client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", config.abs_api_token))
+                    .send()
+                    .await
+                {
+                    Ok(response) if response.status().is_success() => {
+                        if let Ok(body) = response.text().await {
+                            parse_cover_response(&body)
+                        } else {
+                            None
+                        }
                     }
-                }
+                    _ => None,
+                };
+
+                (provider, result)
             }
+        })
+        .collect();
+
+    let results = futures::future::join_all(futures).await;
+
+    // Return first valid cover (priority order: Audible > Google > iTunes)
+    for (provider, cover_url) in results {
+        if let Some(url) = cover_url {
+            println!("   ✅ ABS cover found via {}", provider);
+            return Some(AbsCoverResult {
+                url,
+                provider: provider.to_string(),
+            });
         }
     }
 

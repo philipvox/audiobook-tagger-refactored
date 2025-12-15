@@ -23,6 +23,90 @@ const getConfidenceConfig = (score) => {
   return { label: 'Low', color: 'bg-red-500', textColor: 'text-red-700', bgColor: 'bg-red-50', borderColor: 'border-red-200', emoji: '🔴' };
 };
 
+// Check if a string looks like a person's name (2-3 words, capitalized)
+const looksLikePersonName = (s) => {
+  const words = s.trim().split(/\s+/);
+  if (words.length < 2 || words.length > 4) return false;
+  const lower = s.toLowerCase();
+  const seriesIndicators = ['series', 'saga', 'chronicles', 'trilogy', 'book', 'collection',
+                            'adventures', 'mysteries', 'tales', 'stories', 'cycle'];
+  if (seriesIndicators.some(ind => lower.includes(ind))) return false;
+  for (const word of words) {
+    const wordLower = word.toLowerCase();
+    if (['jr', 'jr.', 'sr', 'sr.', 'ii', 'iii', 'iv', 'phd', 'md', 'dr', 'dr.'].includes(wordLower)) continue;
+    if (/\d/.test(word)) return false;
+    if (word.length > 0 && word[0] !== word[0].toUpperCase()) return false;
+  }
+  return true;
+};
+
+// Validate series name - filter out GPT artifacts and placeholder values
+const isValidSeries = (series, author = null) => {
+  if (!series || typeof series !== 'string') return false;
+
+  const s = series.trim();
+  if (s.length < 2) return false;
+
+  const lower = s.toLowerCase();
+
+  // Reject known bad values from GPT
+  const invalidValues = [
+    // Placeholder values
+    'null', 'or null', 'none', 'n/a', 'na', 'unknown', 'unknown series',
+    'standalone', 'stand-alone', 'stand alone', 'single', 'single book',
+    'not a series', 'no series', 'not part of a series', 'no series name',
+    'series name', 'series', 'title', 'book', 'audiobook',
+    'undefined', 'not applicable', 'not available', 'tbd', 'tba',
+    // Genres that GPT incorrectly returns as series
+    'biography', 'autobiography', 'memoir', 'memoirs', 'fiction', 'non-fiction',
+    'nonfiction', 'mystery', 'thriller', 'romance', 'fantasy', 'science fiction',
+    'sci-fi', 'horror', 'historical fiction', 'literary fiction', 'self-help',
+    'self help', 'history', 'true crime', 'comedy', 'humor', 'drama',
+    'adventure', 'action', 'suspense', 'classic', 'classics', 'poetry',
+    'essay', 'essays', 'short stories', 'anthology', 'collection',
+    'young adult', 'ya', 'children', 'kids', 'juvenile', 'teen',
+    'business', 'economics', 'psychology', 'philosophy', 'religion',
+    'spirituality', 'health', 'wellness', 'cooking', 'travel', 'science',
+    'technology', 'politics', 'sociology', 'education', 'reference',
+  ];
+
+  if (invalidValues.includes(lower)) return false;
+
+  // Reject if contains "or null" anywhere
+  if (lower.includes('or null') || lower.includes('#or null')) return false;
+
+  // Reject if series matches the author name
+  if (author) {
+    const authorLower = author.toLowerCase().trim();
+    if (lower === authorLower) return false;
+    if (authorLower.includes(lower)) return false;
+    const firstAuthor = authorLower.split(',')[0].trim();
+    if (lower === firstAuthor) return false;
+  }
+
+  // Reject if it looks like a person's name (2 words, capitalized)
+  if (looksLikePersonName(s)) {
+    const words = s.trim().split(/\s+/);
+    if (words.length === 2) return false;
+  }
+
+  return true;
+};
+
+// Validate sequence/book number
+const isValidSequence = (seq) => {
+  if (!seq || typeof seq !== 'string') return false;
+
+  const s = seq.trim();
+  if (s.length === 0) return false;
+
+  const lower = s.toLowerCase();
+  const invalidValues = ['null', 'or null', 'none', 'n/a', 'na', 'unknown', '?', 'tbd'];
+  if (invalidValues.includes(lower)) return false;
+
+  return true;
+};
+
 // Confidence indicator component
 function ConfidenceIndicator({ confidence }) {
   if (!confidence) return null;
@@ -167,6 +251,7 @@ export function MetadataPanel({ group, onEdit }) {
     try {
       const cover = await invoke('get_cover_for_group', {
         groupId: group.id,
+        coverUrl: group.metadata?.cover_url || null,
       });
       setCoverData(cover);
       
@@ -338,20 +423,45 @@ export function MetadataPanel({ group, onEdit }) {
                 )}
               </div>
 
-              {/* Series */}
-              {metadata.series && (
+              {/* Series - Show all_series if available, otherwise primary series */}
+              {(metadata.all_series?.length > 0 || isValidSeries(metadata.series, metadata.author)) && (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
-                    <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Series</div>
+                    <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                      Series
+                      {metadata.all_series?.length > 1 && (
+                        <span className="ml-2 px-1.5 py-0.5 bg-indigo-200 text-indigo-700 rounded text-[10px]">
+                          {metadata.all_series.length}
+                        </span>
+                      )}
+                    </div>
                     <SourceBadge source={metadata.sources?.series} />
                   </div>
-                  <div className="inline-flex items-center gap-2 px-5 py-3 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl border border-indigo-200">
-                    <Book className="w-5 h-5 text-indigo-600" />
-                    <span className="font-semibold text-gray-900 text-lg">{metadata.series}</span>
-                    {metadata.sequence && (
-                      <span className="ml-1 px-2.5 py-0.5 bg-indigo-600 text-white text-sm font-bold rounded-full">
-                        #{metadata.sequence}
-                      </span>
+                  <div className="flex flex-wrap gap-2">
+                    {metadata.all_series?.length > 0 ? (
+                      // Display ALL series from all_series array
+                      metadata.all_series.map((s, idx) => (
+                        <div key={idx} className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl border border-indigo-200">
+                          <Book className="w-4 h-4 text-indigo-600" />
+                          <span className="font-semibold text-gray-900">{s.name}</span>
+                          {isValidSequence(s.sequence) && (
+                            <span className="px-2 py-0.5 bg-indigo-600 text-white text-xs font-bold rounded-full">
+                              #{s.sequence}
+                            </span>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      // Fallback to primary series/sequence
+                      <div className="inline-flex items-center gap-2 px-5 py-3 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl border border-indigo-200">
+                        <Book className="w-5 h-5 text-indigo-600" />
+                        <span className="font-semibold text-gray-900 text-lg">{metadata.series}</span>
+                        {isValidSequence(metadata.sequence) && (
+                          <span className="ml-1 px-2.5 py-0.5 bg-indigo-600 text-white text-sm font-bold rounded-full">
+                            #{metadata.sequence}
+                          </span>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -396,18 +506,44 @@ export function MetadataPanel({ group, onEdit }) {
                 </div>
               )}
 
-              {/* Description */}
-              {metadata.description && (
+              {/* Description with Themes & Tropes */}
+              {(metadata.description || metadata.themes?.length > 0 || metadata.tropes?.length > 0) && (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
                     <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">About</div>
-                    <SourceBadge source={metadata.sources?.description} />
+                    <SourceBadge source={metadata.sources?.description || metadata.themes_source} />
                   </div>
-                  <div className="prose prose-sm max-w-none">
-                    <p className="text-gray-700 leading-relaxed whitespace-pre-wrap">
-                      {metadata.description}
-                    </p>
-                  </div>
+
+                  {/* Themes & Tropes - displayed at top of About section */}
+                  {(metadata.themes?.length > 0 || metadata.tropes?.length > 0) && (
+                    <div className="space-y-2 pb-3 border-b border-gray-100">
+                      {metadata.themes?.length > 0 && (
+                        <div className="flex items-start gap-2">
+                          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider flex-shrink-0 pt-0.5 w-14">Themes</span>
+                          <span className="text-sm text-gray-700">
+                            {metadata.themes.join(' · ')}
+                          </span>
+                        </div>
+                      )}
+                      {metadata.tropes?.length > 0 && (
+                        <div className="flex items-start gap-2">
+                          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider flex-shrink-0 pt-0.5 w-14">Tropes</span>
+                          <span className="text-sm text-gray-700">
+                            {metadata.tropes.join(' · ')}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Description text */}
+                  {metadata.description && (
+                    <div className="prose prose-sm max-w-none">
+                      <p className="text-gray-700 leading-relaxed whitespace-pre-wrap">
+                        {metadata.description}
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -500,13 +636,13 @@ export function MetadataPanel({ group, onEdit }) {
                 {/* Confidence Indicator */}
                 <ConfidenceIndicator confidence={metadata.confidence} />
 
-                <div className="aspect-[2/3] bg-gradient-to-br from-gray-100 to-gray-200 rounded-2xl shadow-xl overflow-hidden border-4 border-white ring-1 ring-gray-200 relative">
+                <div className="aspect-square bg-gradient-to-br from-gray-100 to-gray-200 rounded-2xl shadow-xl overflow-hidden border-4 border-white ring-1 ring-gray-200 relative flex items-center justify-center">
                   {coverUrl ? (
                     <>
-                      <img 
-                        src={coverUrl} 
+                      <img
+                        src={coverUrl}
                         alt={`${metadata.title} cover`}
-                        className="w-full h-full object-cover"
+                        className="max-w-full max-h-full object-contain"
                         onError={(e) => {
                           console.error('Failed to load cover image');
                           e.target.style.display = 'none';
@@ -524,7 +660,7 @@ export function MetadataPanel({ group, onEdit }) {
                       )}
                     </>
                   ) : (
-                    <div className="w-full h-full flex flex-col items-center justify-center p-6">
+                    <div className="flex flex-col items-center justify-center p-6">
                       <Book className="w-20 h-20 text-gray-400 mb-4" />
                       <p className="text-center text-sm text-gray-500 font-medium">No Cover Available</p>
                     </div>
@@ -603,14 +739,14 @@ export function MetadataPanel({ group, onEdit }) {
                         key={idx}
                         className="group border border-gray-200 rounded-lg overflow-hidden hover:shadow-xl hover:border-blue-300 transition-all bg-white"
                       >
-                        <div className="aspect-[2/3] bg-gray-100 relative overflow-hidden">
+                        <div className="aspect-square bg-gray-100 relative overflow-hidden flex items-center justify-center">
                           <img
                             src={option.url}
                             alt="Cover preview"
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            className="max-w-full max-h-full object-contain group-hover:scale-105 transition-transform duration-300"
                             loading="lazy"
                             onError={(e) => {
-                              e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="300"%3E%3Crect fill="%23ddd" width="200" height="300"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23999" font-size="14"%3ENo Image%3C/text%3E%3C/svg%3E';
+                              e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="200"%3E%3Crect fill="%23ddd" width="200" height="200"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23999" font-size="14"%3ENo Image%3C/text%3E%3C/svg%3E';
                             }}
                           />
 

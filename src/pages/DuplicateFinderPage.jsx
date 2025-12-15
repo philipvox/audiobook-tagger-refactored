@@ -99,20 +99,20 @@ function DuplicateGroupCard({
                     </div>
                   )}
 
-                  {/* Cover image */}
-                  <div className="w-16 h-16 flex-shrink-0 rounded overflow-hidden bg-gray-200">
+                  {/* Cover image - Square */}
+                  <div className="w-16 h-16 flex-shrink-0 rounded overflow-hidden bg-gray-200 flex items-center justify-center">
                     {book.cover_path ? (
                       <img
                         src={convertFileSrc(book.cover_path)}
                         alt={book.title}
-                        className="w-full h-full object-cover"
+                        className="max-w-full max-h-full object-contain"
                         onError={(e) => {
                           e.target.style.display = 'none';
                           e.target.nextSibling.style.display = 'flex';
                         }}
                       />
                     ) : null}
-                    <div className={`w-full h-full flex items-center justify-center ${book.cover_path ? 'hidden' : ''}`}>
+                    <div className={`flex items-center justify-center ${book.cover_path ? 'hidden' : ''}`}>
                       <Image className="w-6 h-6 text-gray-400" />
                     </div>
                   </div>

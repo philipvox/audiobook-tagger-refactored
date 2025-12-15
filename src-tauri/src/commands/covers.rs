@@ -7,6 +7,7 @@ use crate::cover_art::{
     search_all_cover_sources, download_and_validate_cover,
     get_image_dimensions_from_data,
 };
+use crate::config;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CoverResult {
@@ -25,9 +26,10 @@ pub struct CoverData {
 }
 
 #[tauri::command]
-pub async fn get_cover_for_group(group_id: String) -> Result<Option<CoverData>, String> {
+pub async fn get_cover_for_group(group_id: String, cover_url: Option<String>) -> Result<Option<CoverData>, String> {
     let cache_key = format!("cover_{}", group_id);
 
+    // Check cache first
     if let Some((cover_data, mime_type)) = crate::cache::get::<(Vec<u8>, String)>(&cache_key) {
         let size_kb = cover_data.len() / 1024;
 
@@ -38,17 +40,83 @@ pub async fn get_cover_for_group(group_id: String) -> Result<Option<CoverData>, 
         let source_key = format!("cover_source_{}", group_id);
         let source = crate::cache::get::<String>(&source_key);
 
-        Ok(Some(CoverData {
+        return Ok(Some(CoverData {
             data: cover_data,
             mime_type,
             size_kb,
             width,
             height,
             source,
-        }))
-    } else {
-        Ok(None)
+        }));
     }
+
+    // If no cache and we have a cover_url (e.g., from ABS), fetch it
+    if let Some(url) = cover_url {
+        if url.contains("/api/items/") && url.contains("/cover") {
+            // This is an ABS URL - needs authentication
+            if let Ok(cover_data) = fetch_abs_cover(&url).await {
+                // Cache it for future use
+                let _ = crate::cache::set(&cache_key, &(cover_data.data.clone(), cover_data.mime_type.clone()));
+                let source_key = format!("cover_source_{}", group_id);
+                let _ = crate::cache::set(&source_key, &"ABS".to_string());
+                return Ok(Some(cover_data));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Fetch cover from ABS with authentication
+async fn fetch_abs_cover(url: &str) -> Result<CoverData, String> {
+    let config = config::load_config().map_err(|e| e.to_string())?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", config.abs_api_token))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch ABS cover: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("ABS cover fetch failed: HTTP {}", response.status()));
+    }
+
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    let data = bytes.to_vec();
+
+    if data.len() < 100 {
+        return Err("ABS cover too small".to_string());
+    }
+
+    // Determine mime type
+    let is_png = data.len() >= 8 && data[0] == 0x89 && data[1] == 0x50;
+    let is_jpeg = data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8;
+
+    let mime_type = if is_png {
+        "image/png".to_string()
+    } else if is_jpeg {
+        "image/jpeg".to_string()
+    } else {
+        "image/jpeg".to_string() // Assume JPEG as fallback
+    };
+
+    let (width, height) = get_image_dimensions(&data);
+    let size_kb = data.len() / 1024;
+
+    Ok(CoverData {
+        data,
+        mime_type,
+        size_kb,
+        width,
+        height,
+        source: Some("ABS".to_string()),
+    })
 }
 
 fn get_image_dimensions(data: &[u8]) -> (Option<u32>, Option<u32>) {
@@ -250,7 +318,7 @@ pub async fn set_cover_from_file(
     image_path: String,
 ) -> Result<CoverResult, String> {
     let path = Path::new(&image_path);
-    
+
     if !path.exists() {
         return Ok(CoverResult {
             success: false,
@@ -259,7 +327,7 @@ pub async fn set_cover_from_file(
     }
 
     let image_data = fs::read(path).map_err(|e| e.to_string())?;
-    
+
     let mime_type = match path.extension().and_then(|e| e.to_str()) {
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("png") => "image/png",
@@ -274,5 +342,87 @@ pub async fn set_cover_from_file(
     Ok(CoverResult {
         success: true,
         message: "Cover uploaded successfully".to_string(),
+    })
+}
+
+/// Read an image file and return its data
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ImageFileData {
+    pub data: Vec<u8>,
+    pub mime_type: String,
+}
+
+#[tauri::command]
+pub async fn read_image_file(path: String) -> Result<ImageFileData, String> {
+    let file_path = Path::new(&path);
+
+    if !file_path.exists() {
+        return Err("File not found".to_string());
+    }
+
+    let data = fs::read(file_path).map_err(|e| e.to_string())?;
+
+    // Determine mime type from extension or magic bytes
+    let mime_type = match file_path.extension().and_then(|e| e.to_str()) {
+        Some("jpg") | Some("jpeg") => "image/jpeg".to_string(),
+        Some("png") => "image/png".to_string(),
+        Some("webp") => "image/webp".to_string(),
+        Some("gif") => "image/gif".to_string(),
+        _ => {
+            // Try magic bytes
+            if data.len() >= 8 && data[0] == 0x89 && data[1] == 0x50 {
+                "image/png".to_string()
+            } else if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
+                "image/jpeg".to_string()
+            } else {
+                "image/jpeg".to_string() // Default
+            }
+        }
+    };
+
+    Ok(ImageFileData { data, mime_type })
+}
+
+/// Set cover from raw data (for bulk assignment)
+#[tauri::command]
+pub async fn set_cover_from_data(
+    group_id: String,
+    image_data: Vec<u8>,
+    mime_type: String,
+) -> Result<CoverResult, String> {
+    if image_data.len() < 100 {
+        return Err("Image data too small".to_string());
+    }
+
+    // Validate it's a real image
+    let is_png = image_data.len() >= 8
+        && image_data[0] == 0x89
+        && image_data[1] == 0x50;
+    let is_jpeg = image_data.len() >= 2
+        && image_data[0] == 0xFF
+        && image_data[1] == 0xD8;
+
+    if !is_png && !is_jpeg {
+        return Err("Invalid image data".to_string());
+    }
+
+    let (width, height) = get_image_dimensions(&image_data);
+    let size_kb = image_data.len() / 1024;
+
+    println!("📥 Setting cover from data: {}x{} ({} KB)",
+        width.unwrap_or(0), height.unwrap_or(0), size_kb);
+
+    let cache_key = format!("cover_{}", group_id);
+    crate::cache::set(&cache_key, &(image_data, mime_type))
+        .map_err(|e| e.to_string())?;
+
+    // Mark source as user-provided
+    let source_key = format!("cover_source_{}", group_id);
+    let _ = crate::cache::set(&source_key, &"User Provided".to_string());
+
+    Ok(CoverResult {
+        success: true,
+        message: format!("Cover set successfully ({}x{}, {} KB)",
+            width.unwrap_or(0), height.unwrap_or(0), size_kb),
     })
 }

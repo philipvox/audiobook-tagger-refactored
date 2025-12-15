@@ -2,6 +2,31 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// A custom metadata provider configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomProvider {
+    pub name: String,           // Display name (e.g., "Goodreads")
+    pub provider_id: String,    // Provider ID for abs-agg (e.g., "goodreads")
+    pub base_url: String,       // Base URL (e.g., "https://provider.vito0912.de")
+    pub auth_token: Option<String>, // Auth token if required
+    pub enabled: bool,          // Whether to use this provider
+    #[serde(default)]
+    pub priority: i32,          // Higher = searched first (default 0)
+}
+
+impl CustomProvider {
+    pub fn new_abs_agg(name: &str, provider_id: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            provider_id: provider_id.to_string(),
+            base_url: "https://provider.vito0912.de".to_string(),
+            auth_token: Some("abs".to_string()),
+            enabled: true,
+            priority: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub abs_base_url: String,
@@ -31,10 +56,74 @@ pub struct Config {
     pub concurrency_abs_push: Option<usize>,
     #[serde(default)]
     pub concurrency_file_scan: Option<usize>,
+
+    // Custom metadata providers (abs-agg, etc.)
+    #[serde(default = "default_custom_providers")]
+    pub custom_providers: Vec<CustomProvider>,
 }
 
 fn default_preset() -> String {
     "balanced".to_string()
+}
+
+/// Default custom providers - abs-agg community providers
+fn default_custom_providers() -> Vec<CustomProvider> {
+    vec![
+        // Goodreads - excellent for series info, ratings, descriptions
+        CustomProvider {
+            name: "Goodreads".to_string(),
+            provider_id: "goodreads".to_string(),
+            base_url: "https://provider.vito0912.de".to_string(),
+            auth_token: Some("abs".to_string()),
+            enabled: true,
+            priority: 100, // High priority - best for series/descriptions
+        },
+        // Hardcover - modern book database, clean data
+        CustomProvider {
+            name: "Hardcover".to_string(),
+            provider_id: "hardcover".to_string(),
+            base_url: "https://provider.vito0912.de".to_string(),
+            auth_token: Some("abs".to_string()),
+            enabled: true,
+            priority: 90,
+        },
+        // Storytel - audiobook-specific metadata
+        CustomProvider {
+            name: "Storytel".to_string(),
+            provider_id: "storytel/language:en".to_string(),
+            base_url: "https://provider.vito0912.de".to_string(),
+            auth_token: Some("abs".to_string()),
+            enabled: true,
+            priority: 80,
+        },
+        // Graphic Audio - full-cast audio productions
+        CustomProvider {
+            name: "Graphic Audio".to_string(),
+            provider_id: "graphicaudio".to_string(),
+            base_url: "https://provider.vito0912.de".to_string(),
+            auth_token: Some("abs".to_string()),
+            enabled: true,
+            priority: 70,
+        },
+        // Big Finish - Doctor Who and audio dramas
+        CustomProvider {
+            name: "Big Finish".to_string(),
+            provider_id: "bigfinish".to_string(),
+            base_url: "https://provider.vito0912.de".to_string(),
+            auth_token: Some("abs".to_string()),
+            enabled: true,
+            priority: 60,
+        },
+        // LibriVox - public domain audiobooks
+        CustomProvider {
+            name: "LibriVox".to_string(),
+            provider_id: "librivox".to_string(),
+            base_url: "https://provider.vito0912.de".to_string(),
+            auth_token: Some("abs".to_string()),
+            enabled: false, // Disabled by default - mainly for public domain
+            priority: 50,
+        },
+    ]
 }
 
 impl Default for Config {
@@ -55,6 +144,7 @@ impl Default for Config {
             concurrency_json_writes: None,
             concurrency_abs_push: None,
             concurrency_file_scan: None,
+            custom_providers: default_custom_providers(),
         }
     }
 }
@@ -88,7 +178,8 @@ impl Config {
 
         // Get base values for "balanced" preset
         // These are tuned for a good balance of speed and system load
-        let (metadata, super_scanner, json_writes, abs_push, file_scan) = (20, 8, 100, 60, 16);
+        // abs_push reduced to 5 to avoid overwhelming ABS server (causes 502 errors)
+        let (metadata, super_scanner, json_writes, abs_push, file_scan) = (20, 8, 100, 5, 16);
 
         // Get multiplier based on preset
         // Higher multipliers allow more parallel operations but use more system resources

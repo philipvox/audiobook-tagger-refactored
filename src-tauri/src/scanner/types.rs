@@ -128,6 +128,8 @@ pub enum MetadataSource {
     Unknown,
     /// Retrieved via AudiobookShelf search API (proxied Audible/Google/iTunes)
     Abs,
+    /// Retrieved from custom providers (Goodreads, Hardcover, Storytel via abs-agg)
+    CustomProvider,
 }
 
 impl Default for MetadataSource {
@@ -338,6 +340,7 @@ impl From<MetadataSource> for SourcePriority {
             MetadataSource::ITunes => SourcePriority::ITunes,
             MetadataSource::Audible => SourcePriority::Audible,
             MetadataSource::Abs => SourcePriority::Audible, // Same priority as Audible (proxied)
+            MetadataSource::CustomProvider => SourcePriority::Audible, // Same priority as Audible (Goodreads/Hardcover)
             MetadataSource::Gpt => SourcePriority::Gpt,
             MetadataSource::Manual => SourcePriority::Manual,
         }
@@ -437,6 +440,22 @@ pub struct BookMetadata {
     /// Confidence scores for metadata accuracy (only set by SuperScanner mode)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<MetadataConfidence>,
+
+    // THEMES & TROPES (GPT-generated insights)
+    /// Philosophical/conceptual themes the book explores (max 3)
+    /// e.g., "Mortality", "Identity", "The Cost of Power"
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub themes: Vec<String>,
+    /// Plot-based story elements/patterns (max 3, spoiler-free)
+    /// e.g., "Revenge", "Heist", "Enemies to Lovers"
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tropes: Vec<String>,
+    /// Source of themes data: "gpt", "api", or "manual"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub themes_source: Option<String>,
+    /// Source of tropes data: "gpt", "api", or "manual"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tropes_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

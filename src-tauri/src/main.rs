@@ -20,9 +20,12 @@ mod chapters;   // Chapter detection and splitting
 mod folder_fixer;  // AI-powered folder organization
 mod smart_rename;  // AI-powered smart rename
 mod abs_search;  // AudiobookShelf search API client
+mod custom_providers;  // Custom metadata providers (abs-agg: Goodreads, Hardcover, etc.)
 mod whisper;     // OpenAI Whisper audio transcription
 mod duplicate_finder;  // Find duplicate audiobooks in library
 mod converter;         // MP3 to M4B conversion
+mod series;            // Centralized series processing
+mod pipeline;          // Metadata pipeline (Gather → Context → Decide → Validate)
 
 // use tauri::Manager;
 
@@ -72,6 +75,8 @@ fn main() {
             commands::covers::search_covers_multi_source,
             commands::covers::download_cover_from_url,
             commands::covers::set_cover_from_file,
+            commands::covers::read_image_file,
+            commands::covers::set_cover_from_data,
             commands::abs::clear_abs_library_cache,
             commands::export::export_to_csv,
             commands::export::export_to_json,
@@ -118,6 +123,21 @@ fn main() {
             commands::converter::delete_source_files_after_conversion,
             commands::converter::get_quality_presets,
             commands::converter::get_speed_presets,
+            // Custom Provider commands (abs-agg: Goodreads, Hardcover, etc.)
+            commands::custom_providers::get_available_providers,
+            commands::custom_providers::get_custom_providers,
+            commands::custom_providers::set_custom_providers,
+            commands::custom_providers::add_custom_provider,
+            commands::custom_providers::remove_custom_provider,
+            commands::custom_providers::toggle_provider,
+            commands::custom_providers::test_provider,
+            commands::custom_providers::search_all_custom_providers,
+            commands::custom_providers::add_abs_agg_provider,
+            commands::custom_providers::reset_providers_to_defaults,
+            // Pipeline commands (new metadata processing architecture)
+            commands::pipeline::process_with_pipeline,
+            commands::pipeline::process_abs_item,
+            commands::pipeline::preview_pipeline,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

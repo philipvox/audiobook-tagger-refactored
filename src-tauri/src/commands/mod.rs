@@ -16,6 +16,8 @@ pub mod smart_rename;
 pub mod duplicates;
 pub mod genres;
 pub mod converter;
+pub mod custom_providers;
+pub mod pipeline;
 
 // Re-export all commands for easy access
 // pub use config::*;

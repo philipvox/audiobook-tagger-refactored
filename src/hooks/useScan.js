@@ -1,6 +1,7 @@
 // src/hooks/useScan.js
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useApp } from '../context/AppContext';
 
@@ -394,7 +395,8 @@ export function useScan() {
   }, [setGroups]);
 
   // Import books from ABS library (no local file scan)
-  const handleImportFromAbs = useCallback(async () => {
+  // Options: { enrichWithCustomProviders: boolean } - if true, search Goodreads/Hardcover for additional metadata
+  const handleImportFromAbs = useCallback(async (options = {}) => {
     if (progressIntervalRef.current) {
       clearInterval(progressIntervalRef.current);
       progressIntervalRef.current = null;
@@ -408,19 +410,23 @@ export function useScan() {
     try {
       setScanning(true);
       const startTime = Date.now();
+      const enriching = options.enrichWithCustomProviders ? ' + custom providers' : '';
       setScanProgress({
         current: 0,
         total: 0,
-        currentFile: 'Connecting to AudiobookShelf...',
+        currentFile: `Connecting to AudiobookShelf${enriching}...`,
         startTime,
         filesPerSecond: 0,
         covers_found: 0,
       });
 
-      console.log('📚 Importing from ABS library...');
+      console.log('📚 Importing from ABS library...', options.enrichWithCustomProviders ? '(with custom providers)' : '');
 
       try {
-        const result = await invoke('import_from_abs');
+        const request = options.enrichWithCustomProviders
+          ? { enrich_with_custom_providers: true }
+          : null;
+        const result = await invoke('import_from_abs', { request });
 
         if (result && result.groups) {
           console.log(`✅ Imported ${result.groups.length} books from ABS`);
@@ -494,7 +500,8 @@ export function useScan() {
   // mode: 'force_fresh' = full API search, 'genres_only' = just normalize genres
   // autoPush: automatically push changes back to ABS after processing
   // fields: optional array of field names to update (e.g., ['description', 'genres'])
-  const handleRescanAbsImports = useCallback(async (selectedGroups, mode = 'force_fresh', autoPush = true, fields = null) => {
+  // enrichWithCustomProviders: search Goodreads/Hardcover for additional metadata
+  const handleRescanAbsImports = useCallback(async (selectedGroups, mode = 'force_fresh', autoPush = false, fields = null, enrichWithCustomProviders = false) => {
     if (!selectedGroups || selectedGroups.length === 0) {
       return { success: false, count: 0 };
     }
@@ -529,20 +536,21 @@ export function useScan() {
         })),
         mode,
         fields: fields, // Optional: only update specific fields
+        enrich_with_custom_providers: enrichWithCustomProviders, // Search Goodreads/Hardcover
       };
 
       const fieldsStr = fields ? fields.join(', ') : 'all';
-      console.log(`📋 Fields to update: ${fieldsStr}`);
+      const enrichStr = enrichWithCustomProviders ? ' + custom providers' : '';
+      console.log(`📋 Fields to update: ${fieldsStr}${enrichStr}`);
 
       const result = await invoke('rescan_abs_imports', { request });
 
-      // Update groups with rescanned data
+      // Update groups with rescanned data (preserve position in list)
       if (result && result.groups) {
-        setGroups(prevGroups => {
-          const updatedIds = new Set(result.groups.map(g => g.id));
-          const filtered = prevGroups.filter(g => !updatedIds.has(g.id));
-          return [...filtered, ...result.groups];
-        });
+        const updatedMap = new Map(result.groups.map(g => [g.id, g]));
+        setGroups(prevGroups =>
+          prevGroups.map(g => updatedMap.get(g.id) || g)
+        );
 
         // Auto-push to ABS if enabled
         if (autoPush && result.groups.length > 0) {
@@ -566,6 +574,127 @@ export function useScan() {
 
     } catch (error) {
       console.error('ABS rescan failed:', error);
+      throw error;
+    } finally {
+      setScanning(false);
+      setScanProgress({
+        current: 0,
+        total: 0,
+        currentFile: '',
+        startTime: null,
+        filesPerSecond: 0,
+        covers_found: 0,
+      });
+    }
+  }, [setGroups, handlePushAbsImports]);
+
+  // Process ABS imports through the new metadata pipeline
+  // Uses: Gather (ABS API + Custom Providers) → Context (Series) → Decide (GPT) → Validate
+  const handlePipelineRescan = useCallback(async (selectedGroups, autoPush = false) => {
+    if (!selectedGroups || selectedGroups.length === 0) {
+      return { success: false, count: 0 };
+    }
+
+    try {
+      setScanning(true);
+      const startTime = Date.now();
+      setScanProgress({
+        current: 0,
+        total: selectedGroups.length,
+        currentFile: 'Pipeline: Gathering metadata...',
+        startTime,
+        filesPerSecond: 0,
+        covers_found: 0,
+      });
+
+      console.log(`🔄 Pipeline rescan: ${selectedGroups.length} books`);
+
+      // Listen for pipeline progress events
+      const unlisten = await listen('pipeline_progress', (event) => {
+        const { current, total, message, phase } = event.payload;
+        setScanProgress(prev => ({
+          ...prev,
+          current: current || prev.current,
+          total: total || prev.total,
+          currentFile: message || `Pipeline: ${phase}...`,
+        }));
+      });
+
+      // Build pipeline request
+      const request = {
+        books: selectedGroups.map(g => ({
+          abs_id: g.id,
+          title: g.metadata.title || null,
+          author: g.metadata.author || null,
+          narrator: g.metadata.narrator || null,
+          series: g.metadata.all_series?.map(s => ({
+            name: s.name,
+            sequence: s.sequence || null,
+          })) || (g.metadata.series ? [{
+            name: g.metadata.series,
+            sequence: g.metadata.sequence || null,
+          }] : []),
+          genres: g.metadata.genres || [],
+          description: g.metadata.description || null,
+          subtitle: g.metadata.subtitle || null,
+          year: g.metadata.year || null,
+          publisher: g.metadata.publisher || null,
+        })),
+        concurrency: 150,  // Tier 3: 5000 RPM, 4M TPM
+      };
+
+      const result = await invoke('process_with_pipeline', { request });
+
+      // Stop listening for progress events
+      unlisten();
+
+      // Update groups with pipeline results
+      if (result && result.books) {
+        const updatedMap = new Map();
+        result.books.forEach(bookResult => {
+          if (bookResult.success && bookResult.metadata && bookResult.abs_id) {
+            updatedMap.set(bookResult.abs_id, bookResult.metadata);
+          }
+        });
+
+        setGroups(prevGroups =>
+          prevGroups.map(g => {
+            const newMeta = updatedMap.get(g.id);
+            if (!newMeta) return g;
+
+            return {
+              ...g,
+              metadata: {
+                ...g.metadata,
+                ...newMeta,
+              }
+            };
+          })
+        );
+
+        // Auto-push to ABS if enabled
+        if (autoPush && result.processed > 0) {
+          console.log(`📤 Auto-pushing ${result.processed} books to ABS...`);
+          setScanProgress(prev => ({
+            ...prev,
+            currentFile: 'Pushing to ABS...',
+          }));
+
+          try {
+            const groupsToPush = selectedGroups.filter(g => updatedMap.has(g.id));
+            const pushResult = await handlePushAbsImports(groupsToPush);
+            console.log(`✅ Pushed ${pushResult.updated} books to ABS`);
+          } catch (pushError) {
+            console.error('Auto-push failed:', pushError);
+          }
+        }
+      }
+
+      console.log(`✅ Pipeline complete: ${result.processed} processed, ${result.failed} failed`);
+      return { success: true, count: result.processed, failed: result.failed };
+
+    } catch (error) {
+      console.error('Pipeline rescan failed:', error);
       throw error;
     } finally {
       setScanning(false);
@@ -662,6 +791,7 @@ export function useScan() {
     handleImport,
     handleImportFromAbs,
     handleRescanAbsImports,
+    handlePipelineRescan,
     handlePushAbsImports,
     handleCleanupGenres,
     handleRescan,

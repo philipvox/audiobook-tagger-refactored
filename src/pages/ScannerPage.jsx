@@ -6,6 +6,7 @@ import { ActionBar } from '../components/scanner/ActionBar';
 import { ProgressBar } from '../components/scanner/ProgressBar';
 import { EditMetadataModal } from '../components/EditMetadataModal';
 import { BulkEditModal } from '../components/BulkEditModal';
+import { BulkCoverAssignment } from '../components/BulkCoverAssignment';
 import { RenamePreviewModal } from '../components/RenamePreviewModal';
 import { ExportImportModal } from '../components/ExportImportModal';
 import { RescanModal } from '../components/RescanModal';
@@ -16,7 +17,7 @@ import { useFileSelection } from '../hooks/useFileSelection';
 import { useTagOperations } from '../hooks/useTagOperations';
 import { useApp } from '../context/AppContext';
 
-export function ScannerPage({ onActionsReady }) {
+export function ScannerPage() {
   const { config, groups, setGroups, fileStatuses, updateFileStatuses, clearFileStatuses, writeProgress } = useApp();
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState(new Set());
@@ -29,6 +30,7 @@ export function ScannerPage({ onActionsReady }) {
   const [showRescanModal, setShowRescanModal] = useState(false);
   const [showPushModal, setShowPushModal] = useState(false);
   const [groupsToPush, setGroupsToPush] = useState([]);
+  const [showBulkCoverModal, setShowBulkCoverModal] = useState(false);
 
   // Undo state
   const [undoStatus, setUndoStatus] = useState(null);
@@ -90,17 +92,22 @@ export function ScannerPage({ onActionsReady }) {
     handleImport,
     handleImportFromAbs,
     handleRescanAbsImports,
+    handlePipelineRescan,
     handlePushAbsImports,
     handleCleanupGenres,
     handleRescan,
     cancelScan
   } = useScan();
 
+  // Keep selectedGroup in sync when groups are updated (e.g., after rescan)
   useEffect(() => {
-    if (onActionsReady) {
-      onActionsReady({ handleScan, scanning });
+    if (selectedGroup) {
+      const updatedGroup = groups.find(g => g.id === selectedGroup.id);
+      if (updatedGroup && updatedGroup !== selectedGroup) {
+        setSelectedGroup(updatedGroup);
+      }
     }
-  }, [handleScan, scanning, onActionsReady]);
+  }, [groups, selectedGroup]);
 
   const {
     selectedFiles,
@@ -129,8 +136,10 @@ export function ScannerPage({ onActionsReady }) {
   } = useTagOperations();
 
   // FIXED: Prevent text selection on Shift+Click and properly handle range selection
-  const handleGroupClick = (group, index, event) => {
-    if (event.shiftKey) {
+  // filteredGroups is passed from BookList when filters are applied
+  const handleGroupClick = (group, index, event, filteredGroups = null) => {
+    // Prevent text selection on modifier clicks
+    if (event.shiftKey || event.metaKey || event.ctrlKey) {
       event.preventDefault();
     }
 
@@ -141,7 +150,11 @@ export function ScannerPage({ onActionsReady }) {
       setAllSelected(false);
     }
 
+    // Use filteredGroups if provided (when filters are active), otherwise use full groups
+    const groupsToUse = filteredGroups || groups;
+
     if (event.shiftKey && lastSelectedIndex !== null) {
+      // SHIFT+CLICK: Range selection from last selected to current
       const start = Math.min(lastSelectedIndex, index);
       const end = Math.max(lastSelectedIndex, index);
 
@@ -149,14 +162,34 @@ export function ScannerPage({ onActionsReady }) {
       const newSelectedGroupIds = new Set(selectedGroupIds);
 
       for (let i = start; i <= end; i++) {
-        const g = groups[i];
-        newSelectedGroupIds.add(g.id);
-        g.files.forEach(f => newSelectedFiles.add(f.id));
+        const g = groupsToUse[i];
+        if (g) {
+          newSelectedGroupIds.add(g.id);
+          g.files.forEach(f => newSelectedFiles.add(f.id));
+        }
       }
 
       setSelectedFiles(newSelectedFiles);
       setSelectedGroupIds(newSelectedGroupIds);
-    } else if (!event.shiftKey && !event.metaKey && !event.ctrlKey) {
+    } else if (event.metaKey || event.ctrlKey) {
+      // CMD/CTRL+CLICK: Toggle this group in selection (add or remove)
+      const newSelectedFiles = new Set(selectedFiles);
+      const newSelectedGroupIds = new Set(selectedGroupIds);
+
+      if (newSelectedGroupIds.has(group.id)) {
+        // Already selected - remove it
+        newSelectedGroupIds.delete(group.id);
+        group.files.forEach(f => newSelectedFiles.delete(f.id));
+      } else {
+        // Not selected - add it
+        newSelectedGroupIds.add(group.id);
+        group.files.forEach(f => newSelectedFiles.add(f.id));
+      }
+
+      setSelectedFiles(newSelectedFiles);
+      setSelectedGroupIds(newSelectedGroupIds);
+    } else {
+      // REGULAR CLICK: Clear selection and select only this group
       const newSelectedFiles = new Set();
       const newSelectedGroupIds = new Set();
 
@@ -449,7 +482,7 @@ export function ScannerPage({ onActionsReady }) {
 
   // ✅ SIMPLIFIED - No popups, just write
   const handleWriteClick = async () => {
-    const selectedCount = getSelectedCount(groups);
+    const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0 && !allSelected) {
       console.log('No files selected');
       return;
@@ -479,7 +512,7 @@ export function ScannerPage({ onActionsReady }) {
 
   // ✅ SIMPLIFIED - No popup
   const handleRenameClick = () => {
-    const selectedCount = getSelectedCount(groups);
+    const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0 && !allSelected) return;
     setShowRenameModal(true);
   };
@@ -510,7 +543,7 @@ export function ScannerPage({ onActionsReady }) {
         console.log(`🔄 ${modeLabel} for ${absImports.length} ABS imports...`);
         // For ABS imports, use force_fresh mode which searches APIs
         // Pass selectiveFields to only update specific fields if custom rescan
-        const result = await handleRescanAbsImports(absImports, 'force_fresh', true, selectiveFields);
+        const result = await handleRescanAbsImports(absImports, 'force_fresh', false, selectiveFields);
         console.log(`✅ Rescanned ${result.count} ABS books`);
       }
 
@@ -532,7 +565,7 @@ export function ScannerPage({ onActionsReady }) {
 
   // ✅ Genre cleanup for selected books (no rescan)
   const handleGenreCleanup = async () => {
-    const selectedCount = getSelectedCount(groups);
+    const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0 && !allSelected) return;
 
     try {
@@ -541,6 +574,27 @@ export function ScannerPage({ onActionsReady }) {
       console.log(`✅ Cleaned genres for ${result.count} books`);
     } catch (error) {
       console.error('Genre cleanup failed:', error);
+    }
+  };
+
+  // ✅ Pipeline rescan for ABS imports (new architecture)
+  const handlePipelineClick = async () => {
+    const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    // Only process ABS imports (groups with no local files)
+    const absImports = selectedGroups.filter(g => g.files.length === 0);
+
+    if (absImports.length === 0) {
+      console.log('⚠️ Pipeline only works with ABS imports');
+      return;
+    }
+
+    try {
+      console.log(`🔄 Pipeline rescan for ${absImports.length} ABS imports...`);
+      const result = await handlePipelineRescan(absImports);
+      console.log(`✅ Pipeline complete: ${result.count} processed, ${result.failed || 0} failed`);
+      handleClearSelection();
+    } catch (error) {
+      console.error('Pipeline rescan failed:', error);
     }
   };
 
@@ -575,14 +629,16 @@ export function ScannerPage({ onActionsReady }) {
   };
 
   // ✅ Rescan ABS imports with fresh API data
-  const handleAbsRescan = async (mode = 'force_fresh') => {
+  // options: { enrichWithCustomProviders: boolean }
+  const handleAbsRescan = async (mode = 'force_fresh', options = {}) => {
     const absImports = getSelectedAbsImports();
     if (absImports.length === 0) return;
 
     try {
       const modeLabel = mode === 'genres_only' ? 'genre cleanup' : 'fresh scan';
-      console.log(`🔄 ${modeLabel} for ${absImports.length} ABS imports...`);
-      const result = await handleRescanAbsImports(absImports, mode);
+      const enrichLabel = options.enrichWithCustomProviders ? ' + Goodreads/Hardcover' : '';
+      console.log(`🔄 ${modeLabel}${enrichLabel} for ${absImports.length} ABS imports...`);
+      const result = await handleRescanAbsImports(absImports, mode, false, null, options.enrichWithCustomProviders || false);
       console.log(`✅ ${result.count} books updated`);
       handleClearSelection();
     } catch (error) {
@@ -655,19 +711,23 @@ export function ScannerPage({ onActionsReady }) {
         groups={groups}
         fileStatuses={fileStatuses}
         selectedGroupCount={selectedGroupIds.size}
+        totalBookCount={groups.length}
+        onScan={handleScan}
         onRescan={handleRescanClick}
+        onPipelineRescan={handlePipelineClick}
         onWrite={handleWriteClick}
         onRename={handleRenameClick}
         onPush={handlePushClick}
+        onPull={handleImportFromAbs}
         onBulkEdit={() => setShowBulkEditModal(true)}
+        onBulkCover={() => setShowBulkCoverModal(true)}
         onOpenRescanModal={() => setShowRescanModal(true)}
         onCleanupGenres={handleGenreCleanup}
-        onAbsRescan={handleAbsRescan}
-        absImportCount={getSelectedAbsImports().length}
         onClearSelection={handleClearSelection}
         writing={writing}
         pushing={pushing}
         scanning={scanning}
+        hasAbsConnection={!!(config?.abs_base_url && config?.abs_api_token)}
       />
 
       {/* Main content area with book list and metadata panel */}
@@ -802,6 +862,20 @@ export function ScannerPage({ onActionsReady }) {
         groups={groupsToPush}
         pushing={pushing}
       />
+
+      {/* Bulk Cover Assignment Modal */}
+      {showBulkCoverModal && (selectedGroupIds.size > 0 || allSelected) && (
+        <BulkCoverAssignment
+          isOpen={showBulkCoverModal}
+          onClose={() => setShowBulkCoverModal(false)}
+          selectedGroups={getSelectedGroups()}
+          onCoversAssigned={(count) => {
+            console.log(`✅ Assigned ${count} covers`);
+            // Trigger refresh of cover cache
+            setGroups([...groups]);
+          }}
+        />
+      )}
 
       {/* Undo Toast */}
       {showUndoToast && undoStatus?.available && (

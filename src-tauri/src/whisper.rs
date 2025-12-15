@@ -179,29 +179,33 @@ pub fn parse_book_info_from_transcript(transcript: &str) -> ExtractedBookInfo {
     // "You are listening to [Title] by [Author]"
 
     lazy_static::lazy_static! {
+        // Author name pattern: handles initials like "J.K.", "J.R.R." as well as regular names
+        // Matches: "Stephen King", "J.K. Rowling", "J.R.R. Tolkien", "F. Scott Fitzgerald"
+        static ref AUTHOR_PATTERN: &'static str = r"[A-Z][a-zA-Z.]*(?:\s+[A-Z][a-zA-Z.]+)*";
+
         // Pattern: "This is [Title] by [Author]"
         static ref THIS_IS_BY: Regex = Regex::new(
-            r"(?i)(?:this is|welcome to|you are listening to)\s+(.+?)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)"
+            &format!(r"(?i)(?:this is|welcome to|you are listening to)\s+(.+?)\s+by\s+({})", *AUTHOR_PATTERN)
         ).unwrap();
 
         // Pattern: "[Title] by [Author], read/narrated/performed by [Narrator]"
         static ref TITLE_BY_AUTHOR_NARRATOR: Regex = Regex::new(
-            r"(?i)^(.+?)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,?\s+(?:read|narrated|performed)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)"
+            &format!(r"(?i)^(.+?)\s+by\s+({})\s*,?\s+(?:read|narrated|performed)\s+by\s+({})", *AUTHOR_PATTERN, *AUTHOR_PATTERN)
         ).unwrap();
 
         // Pattern: "[Title], written by [Author]"
         static ref WRITTEN_BY: Regex = Regex::new(
-            r"(?i)^(.+?),?\s+written\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)"
+            &format!(r"(?i)^(.+?),?\s+written\s+by\s+({})", *AUTHOR_PATTERN)
         ).unwrap();
 
         // Pattern: "[Title] by [Author]" (simple)
         static ref SIMPLE_BY: Regex = Regex::new(
-            r"(?i)^(.+?)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)"
+            &format!(r"(?i)^(.+?)\s+by\s+({})", *AUTHOR_PATTERN)
         ).unwrap();
 
         // Pattern: "narrated by [Narrator]" or "read by [Narrator]"
         static ref NARRATOR_PATTERN: Regex = Regex::new(
-            r"(?i)(?:narrated|read|performed)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)"
+            &format!(r"(?i)(?:narrated|read|performed)\s+by\s+({})", *AUTHOR_PATTERN)
         ).unwrap();
 
         // Pattern: Book number/series patterns

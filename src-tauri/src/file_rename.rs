@@ -23,7 +23,7 @@ pub struct BookMetadata {
 }
 
 /// Default rename templates
-pub const DEFAULT_FILE_TEMPLATE: &str = "{author} - {[series #sequence] }{title}{ (year)}";
+pub const DEFAULT_FILE_TEMPLATE: &str = "{author} - {[series #sequence] }- {title} -{ (year)}";
 pub const DEFAULT_FOLDER_TEMPLATE: &str = "{author}/{series|title}";
 
 /// Sanitize a string for use in a filename
@@ -48,28 +48,30 @@ pub fn sanitize_filename(s: &str) -> String {
 /// - {sequence} - Replaced with book number (empty if none)
 /// - {year} - Replaced with year (empty if none)
 /// - {narrator} - Replaced with narrator (empty if none)
-/// - {[prefix text] } - Include prefix only if following variable exists
+/// - {[series #sequence] } - Conditional: include "[Series #1] " only if series exists
 /// - { (suffix)} - Include suffix only if preceding variable exists
 /// - {var1|var2} - Fallback: use var1 if available, otherwise var2
 pub fn apply_template(template: &str, metadata: &BookMetadata) -> String {
     let mut result = template.to_string();
 
-    // First, handle conditional sections with {[prefix]variable} pattern
+    // Handle conditional sections with {[...] } pattern containing series/sequence
     // e.g., {[series #sequence] } becomes "[Series #1] " if series exists, "" otherwise
-    let conditional_re = Regex::new(r"\{(\[[^\]]+\])([a-z]+)\s*\}").unwrap();
-    result = conditional_re.replace_all(&result, |caps: &regex::Captures| {
-        let prefix = &caps[1];
-        let var_name = &caps[2];
-        let value = get_metadata_value(metadata, var_name);
-        if value.is_empty() {
-            String::new()
-        } else {
-            // Replace placeholders in prefix
-            let mut expanded = prefix.to_string();
-            expanded = expanded.replace("series", &get_metadata_value(metadata, "series"));
-            expanded = expanded.replace("sequence", &get_metadata_value(metadata, "sequence"));
-            format!("{} ", expanded)
+    let series_conditional_re = Regex::new(r"\{\[([^\]]+)\]\s*\}").unwrap();
+    result = series_conditional_re.replace_all(&result, |caps: &regex::Captures| {
+        let format_str = &caps[1]; // e.g., "series #sequence"
+
+        // Check if series exists (primary condition for this block)
+        let series = get_metadata_value(metadata, "series");
+        if series.is_empty() {
+            return String::new();
         }
+
+        // Build the result by replacing placeholders
+        let mut expanded = format_str.to_string();
+        expanded = expanded.replace("series", &series);
+        expanded = expanded.replace("sequence", &get_metadata_value(metadata, "sequence"));
+
+        format!("[{}] ", expanded)
     }).to_string();
 
     // Handle suffix conditionals like { (year)}

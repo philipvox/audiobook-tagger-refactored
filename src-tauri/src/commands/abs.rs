@@ -1,7 +1,7 @@
 // src-tauri/src/commands/abs.rs
 // WITH PROGRESS EVENTS for every phase
 
-use crate::{config, scanner};
+use crate::{config, normalize, scanner};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -13,8 +13,63 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tauri::Emitter;
 
-static LIBRARY_CACHE: Lazy<Mutex<Option<(Instant, HashMap<String, AbsLibraryItem>)>>> = 
+static LIBRARY_CACHE: Lazy<Mutex<Option<(Instant, HashMap<String, AbsLibraryItem>)>>> =
     Lazy::new(|| Mutex::new(None));
+
+// All series processing is now handled by crate::series::SeriesProcessor
+// Use finalize_series() after collecting all series data
+
+/// Finalize series data - call ONCE after all sources are merged
+/// Handles: normalization, validation, foreign language filtering, deduplication, sorting
+fn finalize_series(
+    series: Vec<scanner::types::SeriesInfo>,
+    title: &str,
+    language: Option<&str>,
+) -> Vec<scanner::types::SeriesInfo> {
+    let processor = crate::series::processor();
+    processor.process(series, title, language)
+}
+
+/// Thin wrapper for foreign language detection (delegates to SeriesProcessor)
+fn is_foreign_language_series(name: &str) -> bool {
+    let processor = crate::series::processor();
+    processor.is_foreign_language(name)
+}
+
+/// Thin wrapper for series validation (delegates to SeriesProcessor)
+fn is_valid_series(name: &str, title: &str, sequence: Option<&str>) -> bool {
+    let processor = crate::series::processor();
+    processor.is_valid(name, title, sequence)
+}
+
+/// Sort and deduplicate series - delegates to SeriesProcessor
+/// NOTE: Prefer using finalize_series_async() for GPT-enhanced cleanup
+fn deduplicate_series(series: &mut Vec<scanner::types::SeriesInfo>, title: &str, language: Option<&str>) {
+    let processed = finalize_series(std::mem::take(series), title, language);
+    *series = processed;
+}
+
+/// Async series finalization with optional GPT cleanup
+/// Uses rule-based processing first, then GPT for complex/ambiguous cases
+async fn finalize_series_async(
+    series: Vec<scanner::types::SeriesInfo>,
+    title: &str,
+    author: &str,
+    language: Option<&str>,
+    config: &config::Config,
+) -> Vec<scanner::types::SeriesInfo> {
+    // Get API key if available
+    let api_key = config.openai_api_key.as_deref()
+        .filter(|k| !k.is_empty());
+
+    crate::series::process_with_gpt_fallback(
+        series,
+        title,
+        author,
+        language,
+        api_key,
+    ).await
+}
 
 #[derive(Debug, Serialize)]
 pub struct ConnectionTest {
@@ -515,9 +570,17 @@ async fn update_abs_item(
 fn build_update_payload(metadata: &scanner::BookMetadata) -> Value {
     let mut map = serde_json::Map::new();
     map.insert("title".to_string(), json!(metadata.title));
-    
+
     if let Some(ref s) = metadata.subtitle { map.insert("subtitle".to_string(), json!(s)); }
-    if let Some(ref d) = metadata.description { map.insert("description".to_string(), json!(d)); }
+
+    // Prepend themes/tropes to description for ABS (so they're visible in ABS UI)
+    let description_with_header = crate::scanner::processor::build_description_with_header(
+        metadata.description.as_deref(),
+        &metadata.themes,
+        &metadata.tropes,
+    );
+    if let Some(ref d) = description_with_header { map.insert("description".to_string(), json!(d)); }
+
     if let Some(ref p) = metadata.publisher { map.insert("publisher".to_string(), json!(p)); }
     if let Some(ref y) = metadata.year { map.insert("publishedYear".to_string(), json!(y)); }
     if let Some(ref i) = metadata.isbn { map.insert("isbn".to_string(), json!(i)); }
@@ -532,16 +595,37 @@ fn build_update_payload(metadata: &scanner::BookMetadata) -> Value {
         .collect();
     if !authors.is_empty() { map.insert("authors".to_string(), Value::Array(authors)); }
     
-    if let Some(ref series) = metadata.series {
+    // Build series array - use all_series if available, otherwise fall back to primary series
+    // NOTE: Don't send "id": "new-X" - this creates NEW series even if one exists with the same name.
+    // Instead, omit the id field and let ABS look up existing series by name, or create if not found.
+    let series_array: Vec<Value> = if !metadata.all_series.is_empty() {
+        // Use all_series for multiple series support
+        metadata.all_series.iter().map(|s| {
+            let mut series_obj = serde_json::Map::new();
+            // Don't include id - let ABS handle lookup by name to avoid duplicates
+            series_obj.insert("name".to_string(), json!(s.name));
+            if let Some(ref seq) = s.sequence {
+                series_obj.insert("sequence".to_string(), json!(seq));
+            }
+            Value::Object(series_obj)
+        }).collect()
+    } else if let Some(ref series) = metadata.series {
+        // Fall back to primary series/sequence
         let mut s = serde_json::Map::new();
-        s.insert("id".to_string(), json!("new-1"));
+        // Don't include id - let ABS handle lookup by name to avoid duplicates
         s.insert("name".to_string(), json!(series));
         if let Some(ref seq) = metadata.sequence {
             s.insert("sequence".to_string(), json!(seq));
         }
-        map.insert("series".to_string(), Value::Array(vec![Value::Object(s)]));
+        vec![Value::Object(s)]
+    } else {
+        vec![]
+    };
+
+    if !series_array.is_empty() {
+        map.insert("series".to_string(), Value::Array(series_array));
     }
-    
+
     json!({"metadata": map})
 }
 
@@ -605,22 +689,149 @@ pub struct AbsMediaMetadata {
     pub explicit: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+// Flexible author that can deserialize from either a string or object
+#[derive(Debug, Clone)]
 pub struct AbsAuthor {
-    #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
     pub name: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+// Custom deserializer to handle both string and object formats
+impl<'de> serde::Deserialize<'de> for AbsAuthor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor, MapAccess};
+
+        struct AbsAuthorVisitor;
+
+        impl<'de> Visitor<'de> for AbsAuthorVisitor {
+            type Value = AbsAuthor;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string or an object with 'name' field")
+            }
+
+            // Handle plain string: "Author Name"
+            fn visit_str<E>(self, value: &str) -> Result<AbsAuthor, E>
+            where
+                E: de::Error,
+            {
+                Ok(AbsAuthor {
+                    id: None,
+                    name: value.to_string(),
+                })
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<AbsAuthor, E>
+            where
+                E: de::Error,
+            {
+                Ok(AbsAuthor {
+                    id: None,
+                    name: value,
+                })
+            }
+
+            // Handle object: {"id": "...", "name": "Author Name"}
+            fn visit_map<M>(self, mut map: M) -> Result<AbsAuthor, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut id: Option<String> = None;
+                let mut name: Option<String> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "id" => id = map.next_value()?,
+                        "name" => name = map.next_value()?,
+                        _ => { let _: serde::de::IgnoredAny = map.next_value()?; }
+                    }
+                }
+
+                Ok(AbsAuthor {
+                    id,
+                    name: name.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_any(AbsAuthorVisitor)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AbsSeries {
-    #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
     pub name: String,
-    #[serde(default)]
     pub sequence: Option<String>,
+}
+
+// Custom deserializer to handle sequence as either string or number
+impl<'de> serde::Deserialize<'de> for AbsSeries {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor, MapAccess};
+
+        struct AbsSeriesVisitor;
+
+        impl<'de> Visitor<'de> for AbsSeriesVisitor {
+            type Value = AbsSeries;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a series object with name and optional sequence")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<AbsSeries, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut id: Option<String> = None;
+                let mut name: Option<String> = None;
+                let mut sequence: Option<String> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "id" => id = map.next_value()?,
+                        "name" => name = map.next_value()?,
+                        "sequence" => {
+                            // Handle sequence as either string or number
+                            let value: serde_json::Value = map.next_value()?;
+                            sequence = match value {
+                                serde_json::Value::String(s) if !s.is_empty() => Some(s),
+                                serde_json::Value::Number(n) => {
+                                    if let Some(i) = n.as_i64() {
+                                        Some(i.to_string())
+                                    } else if let Some(f) = n.as_f64() {
+                                        if f.fract() == 0.0 {
+                                            Some((f as i64).to_string())
+                                        } else {
+                                            Some(format!("{:.1}", f))
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            };
+                        }
+                        _ => { let _: de::IgnoredAny = map.next_value()?; }
+                    }
+                }
+
+                Ok(AbsSeries {
+                    id,
+                    name: name.unwrap_or_default(),
+                    sequence,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(AbsSeriesVisitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -636,10 +847,19 @@ pub struct AbsImportResult {
     pub total_imported: usize,
 }
 
+/// Request for ABS import
+#[derive(Debug, Deserialize)]
+pub struct AbsImportRequest {
+    /// Whether to search custom providers (Goodreads, Hardcover, etc.) for additional metadata
+    #[serde(default)]
+    pub enrich_with_custom_providers: bool,
+}
+
 /// Import books from ABS library - no local file scanning needed
 /// Returns BookGroups with metadata from ABS that can be normalized/cleaned
 #[tauri::command]
-pub async fn import_from_abs(window: tauri::Window) -> Result<AbsImportResult, String> {
+pub async fn import_from_abs(window: tauri::Window, request: Option<AbsImportRequest>) -> Result<AbsImportResult, String> {
+    let enrich_with_custom_providers = request.map(|r| r.enrich_with_custom_providers).unwrap_or(false);
     let config = config::load_config().map_err(|e| e.to_string())?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
@@ -719,6 +939,165 @@ pub async fn import_from_abs(window: tauri::Window) -> Result<AbsImportResult, S
     }
 
     let total = groups.len();
+
+    // Enrich with custom providers if enabled
+    if enrich_with_custom_providers {
+        let _ = window.emit("import_progress", json!({
+            "phase": "enriching",
+            "message": format!("Enriching {} books with Goodreads/Hardcover...", total),
+            "current": 0,
+            "total": total
+        }));
+
+        println!("🔌 Enriching {} books with custom providers...", total);
+
+        // Process in parallel with limited concurrency
+        let enriched_groups: Vec<scanner::BookGroup> = futures::stream::iter(groups.into_iter().enumerate())
+            .map(|(idx, mut group)| {
+                let config = config.clone();
+                let window = window.clone();
+                let total = total;
+                async move {
+                    // Search custom providers
+                    let custom_results = crate::custom_providers::search_custom_providers(
+                        &config,
+                        &group.metadata.title,
+                        &group.metadata.author,
+                    ).await;
+
+                    if !custom_results.is_empty() {
+                        for custom in &custom_results {
+                            // Merge ALL series from custom provider into all_series
+                            // Filter out foreign language series if book is in English
+                            let book_is_english = group.metadata.language.as_ref()
+                                .map(|l| l.to_lowercase().starts_with("en") || l.to_lowercase() == "english")
+                                .unwrap_or(true); // Assume English if not specified
+
+                            for series_entry in &custom.series {
+                                if let Some(ref series_name) = series_entry.series {
+                                    // Skip foreign language series for English books
+                                    if book_is_english && is_foreign_language_series(series_name) {
+                                        println!("   🌍 Skipping foreign series: {}", series_name);
+                                        continue;
+                                    }
+
+                                    // Check if this series already exists in all_series (case-insensitive)
+                                    let already_exists = group.metadata.all_series.iter()
+                                        .any(|s| s.name.to_lowercase() == series_name.to_lowercase());
+
+                                    // Validate series before adding (reject standalone sub-series like "Death", "Witches")
+                                    let title = &group.metadata.title;
+                                    let seq_str = series_entry.sequence.as_deref();
+                                    let is_valid = is_valid_series(series_name, title, seq_str);
+
+                                    if !already_exists && is_valid {
+                                        group.metadata.all_series.push(scanner::types::SeriesInfo {
+                                            name: series_name.clone(),
+                                            sequence: series_entry.sequence.clone(),
+                                            source: Some(scanner::types::MetadataSource::CustomProvider),
+                                        });
+                                        println!("   📚 Added series to all_series: {} #{:?}",
+                                            series_name, series_entry.sequence);
+                                    } else if !is_valid {
+                                        println!("   ⚠️ Skipping invalid series: {}", series_name);
+                                    } else if series_entry.sequence.is_some() {
+                                        // Update sequence if we have it and the existing entry doesn't
+                                        if let Some(existing) = group.metadata.all_series.iter_mut()
+                                            .find(|s| s.name.to_lowercase() == series_name.to_lowercase()) {
+                                            if existing.sequence.is_none() {
+                                                existing.sequence = series_entry.sequence.clone();
+                                                println!("   📚 Updated sequence for {}: #{:?}",
+                                                    series_name, series_entry.sequence);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Fill in primary series/sequence for backward compatibility
+                            let series_is_missing = group.metadata.series.is_none() || group.metadata.series.as_ref().map(|s| s.is_empty()).unwrap_or(true);
+                            let sequence_is_missing = group.metadata.sequence.is_none() || group.metadata.sequence.as_ref().map(|s| s.is_empty()).unwrap_or(true);
+
+                            if series_is_missing {
+                                // No series at all - get first non-foreign series
+                                for series_entry in &custom.series {
+                                    if let Some(ref series_name) = series_entry.series {
+                                        if book_is_english && is_foreign_language_series(series_name) {
+                                            continue;
+                                        }
+                                        group.metadata.series = Some(series_name.clone());
+                                        group.metadata.sequence = series_entry.sequence.clone();
+                                        break;
+                                    }
+                                }
+                            } else if sequence_is_missing {
+                                // Have series but no sequence - try to find matching series and get sequence
+                                let current_series = group.metadata.series.as_ref().unwrap().to_lowercase();
+                                for series_entry in &custom.series {
+                                    if let Some(ref series_name) = series_entry.series {
+                                        let provider_series = series_name.to_lowercase();
+                                        if provider_series.contains(&current_series) || current_series.contains(&provider_series) {
+                                            if let Some(ref seq) = series_entry.sequence {
+                                                group.metadata.sequence = Some(seq.clone());
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Fill in missing description
+                            if group.metadata.description.is_none() && custom.description.is_some() {
+                                group.metadata.description = custom.description.clone();
+                            }
+
+                            // Fill in missing genres
+                            if group.metadata.genres.is_empty() && !custom.genres.is_empty() {
+                                group.metadata.genres = crate::genres::enforce_genre_policy_with_split(&custom.genres);
+                            }
+
+                            // Fill in missing narrator
+                            if group.metadata.narrator.is_none() && custom.narrator.is_some() {
+                                group.metadata.narrator = custom.narrator.clone();
+                            }
+                        }
+
+                        // Finalize series with GPT cleanup for complex cases
+                        group.metadata.all_series = finalize_series_async(
+                            std::mem::take(&mut group.metadata.all_series),
+                            &group.metadata.title,
+                            &group.metadata.author,
+                            group.metadata.language.as_deref(),
+                            &config,
+                        ).await;
+
+                        // Update primary series after finalization
+                        if let Some(first) = group.metadata.all_series.first() {
+                            group.metadata.series = Some(first.name.clone());
+                            group.metadata.sequence = first.sequence.clone();
+                        }
+                    }
+
+                    // Progress update
+                    if idx % 20 == 0 || idx + 1 == total {
+                        let _ = window.emit("import_progress", json!({
+                            "phase": "enriching",
+                            "message": format!("Enriching... {}/{}", idx + 1, total),
+                            "current": idx + 1,
+                            "total": total
+                        }));
+                    }
+
+                    group
+                }
+            })
+            .buffer_unordered(10) // Process 10 at a time
+            .collect()
+            .await;
+
+        groups = enriched_groups;
+    }
+
     let _ = window.emit("import_progress", json!({
         "phase": "complete",
         "message": format!("Imported {} books from ABS", total),
@@ -744,6 +1123,9 @@ pub struct AbsRescanRequest {
     /// Optional: only update these fields (e.g., ["description", "genres", "narrators"])
     #[serde(default)]
     pub fields: Option<Vec<String>>,
+    /// Whether to search custom providers (Goodreads, Hardcover, etc.) for additional metadata
+    #[serde(default)]
+    pub enrich_with_custom_providers: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -776,10 +1158,22 @@ pub async fn rescan_abs_imports(
     let config = config::load_config().map_err(|e| e.to_string())?;
     let total = request.groups.len();
 
+    // Auto-enable custom providers if any are enabled in config and mode is force_fresh
+    // This ensures custom providers are used during thorough scans without requiring frontend changes
+    let has_enabled_providers = config.custom_providers.iter().any(|p| p.enabled);
+    let enrich_with_custom_providers = if request.mode == "force_fresh" && has_enabled_providers && !request.enrich_with_custom_providers {
+        println!("   🔌 Auto-enabling custom providers (found {} enabled in config)",
+            config.custom_providers.iter().filter(|p| p.enabled).count());
+        true
+    } else {
+        request.enrich_with_custom_providers
+    };
+
     let fields_str = request.fields.as_ref()
         .map(|f| f.join(", "))
         .unwrap_or_else(|| "all".to_string());
-    println!("🔄 Rescan ABS imports: {} books, mode={}, fields={}", total, request.mode, fields_str);
+    let enrich_str = if enrich_with_custom_providers { " + custom providers" } else { "" };
+    println!("🔄 Rescan ABS imports: {} books, mode={}, fields={}{}", total, request.mode, fields_str, enrich_str);
 
     // Helper to check if a field should be updated
     let should_update = |field: &str| -> bool {
@@ -820,6 +1214,7 @@ pub async fn rescan_abs_imports(
             metadata.author = group.author.clone();
             metadata.series = group.series.clone();
             metadata.genres = final_genres;
+            metadata.confidence = Some(calculate_abs_confidence(&metadata));
 
             result_groups.push(scanner::BookGroup {
                 id: group.id.clone(),
@@ -855,6 +1250,7 @@ pub async fn rescan_abs_imports(
                 let window = window.clone();
                 let total = total;
                 let fields_filter = fields_filter.clone();
+                let enrich_with_custom_providers = enrich_with_custom_providers; // Use computed value
 
                 async move {
                     let current = processed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -889,7 +1285,7 @@ pub async fn rescan_abs_imports(
                         crate::scanner::processor::process_abs_import_with_gpt(&input, &config)
                     ).await;
 
-                    let new_metadata = match gpt_result {
+                    let mut new_metadata = match gpt_result {
                         Ok(metadata) => metadata,
                         Err(_) => {
                             // Timeout - use fallback
@@ -907,6 +1303,153 @@ pub async fn rescan_abs_imports(
                             fallback
                         }
                     };
+
+                    // Enrich with custom providers (Goodreads, Hardcover, etc.) if enabled
+                    if enrich_with_custom_providers {
+                        let custom_results = crate::custom_providers::search_custom_providers(
+                            &config,
+                            &new_metadata.title,
+                            &new_metadata.author,
+                        ).await;
+
+                        if !custom_results.is_empty() {
+                            println!("   🔌 Custom providers found {} results for '{}'", custom_results.len(), new_metadata.title);
+
+                            for custom in &custom_results {
+                                // Fill in missing or bad author (critical for "Unknown Author" cases)
+                                let author_is_bad = new_metadata.author.is_empty()
+                                    || new_metadata.author.to_lowercase() == "unknown"
+                                    || new_metadata.author.to_lowercase() == "unknown author";
+                                if author_is_bad {
+                                    if let Some(ref custom_author) = custom.author {
+                                        if !custom_author.is_empty() && custom_author.to_lowercase() != "unknown" {
+                                            println!("   ✍️  Added author from {}: '{}' (was: '{}')",
+                                                custom.provider_name, custom_author, new_metadata.author);
+                                            new_metadata.author = custom_author.clone();
+                                            new_metadata.authors = vec![custom_author.clone()];
+                                        }
+                                    }
+                                }
+
+                                // Merge ALL series from custom provider into all_series
+                                // Filter out foreign language series if book is in English
+                                let book_is_english = new_metadata.language.as_ref()
+                                    .map(|l| l.to_lowercase().starts_with("en") || l.to_lowercase() == "english")
+                                    .unwrap_or(true); // Assume English if not specified
+
+                                for series_entry in &custom.series {
+                                    if let Some(ref series_name) = series_entry.series {
+                                        // Skip foreign language series for English books
+                                        if book_is_english && is_foreign_language_series(series_name) {
+                                            println!("   🌍 Skipping foreign series: {}", series_name);
+                                            continue;
+                                        }
+
+                                        // Check if this series already exists in all_series (case-insensitive)
+                                        let already_exists = new_metadata.all_series.iter()
+                                            .any(|s| s.name.to_lowercase() == series_name.to_lowercase());
+
+                                        // Validate series before adding (reject standalone sub-series like "Death", "Witches")
+                                        let title = &new_metadata.title;
+                                        let seq_str = series_entry.sequence.as_deref();
+                                        let is_valid = is_valid_series(series_name, title, seq_str);
+
+                                        if !already_exists && is_valid {
+                                            new_metadata.all_series.push(scanner::types::SeriesInfo {
+                                                name: series_name.clone(),
+                                                sequence: series_entry.sequence.clone(),
+                                                source: Some(scanner::types::MetadataSource::CustomProvider),
+                                            });
+                                            println!("   📚 Added series to all_series: {} #{:?}",
+                                                series_name, series_entry.sequence);
+                                        } else if !is_valid {
+                                            println!("   ⚠️ Skipping invalid series: {}", series_name);
+                                        } else if series_entry.sequence.is_some() {
+                                            // Update sequence if we have it and the existing entry doesn't
+                                            if let Some(existing) = new_metadata.all_series.iter_mut()
+                                                .find(|s| s.name.to_lowercase() == series_name.to_lowercase()) {
+                                                if existing.sequence.is_none() {
+                                                    existing.sequence = series_entry.sequence.clone();
+                                                    println!("   📚 Updated sequence for {}: #{:?}",
+                                                        series_name, series_entry.sequence);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Fill in primary series/sequence for backward compatibility
+                                let series_is_missing = new_metadata.series.is_none() || new_metadata.series.as_ref().map(|s| s.is_empty()).unwrap_or(true);
+                                let sequence_is_missing = new_metadata.sequence.is_none() || new_metadata.sequence.as_ref().map(|s| s.is_empty()).unwrap_or(true);
+
+                                if series_is_missing {
+                                    // No series at all - get first non-foreign series
+                                    for series_entry in &custom.series {
+                                        if let Some(ref series_name) = series_entry.series {
+                                            if book_is_english && is_foreign_language_series(series_name) {
+                                                continue;
+                                            }
+                                            new_metadata.series = Some(series_name.clone());
+                                            new_metadata.sequence = series_entry.sequence.clone();
+                                            println!("   📚 Added primary series from {}: {} #{:?}",
+                                                custom.provider_name, series_name, series_entry.sequence);
+                                            break;
+                                        }
+                                    }
+                                } else if sequence_is_missing {
+                                    // Have series but no sequence - try to find matching series and get sequence
+                                    let current_series = new_metadata.series.as_ref().unwrap().to_lowercase();
+                                    for series_entry in &custom.series {
+                                        if let Some(ref series_name) = series_entry.series {
+                                            // Check if series names match (case-insensitive, partial match)
+                                            let provider_series = series_name.to_lowercase();
+                                            if provider_series.contains(&current_series) || current_series.contains(&provider_series) {
+                                                if let Some(ref seq) = series_entry.sequence {
+                                                    new_metadata.sequence = Some(seq.clone());
+                                                    println!("   📚 Added sequence from {}: {} #{}",
+                                                        custom.provider_name, series_name, seq);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Fill in missing description
+                                if new_metadata.description.is_none() && custom.description.is_some() {
+                                    new_metadata.description = custom.description.clone();
+                                    println!("   📝 Added description from {}", custom.provider_name);
+                                }
+
+                                // Fill in missing genres
+                                if new_metadata.genres.is_empty() && !custom.genres.is_empty() {
+                                    new_metadata.genres = crate::genres::enforce_genre_policy_with_split(&custom.genres);
+                                    println!("   🏷️  Added {} genres from {}", custom.genres.len(), custom.provider_name);
+                                }
+
+                                // Fill in missing narrator
+                                if new_metadata.narrator.is_none() && custom.narrator.is_some() {
+                                    new_metadata.narrator = custom.narrator.clone();
+                                    println!("   🎙️  Added narrator from {}", custom.provider_name);
+                                }
+                            }
+
+                            // Finalize series with GPT cleanup for complex cases
+                            new_metadata.all_series = finalize_series_async(
+                                std::mem::take(&mut new_metadata.all_series),
+                                &new_metadata.title,
+                                &new_metadata.author,
+                                new_metadata.language.as_deref(),
+                                &config,
+                            ).await;
+
+                            // Update primary series after finalization
+                            if let Some(first) = new_metadata.all_series.first() {
+                                new_metadata.series = Some(first.name.clone());
+                                new_metadata.sequence = first.sequence.clone();
+                            }
+                        }
+                    }
 
                     // Build result
                     if !new_metadata.title.is_empty() {
@@ -944,6 +1487,7 @@ pub async fn rescan_abs_imports(
 
                         let mut metadata = final_metadata;
                         metadata.genres = final_genres;
+                        metadata.confidence = Some(calculate_abs_confidence(&metadata));
 
                         (scanner::BookGroup {
                             id: group.id.clone(),
@@ -960,6 +1504,7 @@ pub async fn rescan_abs_imports(
                         metadata.author = group.author.clone();
                         metadata.series = group.series.clone();
                         metadata.genres = crate::genres::enforce_genre_policy_with_split(&group.genres);
+                        metadata.confidence = Some(calculate_abs_confidence(&metadata));
 
                         (scanner::BookGroup {
                             id: group.id.clone(),
@@ -1065,28 +1610,55 @@ pub async fn push_abs_imports(
                 let url = format!("{}/api/items/{}/media", config.abs_base_url, item.id);
                 let payload = build_update_payload(&item.metadata);
 
-                match client
-                    .patch(&url)
-                    .header("Authorization", format!("Bearer {}", config.abs_api_token))
-                    .json(&payload)
-                    .send()
-                    .await
-                {
-                    Ok(response) => {
-                        if response.status().is_success() {
-                            updated.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            failed.fetch_add(1, Ordering::Relaxed);
-                            if let Ok(mut e) = errors.lock() {
-                                e.push(format!("{}: HTTP {}", item.metadata.title, response.status()));
+                // Retry logic for 5xx errors with exponential backoff
+                let max_retries = 3;
+                let mut last_error = String::new();
+                let mut success = false;
+
+                for attempt in 0..=max_retries {
+                    if attempt > 0 {
+                        // Exponential backoff: 1s, 2s, 4s
+                        let delay = Duration::from_secs(1 << (attempt - 1));
+                        tokio::time::sleep(delay).await;
+                    }
+
+                    match client
+                        .patch(&url)
+                        .header("Authorization", format!("Bearer {}", config.abs_api_token))
+                        .json(&payload)
+                        .send()
+                        .await
+                    {
+                        Ok(response) => {
+                            let status = response.status();
+                            if status.is_success() {
+                                updated.fetch_add(1, Ordering::Relaxed);
+                                success = true;
+                                break;
+                            } else if status.is_server_error() && attempt < max_retries {
+                                // 5xx error - retry
+                                last_error = format!("HTTP {}", status);
+                                continue;
+                            } else {
+                                // 4xx or final attempt failed
+                                last_error = format!("HTTP {}", status);
+                                break;
                             }
                         }
-                    }
-                    Err(e) => {
-                        failed.fetch_add(1, Ordering::Relaxed);
-                        if let Ok(mut err) = errors.lock() {
-                            err.push(format!("{}: {}", item.metadata.title, e));
+                        Err(e) => {
+                            last_error = e.to_string();
+                            if attempt < max_retries {
+                                continue; // Retry on network errors too
+                            }
+                            break;
                         }
+                    }
+                }
+
+                if !success {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut e) = errors.lock() {
+                        e.push(format!("{}: {}", item.metadata.title, last_error));
                     }
                 }
 
@@ -1118,7 +1690,46 @@ pub async fn push_abs_imports(
 
     println!("✅ ABS push complete: {} updated, {} failed", updated, failed);
 
+    // Log first 10 errors for debugging
+    if !errors.is_empty() {
+        println!("❌ First {} errors:", errors.len().min(10));
+        for err in errors.iter().take(10) {
+            println!("   - {}", err);
+        }
+        if errors.len() > 10 {
+            println!("   ... and {} more errors", errors.len() - 10);
+        }
+    }
+
     Ok(AbsPushResult { updated, failed, errors })
+}
+
+/// Calculate confidence scores for ABS-sourced metadata
+/// ABS is a trusted source (typically proxied Audible data), so base confidence is high
+fn calculate_abs_confidence(metadata: &scanner::BookMetadata) -> scanner::types::MetadataConfidence {
+    let title_conf: u8 = if !metadata.title.is_empty() { 95 } else { 30 };
+    let author_conf: u8 = if !metadata.author.is_empty() { 95 } else { 30 };
+    let narrator_conf: u8 = if metadata.narrator.is_some() { 95 } else { 50 };
+    let series_conf: u8 = if metadata.series.is_some() { 90 } else { 100 }; // 100 if no series (confident there's none)
+    let genres_conf: u8 = if !metadata.genres.is_empty() { 85 } else { 50 };
+
+    // Weighted overall: title 30%, author 25%, narrator 15%, series 15%, genres 15%
+    let overall = (
+        (title_conf as u16 * 30) +
+        (author_conf as u16 * 25) +
+        (narrator_conf as u16 * 15) +
+        (series_conf as u16 * 15) +
+        (genres_conf as u16 * 15)
+    ) / 100;
+
+    scanner::types::MetadataConfidence {
+        title: title_conf,
+        author: author_conf,
+        narrator: narrator_conf,
+        series: series_conf,
+        overall: overall as u8,
+        sources_used: vec!["AudiobookShelf".to_string()],
+    }
 }
 
 /// Convert an ABS library item to a BookGroup
@@ -1140,6 +1751,13 @@ fn abs_item_to_book_group(item: &AbsFullItem, config: &config::Config) -> Option
     metadata.explicit = meta.explicit;
 
     // Author - join multiple authors
+    // Debug: print what we're getting from ABS
+    println!("   📥 ABS author data for '{}': authors={:?}, author_name={:?}",
+        metadata.title,
+        meta.authors.iter().map(|a| &a.name).collect::<Vec<_>>(),
+        meta.author_name
+    );
+
     if !meta.authors.is_empty() {
         metadata.author = meta.authors.iter()
             .map(|a| a.name.clone())
@@ -1150,33 +1768,70 @@ fn abs_item_to_book_group(item: &AbsFullItem, config: &config::Config) -> Option
         metadata.author = author_name.clone();
     }
 
-    // Narrator
-    if !meta.narrators.is_empty() {
-        metadata.narrator = Some(meta.narrators.join(", "));
-        metadata.narrators = meta.narrators.clone();
-    } else if let Some(ref narrator_name) = meta.narrator_name {
-        metadata.narrator = Some(narrator_name.clone());
+    // Warn if author is still empty
+    if metadata.author.is_empty() {
+        println!("   ⚠️ No author found for '{}'", metadata.title);
     }
 
-    // Series - use first series
-    if let Some(first_series) = meta.series.first() {
-        metadata.series = Some(first_series.name.clone());
-        metadata.sequence = first_series.sequence.clone();
+    // Narrator - clean prefixes like "Narrated by", "Read by", etc.
+    if !meta.narrators.is_empty() {
+        let cleaned_narrators: Vec<String> = meta.narrators.iter()
+            .map(|n| normalize::clean_narrator_name(n))
+            .collect();
+        metadata.narrator = Some(cleaned_narrators.join(", "));
+        metadata.narrators = cleaned_narrators;
+    } else if let Some(ref narrator_name) = meta.narrator_name {
+        metadata.narrator = Some(normalize::clean_narrator_name(narrator_name));
+    }
 
-        // Build all_series
-        metadata.all_series = meta.series.iter().map(|s| {
-            scanner::types::SeriesInfo {
+    // Series - collect raw data, then finalize with centralized processor
+    println!("   📚 ABS series data for '{}': series={:?}, series_name={:?}",
+        metadata.title,
+        meta.series.iter().map(|s| format!("{} #{:?}", s.name, s.sequence)).collect::<Vec<_>>(),
+        meta.series_name
+    );
+
+    // Step 1: Collect raw series data (no filtering yet)
+    let raw_series: Vec<scanner::types::SeriesInfo> = if !meta.series.is_empty() {
+        meta.series.iter()
+            .map(|s| scanner::types::SeriesInfo {
                 name: s.name.clone(),
                 sequence: s.sequence.clone(),
                 source: Some(scanner::types::MetadataSource::Abs),
-            }
-        }).collect();
+            })
+            .collect()
     } else if let Some(ref series_name) = meta.series_name {
-        metadata.series = Some(series_name.clone());
+        // Parse combined series_name string (e.g., "Discworld #6, Discworld - Witches #2")
+        let processor = crate::series::processor();
+        processor.parse_combined_string(series_name)
+    } else {
+        Vec::new()
+    };
+
+    // Step 2: Finalize series (validate, normalize, dedupe, sort) - SINGLE CALL
+    if !raw_series.is_empty() {
+        metadata.all_series = finalize_series(
+            raw_series,
+            &metadata.title,
+            metadata.language.as_deref(),
+        );
+
+        // Set primary series from first (after sorting)
+        if let Some(first) = metadata.all_series.first() {
+            metadata.series = Some(first.name.clone());
+            metadata.sequence = first.sequence.clone();
+            println!("   📖 Primary series='{}' sequence={:?}", first.name, first.sequence);
+        }
     }
 
-    // Genres
-    metadata.genres = meta.genres.clone();
+    // Genres - normalize on import
+    metadata.genres = crate::genres::enforce_genre_policy_with_split(&meta.genres);
+    crate::genres::enforce_children_age_genres(
+        &mut metadata.genres,
+        &metadata.title,
+        metadata.series.as_deref(),
+        Some(&metadata.author),
+    );
 
     // Cover URL from ABS
     if let Some(ref cover_path) = media.cover_path {
@@ -1204,6 +1859,9 @@ fn abs_item_to_book_group(item: &AbsFullItem, config: &config::Config) -> Option
         ..Default::default()
     });
 
+    // Calculate confidence for ABS imports
+    metadata.confidence = Some(calculate_abs_confidence(&metadata));
+
     // Create BookGroup
     Some(scanner::BookGroup {
         id: item.id.clone(),
@@ -1214,4 +1872,188 @@ fn abs_item_to_book_group(item: &AbsFullItem, config: &config::Config) -> Option
         total_changes: 0,
         scan_status: scanner::types::ScanStatus::LoadedFromFile,
     })
+}
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // Tests for SeriesProcessor.parse_combined_string
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_single_series_with_number() {
+        let processor = crate::series::processor();
+        let result = processor.parse_combined_string("Discworld #6");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Discworld");
+        assert_eq!(result[0].sequence, Some("6".to_string()));
+    }
+
+    #[test]
+    fn test_parse_multiple_series() {
+        let processor = crate::series::processor();
+        let result = processor.parse_combined_string("Discworld #6, Discworld - Witches #2");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "Discworld");
+        assert_eq!(result[0].sequence, Some("6".to_string()));
+        assert_eq!(result[1].name, "Discworld - Witches");
+        assert_eq!(result[1].sequence, Some("2".to_string()));
+    }
+
+    #[test]
+    fn test_parse_three_series_with_foreign() {
+        let processor = crate::series::processor();
+        let result = processor.parse_combined_string(
+            "Discworld #6, Discworld - Witches #2, Wielka Kolekcja Terry Pratchett #5"
+        );
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].name, "Discworld");
+        assert_eq!(result[1].name, "Discworld - Witches");
+        assert_eq!(result[2].name, "Wielka Kolekcja Terry Pratchett");
+    }
+
+    #[test]
+    fn test_parse_series_without_number() {
+        let processor = crate::series::processor();
+        let result = processor.parse_combined_string("Discworld, Some Other Series");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "Discworld");
+        assert_eq!(result[0].sequence, None);
+        assert_eq!(result[1].name, "Some Other Series");
+        assert_eq!(result[1].sequence, None);
+    }
+
+    #[test]
+    fn test_parse_decimal_sequence() {
+        let processor = crate::series::processor();
+        let result = processor.parse_combined_string("Series #1.5");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Series");
+        assert_eq!(result[0].sequence, Some("1.5".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // Tests for is_foreign_language_series (via SeriesProcessor)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_english_series_not_foreign() {
+        assert!(!is_foreign_language_series("Discworld"));
+        assert!(!is_foreign_language_series("Discworld - Witches"));
+        assert!(!is_foreign_language_series("Magic Tree House"));
+        assert!(!is_foreign_language_series("Harry Potter"));
+        assert!(!is_foreign_language_series("Boss Fight Books"));
+    }
+
+    #[test]
+    fn test_german_prefix_is_foreign() {
+        assert!(is_foreign_language_series("Das magische Baumhaus"));
+        assert!(is_foreign_language_series("Der Herr der Ringe"));
+        assert!(is_foreign_language_series("Die Tribute von Panem"));
+    }
+
+    #[test]
+    fn test_french_prefix_is_foreign() {
+        assert!(is_foreign_language_series("La Cabane Magique"));
+        assert!(is_foreign_language_series("Le Petit Prince"));
+        assert!(is_foreign_language_series("Les Misérables"));
+    }
+
+    #[test]
+    fn test_polish_collection_is_foreign() {
+        assert!(is_foreign_language_series("Wielka Kolekcja Terry Pratchett"));
+        assert!(is_foreign_language_series("Kolekcja Fantasy"));
+    }
+
+    #[test]
+    fn test_non_ascii_is_foreign() {
+        assert!(is_foreign_language_series("Série Fantastique"));
+        assert!(is_foreign_language_series("日本語シリーズ"));
+    }
+
+    #[test]
+    fn test_german_patterns_is_foreign() {
+        assert!(is_foreign_language_series("Fantasy Sammlung"));
+        assert!(is_foreign_language_series("Buch Reihe"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Tests for deduplicate_series (now delegates to SeriesProcessor)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_dedup_removes_exact_duplicates() {
+        let mut series = vec![
+            scanner::types::SeriesInfo::new("Discworld".to_string(), Some("1".to_string()), None),
+            scanner::types::SeriesInfo::new("Discworld".to_string(), Some("2".to_string()), None),
+        ];
+        deduplicate_series(&mut series, "Going Postal", Some("English"));
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].name, "Discworld");
+    }
+
+    #[test]
+    fn test_dedup_sorts_parent_first() {
+        let mut series = vec![
+            scanner::types::SeriesInfo::new("Discworld - Witches".to_string(), Some("2".to_string()), None),
+            scanner::types::SeriesInfo::new("Discworld".to_string(), Some("6".to_string()), None),
+        ];
+        deduplicate_series(&mut series, "Equal Rites", Some("English"));
+        assert_eq!(series.len(), 2);
+        // Parent should come first
+        assert_eq!(series[0].name, "Discworld");
+        assert_eq!(series[1].name, "Discworld - Witches");
+    }
+
+    #[test]
+    fn test_dedup_keeps_all_subseries() {
+        let mut series = vec![
+            scanner::types::SeriesInfo::new("Discworld - Industrial Revolution".to_string(), Some("4".to_string()), None),
+            scanner::types::SeriesInfo::new("Discworld".to_string(), Some("33".to_string()), None),
+            scanner::types::SeriesInfo::new("Discworld - Witches".to_string(), Some("2".to_string()), None),
+        ];
+        deduplicate_series(&mut series, "Going Postal", Some("English"));
+        assert_eq!(series.len(), 3);
+        // Parent should come first, then subseries alphabetically
+        assert_eq!(series[0].name, "Discworld");
+    }
+
+    #[test]
+    fn test_dedup_case_insensitive() {
+        let mut series = vec![
+            scanner::types::SeriesInfo::new("DISCWORLD".to_string(), Some("1".to_string()), None),
+            scanner::types::SeriesInfo::new("discworld".to_string(), Some("2".to_string()), None),
+        ];
+        deduplicate_series(&mut series, "The Colour of Magic", Some("English"));
+        assert_eq!(series.len(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Integration test: full flow using SeriesProcessor
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_full_series_processing_flow() {
+        let processor = crate::series::processor();
+
+        // Simulate parsing a combined string
+        let combined = "Discworld #6, Discworld - Witches #2, Wielka Kolekcja Terry Pratchett #5";
+        let parsed = processor.parse_combined_string(combined);
+
+        // Process through SeriesProcessor (handles foreign filtering, validation, dedup)
+        let result = processor.process(parsed, "Going Postal", Some("English"));
+
+        // Verify final result - foreign series should be filtered
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "Discworld");
+        assert_eq!(result[0].sequence, Some("6".to_string()));
+        assert_eq!(result[1].name, "Discworld - Witches");
+        assert_eq!(result[1].sequence, Some("2".to_string()));
+    }
 }

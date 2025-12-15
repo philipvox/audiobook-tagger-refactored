@@ -211,7 +211,7 @@ fn calculate_confidence_scores(
     fn source_score(source: Option<&MetadataSource>) -> u8 {
         match source {
             Some(MetadataSource::Manual) => 100,
-            Some(MetadataSource::Audible) | Some(MetadataSource::Abs) => 95,
+            Some(MetadataSource::Audible) | Some(MetadataSource::Abs) | Some(MetadataSource::CustomProvider) => 95,
             Some(MetadataSource::Gpt) => 85,
             Some(MetadataSource::ITunes) => 80,
             Some(MetadataSource::Folder) => 60,
@@ -259,6 +259,7 @@ fn calculate_confidence_scores(
                 let name = match source {
                     MetadataSource::Audible => "Audible",
                     MetadataSource::Abs => "AudiobookShelf",
+                    MetadataSource::CustomProvider => "Goodreads/Hardcover",
                     MetadataSource::Gpt => "AI",
                     MetadataSource::ITunes => "iTunes",
                     MetadataSource::Folder => "Folder",
@@ -446,76 +447,37 @@ fn normalize_series_name(name: &str) -> String {
     normalized.trim().to_string()
 }
 
-/// Extract all series from a compound series name
-/// e.g., "Magic Tree House: Merlin Missions" -> ["Magic Tree House", "Merlin Missions"]
+/// Extract series from a series name - CONSERVATIVE approach
+/// Returns a SINGLE series entry in most cases. Only splits for very specific known cases.
+/// e.g., "Magic Tree House: Merlin Missions" -> ["Merlin Missions"] (use sub-series only)
 /// e.g., "A Song of Ice and Fire" -> ["A Song of Ice and Fire"]
 fn extract_all_series_from_name(name: &str, position: Option<&str>) -> Vec<(String, Option<String>)> {
-    let mut series_list = Vec::new();
     let normalized = name.trim();
-
-    // Check for compound series patterns
-    // Pattern 1: "Parent Series: Sub-Series" (colon separator)
-    // Pattern 2: "Parent Series - Sub-Series" (dash separator, but careful with book titles)
-
-    // Common compound series patterns
-    let compound_patterns = [
-        // (pattern to match, parent series, sub-series extractor)
-        ("magic tree house: merlin missions", "Magic Tree House", "Merlin Missions"),
-        ("magic tree house merlin missions", "Magic Tree House", "Merlin Missions"),
-        ("merlin missions", "Magic Tree House", "Merlin Missions"),
-        ("magic tree house: super edition", "Magic Tree House", "Magic Tree House Super Edition"),
-        ("magic tree house fact tracker", "Magic Tree House", "Magic Tree House Fact Tracker"),
-        ("diary of a wimpy kid: the getaway", "Diary of a Wimpy Kid", ""),
-        ("percy jackson", "Percy Jackson and the Olympians", ""),
-        ("heroes of olympus", "Percy Jackson Universe", "Heroes of Olympus"),
-        ("trials of apollo", "Percy Jackson Universe", "Trials of Apollo"),
-        ("magnus chase", "Percy Jackson Universe", "Magnus Chase"),
-    ];
-
     let name_lower = normalized.to_lowercase();
 
-    // Check if this is a known compound series
-    for (pattern, parent, sub) in &compound_patterns {
+    // Known sub-series mappings - map to the MORE SPECIFIC series name only
+    // We don't want to create multiple series entries, just use the right one
+    let subseries_mappings = [
+        // (pattern, preferred_series_name)
+        ("merlin missions", "Merlin Missions"),
+        ("magic tree house fact tracker", "Magic Tree House Fact Tracker"),
+        ("magic tree house: super edition", "Magic Tree House Super Edition"),
+        ("magic tree house super edition", "Magic Tree House Super Edition"),
+    ];
+
+    // Check for known sub-series - return just the specific sub-series
+    for (pattern, preferred) in &subseries_mappings {
         if name_lower.contains(pattern) {
-            // Add the parent series (position only applies to sub-series)
-            if !parent.is_empty() {
-                series_list.push((parent.to_string(), None));
-            }
-            // Add the sub-series with the position
-            if !sub.is_empty() {
-                series_list.push((sub.to_string(), position.map(|s| s.to_string())));
-            } else {
-                // No sub-series, position goes to parent
-                if !series_list.is_empty() {
-                    series_list[0].1 = position.map(|s| s.to_string());
-                }
-            }
-            return series_list;
+            return vec![(preferred.to_string(), position.map(|s| s.to_string()))];
         }
     }
 
-    // Check for colon-separated compound series
-    if normalized.contains(": ") {
-        let parts: Vec<&str> = normalized.splitn(2, ": ").collect();
-        if parts.len() == 2 {
-            let parent = parts[0].trim();
-            let sub = parts[1].trim();
+    // For colon-separated names, keep the FULL name as-is (don't split)
+    // The colon is usually part of the series name, not a parent/child separator
+    // e.g., "Star Wars: The High Republic" should stay as one series
 
-            // Don't split if the sub-part looks like a subtitle (very long or contains certain words)
-            let sub_lower = sub.to_lowercase();
-            if !sub_lower.contains("book ") && !sub_lower.contains("volume ")
-               && sub.len() < 50 && !sub.contains(",") {
-                // This looks like a genuine parent: sub-series structure
-                series_list.push((normalize_series_name(parent), None));
-                series_list.push((normalize_series_name(sub), position.map(|s| s.to_string())));
-                return series_list;
-            }
-        }
-    }
-
-    // No compound pattern found - just return the normalized name
-    series_list.push((normalize_series_name(normalized), position.map(|s| s.to_string())));
-    series_list
+    // Just normalize and return the single series
+    vec![(normalize_series_name(normalized), position.map(|s| s.to_string()))]
 }
 
 pub async fn process_all_groups(
@@ -541,7 +503,8 @@ pub async fn process_all_groups_with_options(
 
     println!("🚀 Processing {} book groups (mode={:?})...", total, scan_mode);
 
-    crate::progress::update_progress(0, total, "Starting...");
+    // Start progress tracking with timer for ETA calculation
+    crate::progress::start_scan(total);
 
     let processed = Arc::new(AtomicUsize::new(0));
     let covers_found = Arc::new(AtomicUsize::new(0));
@@ -575,13 +538,12 @@ pub async fn process_all_groups_with_options(
                 let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
                 let covers = covers_found.load(Ordering::Relaxed);
 
-                if done % 5 == 0 || done == total {
-                    let elapsed = start_time.elapsed().as_secs_f64();
-                    let rate = done as f64 / elapsed;
-                    crate::progress::update_progress(done, total,
-                        &format!("{} books ({} covers) - {:.1}/sec", done, covers, rate)
-                    );
-                }
+                // Update progress every book for responsive parallel updates
+                // ETA is calculated automatically in progress module
+                crate::progress::update_progress_with_covers(done, total,
+                    &format!("{}/{} books ({} covers)", done, total, covers),
+                    covers
+                );
 
                 result
             }
@@ -1271,7 +1233,9 @@ struct SeriesCandidate {
     source: String,  // "audible", "google", "folder", "gpt"
 }
 
-/// Collect series candidates from all available sources
+/// Collect series candidates from available sources
+/// Priority: Audible > Custom Providers (Goodreads) > Folder extraction
+/// Folder extraction is ONLY used if no API sources have series info
 fn collect_series_candidates(
     folder_name: &str,
     extracted_title: &str,
@@ -1279,18 +1243,24 @@ fn collect_series_candidates(
 ) -> Vec<SeriesCandidate> {
     let mut candidates: Vec<SeriesCandidate> = Vec::new();
     let title_lower = extracted_title.to_lowercase();
-    
-    // 1. Audible series (highest confidence)
+
+    // 1. Audible series (highest confidence) - ONLY use API sources
     if let Some(ref aud) = audible_data {
         for series in &aud.series {
             let series_lower = series.name.to_lowercase();
-            
-            // Validate: reject if series name matches title
-            if series_lower == title_lower || title_lower.starts_with(&series_lower) {
-                println!("   ⚠️ Rejecting Audible series '{}' (matches title)", series.name);
+
+            // Validate: reject if series name matches or contains full title
+            if series_lower == title_lower {
+                println!("   ⚠️ Rejecting Audible series '{}' (exact match with title)", series.name);
                 continue;
             }
-            
+
+            // Reject if series looks like "Title - Something" (wrong format)
+            if series.name.contains(" - ") && series.name.len() > 40 {
+                println!("   ⚠️ Rejecting Audible series '{}' (looks like title with subtitle)", series.name);
+                continue;
+            }
+
             candidates.push(SeriesCandidate {
                 name: series.name.clone(),
                 position: series.position.clone(),
@@ -1298,69 +1268,199 @@ fn collect_series_candidates(
             });
         }
     }
-    
-    // 2. Folder name extraction (medium confidence)
-    if let (Some(series_name), position) = extract_series_from_folder(folder_name) {
-        let series_lower = series_name.to_lowercase();
-        
-        // Validate: reject if series name matches title
-        if series_lower != title_lower && !title_lower.starts_with(&series_lower) {
-            candidates.push(SeriesCandidate {
-                name: series_name,
-                position,
-                source: "folder".to_string(),
-            });
+
+    // 2. ONLY use folder extraction if we have NO series from Audible
+    // This prevents folder-parsed garbage from polluting good API data
+    if candidates.is_empty() {
+        if let (Some(series_name), position) = extract_series_from_folder(folder_name) {
+            let series_lower = series_name.to_lowercase();
+
+            // Stricter validation for folder-extracted series
+            if series_lower != title_lower
+               && !title_lower.starts_with(&series_lower)
+               && series_name.len() >= 3
+               && series_name.len() <= 50  // Not too long
+               && !series_name.contains(" - ")  // No title separators
+            {
+                println!("   📁 Using folder-extracted series: '{}' #{:?}", series_name, position);
+                candidates.push(SeriesCandidate {
+                    name: series_name,
+                    position,
+                    source: "folder".to_string(),
+                });
+            }
         }
     }
-    
+
     candidates
 }
 
-/// Validate a series name against the title
+/// Validate a series name against the title - STRICT validation
 fn is_valid_series(series: &str, title: &str) -> bool {
+    is_valid_series_with_sequence(series, title, None)
+}
+
+fn is_valid_series_with_sequence(series: &str, title: &str, sequence: Option<&str>) -> bool {
+    // First check basic validity (filters GPT artifacts like "or null", "Standalone", etc.)
+    if !normalize::is_valid_series(series) {
+        println!("   ⚠️ Rejecting series '{}' - invalid/placeholder value", series);
+        return false;
+    }
+
     let series_lower = series.to_lowercase().trim().to_string();
     let title_lower = title.to_lowercase().trim().to_string();
-    
+
+    // Reject series that are too short (likely extraction errors)
+    if series_lower.len() < 3 {
+        println!("   ⚠️ Rejecting series '{}' - too short", series);
+        return false;
+    }
+
+    // Reject series that are just numbers or have too many numbers
+    let digit_count = series.chars().filter(|c| c.is_ascii_digit()).count();
+    let total_chars = series.len();
+    if digit_count > 0 && (digit_count as f32 / total_chars as f32) > 0.3 {
+        println!("   ⚠️ Rejecting series '{}' - too many numbers", series);
+        return false;
+    }
+
     // Normalize "and" vs "&" for comparison
     let series_normalized = series_lower.replace(" & ", " and ").replace("&", " and ");
     let title_normalized = title_lower.replace(" & ", " and ").replace("&", " and ");
-    
-    // Reject if series EXACTLY matches the full title (not just a prefix)
-    if series_normalized == title_normalized {
-        println!("   ⚠️ Rejecting series '{}' - exact match with title", series);
-        return false;
-    }
-    
-    // Reject if series is very long and matches most of the title
-    // (This catches cases where full title is used as series)
-    if series_normalized.len() > 30 && title_normalized.starts_with(&series_normalized) {
-        let remaining = title_normalized.len() - series_normalized.len();
-        if remaining < 10 {
-            println!("   ⚠️ Rejecting series '{}' - too similar to full title", series);
+
+    // Also strip "The " prefix for comparison (e.g., "Tempest" vs "The Tempest")
+    let series_no_the = series_normalized.strip_prefix("the ").unwrap_or(&series_normalized);
+    let title_no_the = title_normalized.strip_prefix("the ").unwrap_or(&title_normalized);
+
+    // Check if series matches the title
+    let title_matches = series_normalized == title_normalized
+       || series_no_the == title_no_the
+       || series_normalized == title_no_the
+       || series_no_the == title_normalized;
+
+    // Reject if series matches the title, UNLESS we have a valid sequence number
+    // (e.g., "Dungeon Crawler Carl #1" in series "Dungeon Crawler Carl" is valid)
+    // Also skip the overlap checks below if we allow due to sequence
+    let has_valid_sequence = sequence.is_some();
+
+    if title_matches {
+        if has_valid_sequence {
+            // Has sequence - allow it and skip remaining title checks
+            println!("   ✓ Allowing series '{}' matching title - has sequence #{}", series, sequence.unwrap());
+            // Don't return yet - still need to check other validations like sub-series
+        } else {
+            // No sequence - reject (likely wrong series assignment)
+            println!("   ⚠️ Rejecting series '{}' - matches title '{}' (no sequence)", series, title);
             return false;
         }
     }
-    
+
+    // Reject if series is most of the title (> 80% overlap) - but skip if we have sequence
+    if !has_valid_sequence && title_normalized.starts_with(&series_normalized) {
+        let overlap = series_normalized.len() as f32 / title_normalized.len() as f32;
+        if overlap > 0.8 {
+            println!("   ⚠️ Rejecting series '{}' - too similar to full title ({:.0}% overlap)", series, overlap * 100.0);
+            return false;
+        }
+    }
+
+    // Also check with "The" stripped - but skip if we have sequence
+    if !has_valid_sequence && title_no_the.starts_with(series_no_the) && !series_no_the.is_empty() {
+        let overlap = series_no_the.len() as f32 / title_no_the.len() as f32;
+        if overlap > 0.8 {
+            println!("   ⚠️ Rejecting series '{}' - too similar to title ({:.0}% overlap)", series, overlap * 100.0);
+            return false;
+        }
+    }
+
     // Reject common false positives
     let false_positives = [
         "book", "audiobook", "audio", "unabridged", "novel", "story",
-        "fiction", "non-fiction", "chapter", "part", "volume"
+        "fiction", "non-fiction", "chapter", "part", "volume", "edition",
+        "complete", "collection", "anthology", "omnibus", "box set"
     ];
     if false_positives.iter().any(|fp| series_lower == *fp) {
         println!("   ⚠️ Rejecting series '{}' - common false positive", series);
         return false;
     }
-    
-    // Reject if series looks like a full book title (contains subtitle markers)
-    if series_lower.contains(": ") || series_lower.contains(" - ") {
+
+    // Reject generic/useless series names that don't add value
+    let generic_series = [
+        "timeless classic", "timeless classics", "classic literature",
+        "great books", "must read", "bestseller", "bestsellers",
+        "award winner", "award winners", "pulitzer prize",
+        "new york times bestseller", "audible originals",
+        "kindle unlimited", "prime reading"
+    ];
+    if generic_series.iter().any(|gs| series_lower == *gs) {
+        println!("   ⚠️ Rejecting series '{}' - generic/marketing series", series);
+        return false;
+    }
+
+    // Reject format-specific series that don't apply to audiobooks
+    let format_series = [
+        "manga shakespeare", "graphic novel", "comic adaptation",
+        "illustrated edition", "pop-up book", "board book"
+    ];
+    if format_series.iter().any(|fs| series_lower == *fs) {
+        println!("   ⚠️ Rejecting series '{}' - format-specific series (not audiobook)", series);
+        return false;
+    }
+
+    // Reject single-word sub-series indicators that shouldn't stand alone
+    // These are often extracted from combined series like "Discworld - Death"
+    let subseries_indicators = [
+        "death", "witches", "wizards", "watch", "rincewind", "tiffany aching",
+        "moist von lipwig", "industrial revolution", "ancient civilizations",
+        "gods", "legends", "tales", "adventures", "mysteries", "cases"
+    ];
+    if subseries_indicators.iter().any(|si| series_lower == *si) {
+        println!("   ⚠️ Rejecting series '{}' - sub-series indicator (not standalone)", series);
+        return false;
+    }
+
+    // Reject if series is just the word "the" + something short (but skip if has sequence)
+    if !has_valid_sequence && series_lower.starts_with("the ") && series_lower.len() < 10 {
+        println!("   ⚠️ Rejecting series '{}' - too short with 'the' prefix", series);
+        return false;
+    }
+
+    // Reject if series looks like a full book title (contains subtitle markers AND is long)
+    if (series_lower.contains(": ") || series_lower.contains(" - ")) && series_lower.len() > 40 {
         // But allow if it's clearly a series name with subtitle
-        if !series_lower.contains("series") && series_lower.len() > 50 {
+        if !series_lower.contains("series") && !series_lower.contains("saga")
+           && !series_lower.contains("chronicles") {
             println!("   ⚠️ Rejecting series '{}' - looks like full title with subtitle", series);
             return false;
         }
     }
-    
+
+    // Reject companion/fact tracker series if the title doesn't indicate it's a companion book
+    // E.g., "Magic Tree House Fact Tracker" should not be added to "Vikings at Sunrise"
+    let companion_indicators = ["fact tracker", "research guide", "companion to", "nonfiction companion"];
+    let is_companion_series = companion_indicators.iter().any(|ci| series_lower.contains(ci));
+    if is_companion_series {
+        let title_has_companion = companion_indicators.iter().any(|ci| title_lower.contains(ci))
+            || title_lower.contains("fact")
+            || title_lower.contains("guide")
+            || title_lower.contains("nonfiction");
+        if !title_has_companion {
+            println!("   ⚠️ Rejecting series '{}' - companion series but title '{}' is not a companion book", series, title);
+            return false;
+        }
+    }
+
     true
+}
+
+/// Public wrapper for series validation - used by other modules (e.g., abs.rs)
+pub fn is_valid_series_public(series: &str, title: &str) -> bool {
+    is_valid_series(series, title)
+}
+
+/// Public wrapper with sequence - allows title-matching series if they have a sequence number
+pub fn is_valid_series_with_seq(series: &str, title: &str, sequence: Option<&str>) -> bool {
+    is_valid_series_with_sequence(series, title, sequence)
 }
 
 /// IMPROVED merge function that handles series intelligently
@@ -1441,72 +1541,29 @@ async fn merge_all_with_gpt_improved(
         "year: If not found in sources, return null".to_string()
     };
 
-    // Build the IMPROVED prompt
+    // Build the SLIMMED DOWN prompt - optimized for speed while keeping genre normalization
     let prompt = format!(
-r#"You are an audiobook metadata specialist. Combine information from all sources to produce the most accurate metadata.
+r#"Audiobook metadata specialist. Combine sources for accurate metadata.
 
-SOURCES:
-1. Folder: {}
-2. Extracted from tags: title='{}', author='{}'
-3. Audible: {}
-4. Sample comment: {:?}
-
+SOURCES: Folder: {} | Tags: title='{}', author='{}' | Audible: {} | Comment: {:?}
 {}
 
-APPROVED GENRES (maximum 3):
-{}
+GENRES (max 3): {}
 
-CRITICAL AUTHOR RULE:
-The author '{}' was extracted from file tags/folder name. This is likely the CORRECT author.
-If Audible returned a DIFFERENT author, they may have returned the WRONG book.
-ALWAYS prefer the extracted author '{}' unless the folder name was clearly wrong or "Unknown".
-NEVER replace a valid author like "Will Wight" with a completely different author like "J.K. Rowling".
+AUTHOR RULE: Prefer '{}' unless "Unknown". Don't replace valid authors with different ones.
 
-OUTPUT FIELDS:
-* title: Book title only. Remove junk and series markers.
-* subtitle: Use only if provided by Audible.
-* author: CRITICAL - Use '{}' unless it was "Unknown" or clearly wrong.
-* narrator: Use Audible narrators or find in comments.
-* series: SHORT series name only! Examples:
-  - "Harry Potter" (NOT "Harry Potter and the Chamber of Secrets")
-  - "The Stormlight Archive" (NOT "Words of Radiance - The Stormlight Archive")
-  - "A Court of Thorns and Roses" (NOT the full book title)
-  - "Dungeon Crawler Carl" for all books in that series
-  The series name should be the UMBRELLA name for all books, not this specific book's title.
-* sequence: Book number in series. Use Audible's position if provided.
-* genres: Select 1-3 from the approved list. CRITICAL AGE CLASSIFICATION:
-  For children's/youth books, you MUST use age-specific genres:
-  - "Children's 0-2": Baby/toddler books (Goodnight Moon, board books)
-  - "Children's 3-5": Preschool/kindergarten (Dr. Seuss, Peppa Pig, Curious George)
-  - "Children's 6-8": Early chapter books (Magic Tree House, Junie B. Jones, Dog Man, Diary of a Wimpy Kid)
-  - "Children's 9-12": Middle grade (Harry Potter, Percy Jackson, Narnia, Goosebumps, Roald Dahl)
-  - "Teen 13-17": Young adult (Hunger Games, Divergent, Twilight, Throne of Glass, Sarah J. Maas)
-  NEVER use generic "Children's", "Young Adult", "Middle Grade" - ALWAYS use the age range version!
-  NEVER use "Children's" for teen/YA books like Hunger Games or Throne of Glass.
-* publisher: Use Audible publisher if available.
-* {}
-* description: Short description from sources, minimum 200 characters.
+OUTPUT:
+- title: Book title only, no junk
+- subtitle: From Audible if any
+- author: Use '{}'
+- narrator: From Audible/comments
+- series: SHORT umbrella name only (e.g. "Harry Potter" not "Harry Potter and the...")
+- sequence: Book number
+- genres: 1-3 from list. For kids: "Children's 0-2/3-5/6-8/9-12" or "Teen 13-17" (age-specific!)
+- publisher, {}, description (200+ chars)
 
-SERIES RULES:
-1. Series name must be SHORT - just the series umbrella name
-2. NEVER use the full book title as the series name
-3. If Audible provides series, clean it up (remove "(Book", trailing commas, etc.)
-
-Return ONLY valid JSON:
-{{
-  "title": "specific book title",
-  "subtitle": null,
-  "author": "author name",
-  "narrator": "narrator name or null",
-  "series": "SHORT series name or null",
-  "sequence": "number or null",
-  "genres": ["Genre1", "Genre2"],
-  "publisher": "publisher or null",
-  "year": "YYYY or null",
-  "description": "description or null"
-}}
-
-JSON:"#,
+JSON only:
+{{"title":"","subtitle":null,"author":"","narrator":null,"series":null,"sequence":null,"genres":[],"publisher":null,"year":null,"description":null}}"#,
         folder_name,
         extracted_title,
         extracted_author,
@@ -1514,9 +1571,8 @@ JSON:"#,
         file_tags.comment,
         series_instruction,
         crate::genres::APPROVED_GENRES.join(", "),
-        extracted_author, // for CRITICAL AUTHOR RULE line 1
-        extracted_author, // for CRITICAL AUTHOR RULE line 2
-        extracted_author, // for OUTPUT FIELDS author line
+        extracted_author,
+        extracted_author,
         year_instruction
     );
     
@@ -1625,13 +1681,15 @@ JSON:"#,
                             metadata.authors = split_authors(extracted_author);
                         }
 
-                        // Multiple narrators (Audible is authoritative)
+                        // Multiple narrators (Audible is authoritative) - clean prefixes
                         if !aud.narrators.is_empty() {
-                            metadata.narrators = aud.narrators.clone();
+                            metadata.narrators = aud.narrators.iter()
+                                .map(|n| normalize::clean_narrator_name(n))
+                                .collect();
                             sources.narrator = Some(MetadataSource::Audible);
                             // Also set legacy narrator field
                             if metadata.narrator.is_none() {
-                                metadata.narrator = aud.narrators.first().cloned();
+                                metadata.narrator = metadata.narrators.first().cloned();
                             }
                         }
 
@@ -1845,6 +1903,11 @@ fn fallback_metadata(
         is_collection: false,
         collection_books: vec![],
         confidence: None,
+        // Themes/tropes - extracted later
+        themes: vec![],
+        tropes: vec![],
+        themes_source: None,
+        tropes_source: None,
     }
 }
 
@@ -2001,6 +2064,11 @@ fn create_metadata_from_audible(
         is_collection: false,
         collection_books: vec![],
         confidence: None,
+        // Themes/tropes - extracted later
+        themes: vec![],
+        tropes: vec![],
+        themes_source: None,
+        tropes_source: None,
     })
 }
 
@@ -2259,6 +2327,11 @@ pub async fn enrich_with_gpt(
                 is_collection: false,
                 collection_books: vec![],
                 confidence: None,
+                // Themes/tropes - empty for fallback case
+                themes: vec![],
+                tropes: vec![],
+                themes_source: None,
+                tropes_source: None,
             };
         }
     };
@@ -2435,7 +2508,8 @@ JSON:"#,
                         vec![]
                     };
 
-                    normalize_metadata(BookMetadata {
+                    // Build base metadata
+                    let mut metadata = normalize_metadata(BookMetadata {
                         title: final_title.clone(),
                         author: final_author.clone(),
                         subtitle,  // Now from GPT!
@@ -2464,7 +2538,32 @@ JSON:"#,
                         is_collection: false,
                         collection_books: vec![],
                         confidence: None,
-                    })
+                        // Themes/tropes will be extracted separately
+                        themes: vec![],
+                        tropes: vec![],
+                        themes_source: None,
+                        tropes_source: None,
+                    });
+
+                    // Extract themes/tropes if we have a description
+                    if let Some(ref desc) = metadata.description {
+                        if desc.len() >= 50 {
+                            if let Some(themes_tropes) = extract_themes_and_tropes(
+                                &metadata.title,
+                                &metadata.author,
+                                &metadata.genres,
+                                Some(desc),
+                                api_key,
+                            ).await {
+                                metadata.themes = themes_tropes.themes;
+                                metadata.tropes = themes_tropes.tropes;
+                                metadata.themes_source = Some("gpt".to_string());
+                                metadata.tropes_source = Some("gpt".to_string());
+                            }
+                        }
+                    }
+
+                    metadata
                 }
                 Err(e) => {
                     println!("   ❌ GPT parse error: {}", e);
@@ -2513,6 +2612,11 @@ JSON:"#,
                         is_collection: false,
                         collection_books: vec![],
                         confidence: None,
+                        // Themes/tropes - empty for fallback case
+                        themes: vec![],
+                        tropes: vec![],
+                        themes_source: None,
+                        tropes_source: None,
                     })
                 }
             }
@@ -2563,6 +2667,11 @@ JSON:"#,
                 is_collection: false,
                 collection_books: vec![],
                 confidence: None,
+                // Themes/tropes - empty for fallback case
+                themes: vec![],
+                tropes: vec![],
+                themes_source: None,
+                tropes_source: None,
             })
         }
     }
@@ -2885,6 +2994,94 @@ pub async fn call_gpt_api(
     Ok(json_str.to_string())
 }
 
+/// Clean series list with GPT to filter out irrelevant series for this specific edition
+/// GPT considers title, author, subtitle (edition info), and validates each series
+pub async fn clean_series_with_gpt(
+    series_list: &[AudibleSeries],
+    title: &str,
+    author: &str,
+    subtitle: Option<&str>,
+    api_key: &str,
+) -> Vec<AudibleSeries> {
+    if series_list.is_empty() {
+        return vec![];
+    }
+
+    // Format series for GPT
+    let series_str = series_list.iter()
+        .map(|s| format!("\"{}\"", s.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let subtitle_info = subtitle.unwrap_or("none");
+
+    let prompt = format!(
+r#"Filter this series list for an AUDIOBOOK. Return ONLY series that THIS BOOK actually belongs to.
+
+Title: {}
+Author: {}
+Subtitle/Edition: {}
+Series candidates: [{}]
+
+CRITICAL RULES:
+1. REJECT series that are COMPLETELY UNRELATED to this book (e.g., "1920s Lady Traveler" for a fantasy book by Terry Pratchett)
+2. REJECT standalone sub-series names like "Death", "Wizards", "Watch" - these are meaningless without parent series
+3. REJECT format-specific series (e.g., "Manga Shakespeare" for an audiobook)
+4. REJECT generic/marketing series ("Timeless Classics", "Bestseller", etc.)
+5. REJECT children's adaptations for adult editions
+6. KEEP the main series (e.g., "Discworld" for Pratchett)
+7. KEEP combined sub-series (e.g., "Discworld - Death" is valid, but "Death" alone is NOT)
+8. If subtitle indicates a production (like "Arkangel Shakespeare"), only keep matching series
+
+BE STRICT: When in doubt, REJECT. It's better to have fewer correct series than many wrong ones.
+
+Return JSON: {{"valid_series": ["series1", "series2"]}}"#,
+        title, author, subtitle_info, series_str
+    );
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        call_gpt_api(&prompt, api_key, "gpt-5-nano", 500)
+    ).await;
+
+    match result {
+        Ok(Ok(response)) => {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response) {
+                if let Some(valid) = json.get("valid_series").and_then(|v| v.as_array()) {
+                    let valid_names: Vec<String> = valid.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_lowercase()))
+                        .collect();
+
+                    let filtered: Vec<AudibleSeries> = series_list.iter()
+                        .filter(|s| valid_names.contains(&s.name.to_lowercase()))
+                        .cloned()
+                        .collect();
+
+                    if filtered.len() < series_list.len() {
+                        let removed: Vec<_> = series_list.iter()
+                            .filter(|s| !valid_names.contains(&s.name.to_lowercase()))
+                            .map(|s| &s.name)
+                            .collect();
+                        println!("   🧹 GPT filtered series: removed {:?}", removed);
+                    }
+
+                    return filtered;
+                }
+            }
+            println!("   ⚠️ GPT series filter: couldn't parse response, keeping all");
+            series_list.to_vec()
+        }
+        Ok(Err(e)) => {
+            println!("   ⚠️ GPT series filter failed: {}", e);
+            series_list.to_vec()
+        }
+        Err(_) => {
+            println!("   ⚠️ GPT series filter timed out");
+            series_list.to_vec()
+        }
+    }
+}
+
 /// Clean a title for Audible search by removing chapter indicators (basic sync version)
 fn clean_title_basic(title: &str) -> String {
     let mut clean = title.to_string();
@@ -2994,6 +3191,251 @@ Return ONLY the cleaned description text, nothing else. No quotes, no JSON, just
     }
 }
 
+/// Result of themes and tropes extraction
+#[derive(Debug, Clone, Default)]
+pub struct ThemesAndTropes {
+    pub themes: Vec<String>,
+    pub tropes: Vec<String>,
+}
+
+/// Extract themes and tropes from book metadata using GPT
+/// Themes: philosophical/conceptual ideas (e.g., "Mortality", "Identity")
+/// Tropes: plot-based story patterns (e.g., "Revenge", "Heist")
+pub async fn extract_themes_and_tropes(
+    title: &str,
+    author: &str,
+    genres: &[String],
+    description: Option<&str>,
+    api_key: &str,
+) -> Option<ThemesAndTropes> {
+    // Skip if no description or too short
+    let desc = match description {
+        Some(d) if d.len() >= 50 => d,
+        _ => {
+            println!("   ⚠️ Skipping themes/tropes: no description or too short");
+            return None;
+        }
+    };
+
+    // Truncate description for GPT prompt
+    let desc_for_prompt = if desc.len() > 500 {
+        format!("{}...", &desc.chars().take(500).collect::<String>())
+    } else {
+        desc.to_string()
+    };
+
+    let genres_str = if genres.is_empty() {
+        "none".to_string()
+    } else {
+        genres.join(", ")
+    };
+
+    let prompt = format!(
+r#"Given this audiobook's metadata, extract two types of information:
+
+1. THEMES (exactly 3): Philosophical or conceptual ideas the book explores. Focus on abstract ideas, emotions, existential questions, and human experiences.
+   Examples: "Mortality", "The Nature of Evil", "Found Family", "What We Owe Each Other", "Identity", "Generational Trauma", "Belonging", "The Cost of Ambition", "Grief", "Memory and Truth"
+
+2. TROPES (exactly 3): Plot-based elements, story patterns, and genre conventions used in the book.
+
+   CRITICAL: Only include tropes apparent from the premise/setup. NEVER include spoiler tropes that reveal twists, hidden identities, or surprise endings.
+
+   Safe examples: "Revenge", "Love Triangle", "Chosen One", "Heist", "Enemies to Lovers", "Unreliable Narrator", "Quest", "Slow Burn Romance", "Dual Timeline", "Reluctant Hero", "Fish Out of Water", "Locked Room Mystery"
+
+   NEVER use these spoiler tropes: "Twist Villain", "Secret Royal", "Dead All Along", "Secretly Evil", "Double Agent", "Faked Death", "Hidden Antagonist", "Redemption Arc", "Heel Turn", "The Killer Is..."
+
+Title: {}
+Author: {}
+Genres: {}
+Description: {}
+
+Return in this exact format (no extra text):
+Themes: [theme1], [theme2], [theme3]
+Tropes: [trope1], [trope2], [trope3]"#,
+        title, author, genres_str, desc_for_prompt
+    );
+
+    println!("   🎭 Extracting themes/tropes for '{}'...", title);
+
+    // Retry logic for 502/503 errors with exponential backoff
+    let max_retries = 3;
+    for attempt in 0..max_retries {
+        if attempt > 0 {
+            let delay = std::time::Duration::from_millis(500 * (1 << attempt)); // 1s, 2s, 4s
+            println!("   🔄 Retry {} for themes/tropes (waiting {:?})...", attempt, delay);
+            tokio::time::sleep(delay).await;
+        }
+
+        let gpt_result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            call_gpt_api(&prompt, api_key, "gpt-5-nano", 2000)
+        ).await;
+
+        match gpt_result {
+            Ok(Ok(response)) => {
+                return parse_themes_and_tropes(&response);
+            }
+            Ok(Err(e)) => {
+                let err_str = e.to_string();
+                // Retry on 502/503/429 errors
+                if err_str.contains("502") || err_str.contains("503") || err_str.contains("429") || err_str.contains("Bad Gateway") {
+                    if attempt < max_retries - 1 {
+                        println!("   ⚠️ Server error ({}), will retry...", err_str.chars().take(50).collect::<String>());
+                        continue;
+                    }
+                }
+                println!("   ⚠️ GPT themes/tropes extraction failed: {}", e);
+                return None;
+            }
+            Err(_) => {
+                if attempt < max_retries - 1 {
+                    println!("   ⚠️ Timeout, will retry...");
+                    continue;
+                }
+                println!("   ⚠️ GPT themes/tropes extraction timed out");
+                return None;
+            }
+        }
+    }
+    None
+}
+
+/// Parse GPT response for themes and tropes
+/// Handles both plain text format (Themes: X, Y, Z) and JSON format ({"Themes": [...]})
+fn parse_themes_and_tropes(response: &str) -> Option<ThemesAndTropes> {
+    let mut themes = Vec::new();
+    let mut tropes = Vec::new();
+
+    // Try JSON format first (GPT sometimes returns {"Themes": [...], "Tropes": [...]})
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(response) {
+        if let Some(t) = json.get("Themes").or(json.get("themes")) {
+            if let Some(arr) = t.as_array() {
+                themes = arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .filter(|s| !s.is_empty() && s.len() <= 40)
+                    .take(3)
+                    .collect();
+            }
+        }
+        if let Some(t) = json.get("Tropes").or(json.get("tropes")) {
+            if let Some(arr) = t.as_array() {
+                tropes = arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .filter(|s| !s.is_empty() && s.len() <= 40)
+                    .take(3)
+                    .collect();
+            }
+        }
+    }
+
+    // If JSON parsing didn't work, try plain text format
+    if themes.is_empty() && tropes.is_empty() {
+        for line in response.lines() {
+            let line = line.trim();
+
+            if line.to_lowercase().starts_with("themes:") {
+                let content = line.split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
+                themes = content
+                    .split(',')
+                    .map(|s| s.trim().trim_matches(|c| c == '[' || c == ']' || c == '"').trim().to_string())
+                    .filter(|s| !s.is_empty() && s.len() <= 40)
+                    .take(3)
+                    .collect();
+            } else if line.to_lowercase().starts_with("tropes:") {
+                let content = line.split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
+                tropes = content
+                    .split(',')
+                    .map(|s| s.trim().trim_matches(|c| c == '[' || c == ']' || c == '"').trim().to_string())
+                    .filter(|s| !s.is_empty() && s.len() <= 40)
+                    .take(3)
+                    .collect();
+            }
+        }
+    }
+
+    if themes.is_empty() && tropes.is_empty() {
+        println!("   ⚠️ Could not parse themes/tropes from GPT response");
+        println!("      Response: {:?}", response);
+        return None;
+    }
+
+    println!("   ✅ Extracted {} themes, {} tropes", themes.len(), tropes.len());
+    if !themes.is_empty() {
+        println!("      Themes: {}", themes.join(" · "));
+    }
+    if !tropes.is_empty() {
+        println!("      Tropes: {}", tropes.join(" · "));
+    }
+
+    Some(ThemesAndTropes { themes, tropes })
+}
+
+/// Strip existing themes/tropes header from description (for rescan)
+/// Returns the clean description without the header
+pub fn strip_themes_tropes_header(description: &str) -> String {
+    let lines: Vec<&str> = description.lines().collect();
+
+    if lines.is_empty() {
+        return description.to_string();
+    }
+
+    // Check if first line(s) are themes/tropes header
+    let mut header_end = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let line_lower = line.to_lowercase();
+        if line_lower.starts_with("themes:") || line_lower.starts_with("tropes:") {
+            header_end = i + 1;
+        } else if line.trim().is_empty() && header_end > 0 {
+            // Found blank line after header - skip it too
+            header_end = i + 1;
+            break;
+        } else if header_end > 0 {
+            // Found non-empty, non-header line - stop
+            break;
+        } else {
+            // First line isn't header - no stripping needed
+            break;
+        }
+    }
+
+    if header_end == 0 {
+        return description.to_string();
+    }
+
+    // Return everything after the header
+    lines[header_end..].join("\n").trim().to_string()
+}
+
+/// Build description with themes/tropes header prepended
+/// Used when writing metadata.json or pushing to ABS
+pub fn build_description_with_header(
+    description: Option<&str>,
+    themes: &[String],
+    tropes: &[String],
+) -> Option<String> {
+    let clean_desc = description.map(|d| strip_themes_tropes_header(d));
+
+    let mut lines = Vec::new();
+
+    if !themes.is_empty() {
+        lines.push(format!("Themes: {}", themes.join(" · ")));
+    }
+    if !tropes.is_empty() {
+        lines.push(format!("Tropes: {}", tropes.join(" · ")));
+    }
+
+    if lines.is_empty() {
+        return clean_desc;
+    }
+
+    match clean_desc {
+        Some(desc) if !desc.is_empty() => {
+            Some(format!("{}\n\n{}", lines.join("\n"), desc))
+        }
+        _ => Some(lines.join("\n"))
+    }
+}
+
 /// Input data for ABS import GPT processing
 #[derive(Debug, Clone, Default)]
 pub struct AbsImportData {
@@ -3025,6 +3467,12 @@ pub async fn process_abs_import_with_gpt(
     metadata.series = input.series.clone();
     metadata.sequence = input.sequence.clone();
     metadata.subtitle = input.subtitle.clone();
+
+    // Debug: log input series/sequence
+    println!("   📚 Input series='{}' sequence={:?}",
+        input.series.as_deref().unwrap_or("none"),
+        input.sequence
+    );
     metadata.narrator = input.narrator.clone();
     metadata.description = input.description.clone();
     metadata.year = input.year.clone();
@@ -3056,27 +3504,31 @@ pub async fn process_abs_import_with_gpt(
     };
 
     // GPT cleans series, genres, and description
+    let sequence_str = input.sequence.as_deref().unwrap_or("none");
     let prompt = format!(
 r#"Clean this audiobook metadata. Return ONLY valid JSON.
 
 Title: {}
 Author: {}
 Series: {}
+Sequence: {}
 Current genres: {}
 Raw description: {}
 
 RULES:
 1. Series: short umbrella name (e.g. "Harry Potter" not full title)
-2. Genres: pick 1-3 from approved list
-3. For children's books: "Children's 0-2", "Children's 3-5", "Children's 6-8", "Children's 9-12", "Teen 13-17"
-4. Description: Remove HTML tags, keep plot summary only, 150-400 chars, no promotional text
+2. Sequence: keep the book number if provided (e.g. "1", "2", "3")
+3. Genres: pick 1-3 from approved list
+4. For children's books: "Children's 0-2", "Children's 3-5", "Children's 6-8", "Children's 9-12", "Teen 13-17"
+5. Description: Remove HTML tags, keep plot summary only, 150-400 chars, no promotional text
 
 APPROVED GENRES: {}
 
-{{"series":"or null","sequence":"or null","genres":[],"description":"cleaned text"}}"#,
+{{"series":null,"sequence":null,"genres":[],"description":"cleaned text"}}"#,
         input.title,
         input.author,
         input.series.as_deref().unwrap_or("none"),
+        sequence_str,
         genres_str,
         desc_for_prompt,
         crate::genres::APPROVED_GENRES.join(", ")
@@ -3094,14 +3546,34 @@ APPROVED GENRES: {}
         Ok(Ok(response)) => {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response) {
                 // Update series/sequence/genres/description from GPT
+                // Only override if GPT returns a non-null, non-empty value
                 if let Some(s) = json.get("series").and_then(|v| v.as_str()) {
-                    if !s.is_empty() && s != "null" {
-                        metadata.series = Some(s.to_string());
+                    if !s.is_empty() && s.to_lowercase() != "null" {
+                        // Use author-aware validation to reject author names as series
+                        let cleaned = normalize::clean_series_with_author(Some(s), Some(&metadata.author));
+                        if cleaned.is_some() {
+                            metadata.series = cleaned;
+                        }
                     }
                 }
+                // Only override sequence if GPT returns a valid value
                 if let Some(seq) = json.get("sequence").and_then(|v| v.as_str()) {
-                    if !seq.is_empty() && seq != "null" {
-                        metadata.sequence = Some(seq.to_string());
+                    if !seq.is_empty() && seq.to_lowercase() != "null" {
+                        if let Some(cleaned_seq) = normalize::clean_sequence(Some(seq)) {
+                            metadata.sequence = Some(cleaned_seq);
+                        }
+                    }
+                }
+                // Also handle sequence as a number
+                if metadata.sequence.is_none() {
+                    if let Some(seq_num) = json.get("sequence").and_then(|v| v.as_i64()) {
+                        metadata.sequence = Some(seq_num.to_string());
+                    } else if let Some(seq_num) = json.get("sequence").and_then(|v| v.as_f64()) {
+                        if seq_num.fract() == 0.0 {
+                            metadata.sequence = Some((seq_num as i64).to_string());
+                        } else {
+                            metadata.sequence = Some(format!("{:.1}", seq_num));
+                        }
                     }
                 }
                 if let Some(genres) = json.get("genres").and_then(|g| g.as_array()) {
@@ -3134,6 +3606,24 @@ APPROVED GENRES: {}
         metadata.series.as_deref(),
         Some(&metadata.author),
     );
+
+    // Extract themes/tropes if we have a description
+    if let Some(ref desc) = metadata.description {
+        if desc.len() >= 50 {
+            if let Some(themes_tropes) = extract_themes_and_tropes(
+                &metadata.title,
+                &metadata.author,
+                &metadata.genres,
+                Some(desc),
+                api_key,
+            ).await {
+                metadata.themes = themes_tropes.themes;
+                metadata.tropes = themes_tropes.tropes;
+                metadata.themes_source = Some("gpt".to_string());
+                metadata.tropes_source = Some("gpt".to_string());
+            }
+        }
+    }
 
     metadata.sources = Some(MetadataSources {
         series: if metadata.series.is_some() { Some(MetadataSource::Gpt) } else { None },
@@ -3407,11 +3897,17 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
         return None;
     }
 
-    let series_vec = if let Some(name) = series_name {
-        vec![AudibleSeries {
-            name,
-            position: series_position,
-        }]
+    // Validate series before adding
+    let series_vec = if let Some(ref name) = series_name {
+        let title_for_validation = extracted_title.as_deref().unwrap_or(title);
+        if is_valid_series(name, title_for_validation) {
+            vec![AudibleSeries {
+                name: name.clone(),
+                position: series_position,
+            }]
+        } else {
+            vec![]
+        }
     } else {
         vec![]
     };
@@ -3440,6 +3936,7 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
 
 /// Fetch metadata via AudiobookShelf search API (preferred when ABS is configured)
 /// Uses waterfall strategy: Audible -> Google -> iTunes
+/// Also searches custom providers (Goodreads, Hardcover, etc.) for additional data
 /// Falls back to direct Audible scraping if ABS is not configured or fails
 async fn fetch_metadata_via_abs(title: &str, author: &str, config: &Config) -> Option<AudibleMetadata> {
     // Check if ABS is configured
@@ -3460,25 +3957,200 @@ async fn fetch_metadata_via_abs(title: &str, author: &str, config: &Config) -> O
         return cached;
     }
 
-    // Try ABS search with waterfall
-    println!("   🔍 Fetching metadata via ABS for '{}'...", title);
-    match crate::abs_search::search_metadata_waterfall(config, title, author).await {
-        Some(abs_result) => {
-            // Convert ABS result to AudibleMetadata for compatibility
-            let metadata = crate::abs_search::convert_to_audible_metadata(abs_result);
-            let _ = cache::set(&cache_key, &Some(metadata.clone()));
-            println!("   ✅ ABS metadata found: {:?}", metadata.title);
-            Some(metadata)
+    // Search ABS and custom providers in parallel
+    println!("   🔍 Fetching metadata via ABS + custom providers for '{}'...", title);
+
+    let abs_future = crate::abs_search::search_metadata_waterfall(config, title, author);
+    let custom_future = crate::custom_providers::search_custom_providers(config, title, author);
+
+    let (abs_result, custom_results) = tokio::join!(abs_future, custom_future);
+
+    // Convert ABS result to AudibleMetadata
+    let mut metadata = match abs_result {
+        Some(abs) => {
+            let mut meta = crate::abs_search::convert_to_audible_metadata(abs);
+            println!("   ✅ ABS metadata found: {:?}", meta.title);
+
+            // Validate ABS series through our blocklist
+            let title_for_validation = meta.title.as_deref().unwrap_or(title);
+            let original_count = meta.series.len();
+            meta.series.retain(|s| is_valid_series(&s.name, title_for_validation));
+            if meta.series.len() < original_count {
+                println!("   🧹 Filtered {} invalid ABS series", original_count - meta.series.len());
+            }
+
+            Some(meta)
         }
         None => {
             // ABS returned nothing, try direct Audible scraping as fallback
-            println!("   ⚠️ ABS returned no results, falling back to direct Audible scraping");
-            let result = fetch_audible_metadata(title, author).await;
-            // Cache the fallback result too (may be None)
-            let _ = cache::set(&cache_key, &result);
-            result
+            println!("   ⚠️ ABS returned no results, trying direct Audible scraping");
+            fetch_audible_metadata(title, author).await
+        }
+    };
+
+    // Merge data from custom providers (Goodreads, Hardcover, etc.)
+    if !custom_results.is_empty() {
+        println!("   🔌 Found {} custom provider results", custom_results.len());
+
+        if let Some(ref mut meta) = metadata {
+            // Enhance existing metadata with custom provider data
+            for custom in &custom_results {
+                // Fill in missing or bad author (critical for "Unknown Author" cases)
+                let authors_bad = meta.authors.is_empty()
+                    || meta.authors.iter().all(|a| a.is_empty() || a.to_lowercase() == "unknown" || a.to_lowercase() == "unknown author");
+                if authors_bad {
+                    if let Some(ref custom_author) = custom.author {
+                        if !custom_author.is_empty() && custom_author.to_lowercase() != "unknown" {
+                            let old_authors = meta.authors.join(", ");
+                            println!("   ✍️  Added author from {}: '{}' (was: '{}')",
+                                custom.provider_name, custom_author, old_authors);
+                            meta.authors = vec![custom_author.clone()];
+                        }
+                    }
+                }
+
+                // Merge series from custom providers (Goodreads is excellent for series)
+                // Add ALL series from custom providers, avoiding duplicates
+                for custom_series in &custom.series {
+                    if let Some(ref series_name) = custom_series.series {
+                        // Check if this series already exists (case-insensitive)
+                        let series_lower = series_name.to_lowercase();
+                        let already_exists = meta.series.iter()
+                            .any(|s| s.name.to_lowercase() == series_lower);
+
+                        // Validate series before adding
+                        let title = meta.title.as_deref().unwrap_or("");
+                        if !already_exists && !series_name.is_empty() && is_valid_series(series_name, title) {
+                            meta.series.push(AudibleSeries {
+                                name: series_name.clone(),
+                                position: custom_series.sequence.clone(),
+                            });
+                            println!("   📚 Added series from {}: '{}' #{:?}",
+                                custom.provider_name, series_name, custom_series.sequence);
+                        }
+                    }
+                }
+
+                // Fill in missing description (Goodreads has great descriptions)
+                if meta.description.is_none() && custom.description.is_some() {
+                    meta.description = custom.description.clone();
+                    println!("   📝 Added description from {}", custom.provider_name);
+                }
+
+                // Fill in missing genres
+                if meta.genres.is_empty() && !custom.genres.is_empty() {
+                    meta.genres = custom.genres.clone();
+                    println!("   🏷️  Added {} genres from {}", custom.genres.len(), custom.provider_name);
+                }
+
+                // Fill in missing narrator
+                if meta.narrators.is_empty() && custom.narrator.is_some() {
+                    if let Some(ref narrator) = custom.narrator {
+                        meta.narrators = vec![narrator.clone()];
+                        println!("   🎙️  Added narrator from {}: {}", custom.provider_name, narrator);
+                    }
+                }
+
+                // Fill in missing publisher
+                if meta.publisher.is_none() && custom.publisher.is_some() {
+                    meta.publisher = custom.publisher.clone();
+                }
+
+                // Fill in missing year
+                if meta.release_date.is_none() && custom.published_year.is_some() {
+                    meta.release_date = custom.published_year.clone();
+                }
+            }
+        } else {
+            // No ABS result - create metadata from custom providers
+            if let Some(best) = custom_results.first() {
+                println!("   ✅ Using {} as primary source", best.provider_name);
+                let mut meta = AudibleMetadata {
+                    title: best.title.clone(),
+                    subtitle: best.subtitle.clone(),
+                    authors: best.author.as_ref().map(|a| vec![a.clone()]).unwrap_or_default(),
+                    narrators: best.narrator.as_ref().map(|n| vec![n.clone()]).unwrap_or_default(),
+                    series: best.series.iter().filter_map(|s| {
+                        s.series.as_ref().and_then(|name| {
+                            let title = best.title.as_deref().unwrap_or("");
+                            if is_valid_series(name, title) {
+                                Some(AudibleSeries {
+                                    name: name.clone(),
+                                    position: s.sequence.clone(),
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                    }).collect(),
+                    publisher: best.publisher.clone(),
+                    release_date: best.published_year.clone(),
+                    description: best.description.clone(),
+                    language: best.language.clone(),
+                    runtime_minutes: best.duration.map(|d| d as u32),
+                    abridged: None,
+                    genres: best.genres.clone(),
+                    asin: best.asin.clone(),
+                    cover_url: best.cover.clone(),
+                };
+
+                // Merge from other custom providers
+                for custom in custom_results.iter().skip(1) {
+                    // Add ALL series from custom providers, avoiding duplicates
+                    for custom_series in &custom.series {
+                        if let Some(ref series_name) = custom_series.series {
+                            let series_lower = series_name.to_lowercase();
+                            let already_exists = meta.series.iter()
+                                .any(|s| s.name.to_lowercase() == series_lower);
+
+                            // Validate series before adding
+                            let title = meta.title.as_deref().unwrap_or("");
+                            if !already_exists && !series_name.is_empty() && is_valid_series(series_name, title) {
+                                meta.series.push(AudibleSeries {
+                                    name: series_name.clone(),
+                                    position: custom_series.sequence.clone(),
+                                });
+                            }
+                        }
+                    }
+                    if meta.description.is_none() {
+                        meta.description = custom.description.clone();
+                    }
+                    if meta.genres.is_empty() {
+                        meta.genres = custom.genres.clone();
+                    }
+                }
+
+                metadata = Some(meta);
+            }
         }
     }
+
+    // GPT series cleaning: filter out irrelevant series based on book context
+    if let Some(ref mut meta) = metadata {
+        if !meta.series.is_empty() {
+            if let Some(api_key) = &config.openai_api_key {
+                if !api_key.is_empty() {
+                    let title = meta.title.as_deref().unwrap_or("");
+                    let author = meta.authors.first().map(|s| s.as_str()).unwrap_or("");
+                    let subtitle = meta.subtitle.as_deref();
+
+                    println!("   🧹 Running GPT series validation for {} series...", meta.series.len());
+                    meta.series = clean_series_with_gpt(
+                        &meta.series,
+                        title,
+                        author,
+                        subtitle,
+                        api_key
+                    ).await;
+                }
+            }
+        }
+    }
+
+    // Cache the result
+    let _ = cache::set(&cache_key, &metadata);
+    metadata
 }
 
 /// Extract description from Audible page JSON-LD or HTML
@@ -3757,38 +4429,114 @@ fn extract_collection_books_from_description(description: &str, series_name: Opt
     books
 }
 
+/// Extract series name and book number from folder name
+/// Handles patterns like:
+/// - "Discworld 01 - The Colour of Magic" -> ("Discworld", "1")
+/// - "Harry Potter Book 3" -> ("Harry Potter", "3")
+/// - "[Series Name #5] Title" -> ("Series Name", "5")
+/// - "The Witcher 01" -> ("The Witcher", "1")
 fn extract_series_from_folder(folder_name: &str) -> (Option<String>, Option<String>) {
-    if let Some(book_num) = extract_book_number_from_folder(folder_name) {
-        let patterns = [
-            regex::Regex::new(r"(.+?)\s+(?:Book\s*[#]?)?\d+").ok(),
-            regex::Regex::new(r"(.+?)\s+[#]\d+").ok(),
-            regex::Regex::new(r"\[(.+?)\s+\d+\]").ok(),
-        ];
-        
-        for pattern in patterns.iter().flatten() {
-            if let Some(caps) = pattern.captures(folder_name) {
-                if let Some(series_name) = caps.get(1) {
-                    return (Some(normalize_series_name(series_name.as_str().trim())), Some(book_num));
+    // Pattern 1: "[Series Name #N]" or "[Series Name N]" at start (most specific)
+    // e.g., "[Discworld 7] Pyramids"
+    if let Some(re) = regex::Regex::new(r"^\[(.+?)\s*[#]?(\d+)\]").ok() {
+        if let Some(caps) = re.captures(folder_name) {
+            if let (Some(series), Some(num)) = (caps.get(1), caps.get(2)) {
+                let series_name = series.as_str().trim();
+                let book_num = num.as_str().trim_start_matches('0');
+                if series_name.len() >= 3 && !book_num.is_empty() {
+                    return (Some(normalize_series_name(series_name)), Some(book_num.to_string()));
                 }
             }
         }
-        
-        return (None, Some(book_num));
     }
-    
+
+    // Pattern 2: "Series Name Book N" or "Series Name Book #N" (explicit Book keyword)
+    // e.g., "Wheel of Time Book 5" or "Harry Potter Book #3"
+    if let Some(re) = regex::Regex::new(r"(?i)^(.+?)\s+Book\s*[#]?(\d+)").ok() {
+        if let Some(caps) = re.captures(folder_name) {
+            if let (Some(series), Some(num)) = (caps.get(1), caps.get(2)) {
+                let series_name = series.as_str().trim();
+                let book_num = num.as_str().trim_start_matches('0');
+                if series_name.len() >= 3 && !book_num.is_empty() {
+                    return (Some(normalize_series_name(series_name)), Some(book_num.to_string()));
+                }
+            }
+        }
+    }
+
+    // Pattern 3: "Series Name #N" (hashtag format)
+    // e.g., "Discworld #5"
+    if let Some(re) = regex::Regex::new(r"^(.+?)\s*#(\d+)").ok() {
+        if let Some(caps) = re.captures(folder_name) {
+            if let (Some(series), Some(num)) = (caps.get(1), caps.get(2)) {
+                let series_name = series.as_str().trim();
+                let book_num = num.as_str().trim_start_matches('0');
+                if series_name.len() >= 3 && !book_num.is_empty() {
+                    return (Some(normalize_series_name(series_name)), Some(book_num.to_string()));
+                }
+            }
+        }
+    }
+
+    // Pattern 4: "Series Name ## - Title" (number before dash separator)
+    // e.g., "Discworld 01 - The Colour of Magic" -> "Discworld", "1"
+    if let Some(re) = regex::Regex::new(r"^(.+?)\s+(\d{1,2})\s*[-–—]\s*.+$").ok() {
+        if let Some(caps) = re.captures(folder_name) {
+            if let (Some(series), Some(num)) = (caps.get(1), caps.get(2)) {
+                let series_name = series.as_str().trim();
+                let book_num = num.as_str().trim_start_matches('0');
+                // Validate series name isn't too short, just numbers, or ends with "Book"
+                if series_name.len() >= 3
+                   && !series_name.chars().all(|c| c.is_ascii_digit())
+                   && !series_name.to_lowercase().ends_with(" book")
+                   && !book_num.is_empty() {
+                    return (Some(normalize_series_name(series_name)), Some(book_num.to_string()));
+                }
+            }
+        }
+    }
+
+    // Pattern 5: "Series Name ##" at end (just number, no separator after)
+    // e.g., "Harry Potter 3" -> "Harry Potter", "3"
+    if let Some(re) = regex::Regex::new(r"^(.+?)\s+(\d{1,2})$").ok() {
+        if let Some(caps) = re.captures(folder_name) {
+            if let (Some(series), Some(num)) = (caps.get(1), caps.get(2)) {
+                let series_name = series.as_str().trim();
+                let book_num = num.as_str().trim_start_matches('0');
+                if series_name.len() >= 3
+                   && !series_name.chars().all(|c| c.is_ascii_digit())
+                   && !series_name.to_lowercase().ends_with(" book")
+                   && !book_num.is_empty() {
+                    return (Some(normalize_series_name(series_name)), Some(book_num.to_string()));
+                }
+            }
+        }
+    }
+
     (None, None)
 }
 
 fn extract_book_number_from_folder(folder: &str) -> Option<String> {
-    let re = regex::Regex::new(r"(?i)book\s*[#]?(\d+)|[#](\d+)|[-_\s](\d{2})[-_\s]").ok()?;
-    if let Some(caps) = re.captures(folder) {
-        caps.get(1)
-            .or_else(|| caps.get(2))
-            .or_else(|| caps.get(3))
-            .map(|m| m.as_str().to_string())
-    } else {
-        None
+    // Look for common book number patterns
+    let patterns = [
+        r"(?i)book\s*[#]?(\d+)",     // "Book 3", "Book #3"
+        r"[#](\d+)",                  // "#5"
+        r"\s(\d{2})\s*[-–—]\s",       // " 01 - " (padded number before dash)
+    ];
+
+    for pattern in &patterns {
+        if let Some(re) = regex::Regex::new(pattern).ok() {
+            if let Some(caps) = re.captures(folder) {
+                if let Some(m) = caps.get(1) {
+                    let num = m.as_str().trim_start_matches('0');
+                    if !num.is_empty() {
+                        return Some(num.to_string());
+                    }
+                }
+            }
+        }
     }
+    None
 }
 
 /// Check if file tags are already clean (no GPT extraction needed)
@@ -4179,7 +4927,8 @@ pub async fn process_all_groups_super_scanner(
     println!("🔬 Super Scanner: Processing {} book groups (max accuracy mode)", total);
     println!("   ⚙️ Retries: 3 per API, GPT validation: all books, Multi-source: enabled");
 
-    crate::progress::update_progress(0, total, "Super Scanner starting...");
+    // Start progress tracking with timer for ETA calculation
+    crate::progress::start_scan(total);
 
     let processed = Arc::new(AtomicUsize::new(0));
     let covers_found = Arc::new(AtomicUsize::new(0));
@@ -4208,13 +4957,12 @@ pub async fn process_all_groups_super_scanner(
                 let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
                 let covers = covers_found.load(Ordering::Relaxed);
 
-                if done % 3 == 0 || done == total {
-                    let elapsed = start_time.elapsed().as_secs_f64();
-                    let rate = done as f64 / elapsed;
-                    crate::progress::update_progress(done, total,
-                        &format!("🔬 {}/{} books ({} covers) - {:.1}/sec", done, total, covers, rate)
-                    );
-                }
+                // Update progress every book for responsive parallel updates
+                // ETA is calculated automatically in progress module
+                crate::progress::update_progress_with_covers(done, total,
+                    &format!("🔬 {}/{} books ({} covers)", done, total, covers),
+                    covers
+                );
 
                 result
             }
@@ -5019,6 +5767,11 @@ fn parse_super_scanner_gpt_response_enhanced(
         is_collection: false,
         collection_books: vec![],
         confidence: Some(confidence),
+        // Themes/tropes - extracted later
+        themes: vec![],
+        tropes: vec![],
+        themes_source: None,
+        tropes_source: None,
     };
 
     // Apply FULL normalization pipeline (like normal scanner)
@@ -5158,6 +5911,11 @@ fn parse_super_scanner_gpt_response(
         is_collection: false,
         collection_books: vec![],
         confidence,
+        // Themes/tropes - extracted later
+        themes: vec![],
+        tropes: vec![],
+        themes_source: None,
+        tropes_source: None,
     })
 }
 
@@ -5289,8 +6047,319 @@ fn create_fallback_metadata_super(
         is_collection: false,
         collection_books: vec![],
         confidence,
+        // Themes/tropes - extracted later
+        themes: vec![],
+        tropes: vec![],
+        themes_source: None,
+        tropes_source: None,
     };
 
     // Apply FULL normalization pipeline
     normalize_metadata(metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // Series Extraction Tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_series_simple() {
+        let result = extract_all_series_from_name("Harry Potter", Some("1"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "Harry Potter");
+        assert_eq!(result[0].1, Some("1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_series_compound_magic_tree_house() {
+        // "Magic Tree House: Merlin Missions" - CONSERVATIVE: only return sub-series
+        let result = extract_all_series_from_name("Magic Tree House: Merlin Missions", Some("1"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "Merlin Missions"); // Only the specific sub-series
+        assert_eq!(result[0].1, Some("1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_series_colon_separated_kept_together() {
+        // CONSERVATIVE: Colon-separated series are kept together, not split
+        let result = extract_all_series_from_name("Discworld: Witches", Some("3"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "Discworld: Witches"); // Kept as one series
+        assert_eq!(result[0].1, Some("3".to_string()));
+    }
+
+    #[test]
+    fn test_extract_series_no_split_subtitle() {
+        // Should NOT split if it looks like a subtitle (contains "book")
+        let result = extract_all_series_from_name("Wheel of Time: Book One", Some("1"));
+        assert_eq!(result.len(), 1); // Should not split
+    }
+
+    #[test]
+    fn test_extract_series_star_wars() {
+        // Star Wars series with colon should stay together
+        let result = extract_all_series_from_name("Star Wars: The High Republic", Some("2"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "Star Wars: The High Republic");
+        assert_eq!(result[0].1, Some("2".to_string()));
+    }
+
+    // =========================================================================
+    // Folder Series Extraction Tests
+    // =========================================================================
+
+    #[test]
+    fn test_folder_extraction_discworld() {
+        // "Discworld 01 - The Colour of Magic" -> Series: "Discworld", Position: "1"
+        let (series, position) = extract_series_from_folder("Discworld 01 - The Colour of Magic");
+        assert_eq!(series, Some("Discworld".to_string()));
+        assert_eq!(position, Some("1".to_string())); // Leading zero stripped
+    }
+
+    #[test]
+    fn test_folder_extraction_harry_potter() {
+        // "Harry Potter 3" -> Series: "Harry Potter", Position: "3"
+        let (series, position) = extract_series_from_folder("Harry Potter 3");
+        assert_eq!(series, Some("Harry Potter".to_string()));
+        assert_eq!(position, Some("3".to_string()));
+    }
+
+    #[test]
+    fn test_folder_extraction_bracket_format() {
+        // "[Discworld 7] Pyramids" -> Series: "Discworld", Position: "7"
+        let (series, position) = extract_series_from_folder("[Discworld 7] Pyramids");
+        assert_eq!(series, Some("Discworld".to_string()));
+        assert_eq!(position, Some("7".to_string()));
+    }
+
+    #[test]
+    fn test_folder_extraction_book_keyword() {
+        // "Wheel of Time Book 5" -> Series: "Wheel of Time", Position: "5"
+        let (series, position) = extract_series_from_folder("Wheel of Time Book 5");
+        assert_eq!(series, Some("Wheel of Time".to_string()));
+        assert_eq!(position, Some("5".to_string()));
+    }
+
+    #[test]
+    fn test_folder_extraction_no_series() {
+        // "The Great Gatsby" - no series pattern
+        let (series, position) = extract_series_from_folder("The Great Gatsby");
+        assert_eq!(series, None);
+        assert_eq!(position, None);
+    }
+
+    #[test]
+    fn test_folder_extraction_rejects_title_with_dash() {
+        // Should NOT extract "Discworld 01 - The Colour of Magic" as the series name
+        let (series, _) = extract_series_from_folder("Discworld 01 - The Colour of Magic");
+        assert_ne!(series, Some("Discworld 01 - The Colour of Magic".to_string()));
+        assert_eq!(series, Some("Discworld".to_string())); // Just the series part
+    }
+
+    // =========================================================================
+    // Themes and Tropes Parsing Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_themes_json_format() {
+        let response = r#"{"Themes": ["Adventure", "Friendship", "Coming of Age"], "Tropes": ["Chosen One", "Magic School"]}"#;
+        let result = parse_themes_and_tropes(response);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        assert_eq!(data.themes.len(), 3);
+        assert!(data.themes.contains(&"Adventure".to_string()));
+        assert_eq!(data.tropes.len(), 2);
+        assert!(data.tropes.contains(&"Chosen One".to_string()));
+    }
+
+    #[test]
+    fn test_parse_themes_plain_text_format() {
+        let response = "Themes: Adventure, Friendship, Coming of Age\nTropes: Chosen One, Magic School";
+        let result = parse_themes_and_tropes(response);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        assert!(data.themes.len() >= 2);
+        assert!(data.tropes.len() >= 1);
+    }
+
+    #[test]
+    fn test_parse_themes_lowercase_keys() {
+        let response = r#"{"themes": ["Adventure"], "tropes": ["Hero's Journey"]}"#;
+        let result = parse_themes_and_tropes(response);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        assert_eq!(data.themes.len(), 1);
+        assert_eq!(data.tropes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_themes_empty_response() {
+        let response = "No themes found";
+        let result = parse_themes_and_tropes(response);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_themes_limits_to_3() {
+        let response = r#"{"Themes": ["One", "Two", "Three", "Four", "Five"], "Tropes": []}"#;
+        let result = parse_themes_and_tropes(response);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        assert_eq!(data.themes.len(), 3); // Should be limited to 3
+    }
+
+    // =========================================================================
+    // Series Name Normalization Tests
+    // =========================================================================
+
+    #[test]
+    fn test_normalize_series_name_removes_series_suffix() {
+        // Function should remove " Series" suffix
+        assert_eq!(normalize_series_name("Harry Potter Series"), "Harry Potter");
+    }
+
+    #[test]
+    fn test_normalize_series_name_removes_trilogy_suffix() {
+        assert_eq!(normalize_series_name("The Hunger Games Trilogy"), "The Hunger Games");
+    }
+
+    #[test]
+    fn test_normalize_series_name_removes_book_pattern() {
+        assert_eq!(normalize_series_name("Wheel of Time (Book"), "Wheel of Time");
+        assert_eq!(normalize_series_name("Dark Tower, Book 1"), "Dark Tower");
+    }
+
+    #[test]
+    fn test_normalize_series_name_preserves_normal() {
+        // Normal series names should be preserved
+        assert_eq!(normalize_series_name("The Lord of the Rings"), "The Lord of the Rings");
+        assert_eq!(normalize_series_name("Discworld"), "Discworld");
+    }
+
+    // =========================================================================
+    // Folder Parsing Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_folder_basic() {
+        let (title, author) = parse_folder_for_book_info("Brandon Sanderson - The Way of Kings");
+        assert_eq!(author, "Brandon Sanderson");
+        assert_eq!(title, "The Way of Kings");
+    }
+
+    #[test]
+    fn test_parse_folder_with_year() {
+        let (title, author) = parse_folder_for_book_info("Stephen King - It (1986)");
+        assert_eq!(author, "Stephen King");
+        assert!(title.contains("It"));
+    }
+
+    #[test]
+    fn test_parse_folder_no_separator() {
+        let (title, author) = parse_folder_for_book_info("The Great Gatsby");
+        assert_eq!(title, "The Great Gatsby");
+        assert!(author.is_empty());
+    }
+
+    // =========================================================================
+    // Description Header Stripping Tests
+    // =========================================================================
+
+    #[test]
+    fn test_strip_themes_tropes_header() {
+        // Function expects plain text format starting with "Themes:" or "Tropes:"
+        let desc_with_header = "Themes: Adventure · Mystery\nTropes: Chosen One\n\nActual description starts here.";
+        let clean = strip_themes_tropes_header(desc_with_header);
+        assert!(clean.contains("Actual description starts here"));
+        assert!(!clean.contains("Themes:"));
+    }
+
+    #[test]
+    fn test_strip_themes_tropes_no_header() {
+        let desc = "This is just a normal description.";
+        let clean = strip_themes_tropes_header(desc);
+        assert_eq!(clean, desc);
+    }
+
+    #[test]
+    fn test_strip_themes_tropes_only_themes() {
+        let desc = "Themes: Adventure\n\nThe story begins...";
+        let clean = strip_themes_tropes_header(desc);
+        assert_eq!(clean, "The story begins...");
+    }
+
+    // =========================================================================
+    // Series Validation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_valid_series_rejects_subseries_indicators() {
+        // Discworld sub-series indicators should be rejected as standalone
+        assert!(!is_valid_series("Death", "Mort"));
+        assert!(!is_valid_series("Witches", "Equal Rites"));
+        assert!(!is_valid_series("Wizards", "The Colour of Magic"));
+        assert!(!is_valid_series("Watch", "Guards! Guards!"));
+        assert!(!is_valid_series("Rincewind", "The Colour of Magic"));
+    }
+
+    #[test]
+    fn test_is_valid_series_accepts_combined_subseries() {
+        // Combined series with sub-series indicator should be valid
+        assert!(is_valid_series("Discworld - Death", "Mort"));
+        assert!(is_valid_series("Discworld: Witches", "Equal Rites"));
+        assert!(is_valid_series("Discworld - Watch", "Guards! Guards!"));
+    }
+
+    #[test]
+    fn test_is_valid_series_accepts_main_series() {
+        // Main series names should be valid
+        assert!(is_valid_series("Discworld", "Mort"));
+        assert!(is_valid_series("Harry Potter", "The Philosopher's Stone"));
+        assert!(is_valid_series("Wheel of Time", "The Eye of the World"));
+    }
+
+    #[test]
+    fn test_is_valid_series_rejects_common_false_positives() {
+        assert!(!is_valid_series("Book", "Some Title"));
+        assert!(!is_valid_series("Audiobook", "Some Title"));
+        assert!(!is_valid_series("Novel", "Some Title"));
+        assert!(!is_valid_series("Collection", "Some Title"));
+    }
+
+    #[test]
+    fn test_is_valid_series_rejects_title_as_series() {
+        // Series should not be the same as the book title
+        assert!(!is_valid_series("Tempest", "Tempest"));
+        assert!(!is_valid_series("Tempest", "The Tempest"));
+        assert!(!is_valid_series("The Tempest", "Tempest"));
+        assert!(!is_valid_series("Othello", "Othello"));
+        assert!(!is_valid_series("Hamlet", "Hamlet"));
+        assert!(!is_valid_series("Macbeth", "Macbeth"));
+
+        // But allow actual series names that don't match title
+        assert!(is_valid_series("Arkangel Shakespeare", "Tempest"));
+        assert!(is_valid_series("Shakespeare Stories", "Othello"));
+    }
+
+    #[test]
+    fn test_is_valid_series_rejects_generic_marketing() {
+        // Generic/marketing series should be rejected
+        assert!(!is_valid_series("Timeless Classic", "Othello"));
+        assert!(!is_valid_series("Timeless Classics", "Hamlet"));
+        assert!(!is_valid_series("Classic Literature", "Pride and Prejudice"));
+        assert!(!is_valid_series("Great Books", "1984"));
+        assert!(!is_valid_series("Bestseller", "The Da Vinci Code"));
+    }
+
+    #[test]
+    fn test_is_valid_series_rejects_format_specific() {
+        // Format-specific series should be rejected for audiobooks
+        assert!(!is_valid_series("Manga Shakespeare", "Hamlet"));
+        assert!(!is_valid_series("Graphic Novel", "Watchmen"));
+        assert!(!is_valid_series("Illustrated Edition", "Harry Potter"));
+    }
 }

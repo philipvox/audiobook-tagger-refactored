@@ -4,26 +4,26 @@ import {
   BookOpen, Tag, Building, Image, CheckSquare, Square, Mic2
 } from 'lucide-react';
 
-// Scan level options
+// Scan level options - consistent terminology per UX spec
 const SCAN_LEVELS = [
   {
     id: 'normal',
-    label: 'Smart Scan',
-    description: 'Skip books with existing metadata, only scan new ones',
+    label: 'Quick',
+    description: 'Skip books with complete metadata',
     icon: Zap,
     color: 'blue',
   },
   {
     id: 'force_fresh',
-    label: 'Clean Scan',
-    description: 'Clear caches and fetch all fresh data from APIs',
+    label: 'Standard',
+    description: 'Fresh fetch from all enabled sources',
     icon: Sparkles,
     color: 'purple',
   },
   {
     id: 'super_scanner',
-    label: 'Deep Scan',
-    description: 'Maximum accuracy with validation, retries, and GPT on all',
+    label: 'Deep',
+    description: 'All sources + GPT validation + retries',
     icon: Shield,
     color: 'orange',
   },
@@ -89,7 +89,7 @@ export function RescanModal({ isOpen, onClose, onRescan, selectedCount, scanning
           <div className="flex items-center gap-3">
             <RefreshCw className="w-5 h-5 text-blue-600" />
             <h2 className="text-lg font-semibold text-gray-900">
-              Rescan {selectedCount} {selectedCount === 1 ? 'Book' : 'Books'}
+              Custom Scan ({selectedCount} {selectedCount === 1 ? 'book' : 'books'})
             </h2>
           </div>
           <button

@@ -6,6 +6,105 @@ import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search
 const ITEM_HEIGHT = 140;
 const BUFFER_SIZE = 10;
 
+// Check if a string looks like a person's name (2-3 words, capitalized)
+const looksLikePersonName = (s) => {
+  const words = s.trim().split(/\s+/);
+
+  // Person names are typically 2-3 words
+  if (words.length < 2 || words.length > 4) return false;
+
+  // Check for series-like words that indicate it's NOT a name
+  const lower = s.toLowerCase();
+  const seriesIndicators = ['series', 'saga', 'chronicles', 'trilogy', 'book', 'collection',
+                            'adventures', 'mysteries', 'tales', 'stories', 'cycle'];
+  if (seriesIndicators.some(ind => lower.includes(ind))) return false;
+
+  // Check if all words look like name parts
+  for (const word of words) {
+    const wordLower = word.toLowerCase();
+    // Skip common suffixes
+    if (['jr', 'jr.', 'sr', 'sr.', 'ii', 'iii', 'iv', 'phd', 'md', 'dr', 'dr.'].includes(wordLower)) {
+      continue;
+    }
+    // Names shouldn't have numbers
+    if (/\d/.test(word)) return false;
+    // First letter should be uppercase for proper names
+    if (word.length > 0 && word[0] !== word[0].toUpperCase()) return false;
+  }
+
+  return true;
+};
+
+// Validate series name - filter out GPT artifacts and placeholder values
+const isValidSeries = (series, author = null) => {
+  if (!series || typeof series !== 'string') return false;
+
+  const s = series.trim();
+  if (s.length < 2) return false;
+
+  const lower = s.toLowerCase();
+
+  // Reject known bad values from GPT
+  const invalidValues = [
+    // Placeholder values
+    'null', 'or null', 'none', 'n/a', 'na', 'unknown', 'unknown series',
+    'standalone', 'stand-alone', 'stand alone', 'single', 'single book',
+    'not a series', 'no series', 'not part of a series', 'no series name',
+    'series name', 'series', 'title', 'book', 'audiobook',
+    'undefined', 'not applicable', 'not available', 'tbd', 'tba',
+    // Genres that GPT incorrectly returns as series
+    'biography', 'autobiography', 'memoir', 'memoirs', 'fiction', 'non-fiction',
+    'nonfiction', 'mystery', 'thriller', 'romance', 'fantasy', 'science fiction',
+    'sci-fi', 'horror', 'historical fiction', 'literary fiction', 'self-help',
+    'self help', 'history', 'true crime', 'comedy', 'humor', 'drama',
+    'adventure', 'action', 'suspense', 'classic', 'classics', 'poetry',
+    'essay', 'essays', 'short stories', 'anthology', 'collection',
+    'young adult', 'ya', 'children', 'kids', 'juvenile', 'teen',
+    'business', 'economics', 'psychology', 'philosophy', 'religion',
+    'spirituality', 'health', 'wellness', 'cooking', 'travel', 'science',
+    'technology', 'politics', 'sociology', 'education', 'reference',
+  ];
+
+  if (invalidValues.includes(lower)) return false;
+
+  // Reject if contains "or null" anywhere
+  if (lower.includes('or null') || lower.includes('#or null')) return false;
+
+  // Reject if series matches the author name
+  if (author) {
+    const authorLower = author.toLowerCase().trim();
+    if (lower === authorLower) return false;
+    // Check if series is contained in author (e.g., "Eric Carle" in "Eric Carle, Mary Smith")
+    if (authorLower.includes(lower)) return false;
+    // Check if first author name matches series
+    const firstAuthor = authorLower.split(',')[0].trim();
+    if (lower === firstAuthor) return false;
+  }
+
+  // Reject if it looks like a person's name (2 words, capitalized, no series keywords)
+  if (looksLikePersonName(s)) {
+    const words = s.trim().split(/\s+/);
+    // Only reject simple 2-word names that look like "First Last"
+    if (words.length === 2) return false;
+  }
+
+  return true;
+};
+
+// Validate sequence/book number
+const isValidSequence = (seq) => {
+  if (!seq || typeof seq !== 'string') return false;
+
+  const s = seq.trim();
+  if (s.length === 0) return false;
+
+  const lower = s.toLowerCase();
+  const invalidValues = ['null', 'or null', 'none', 'n/a', 'na', 'unknown', '?', 'tbd'];
+  if (invalidValues.includes(lower)) return false;
+
+  return true;
+};
+
 // Inline change preview tooltip component
 function ChangePreviewTooltip({ group, position }) {
   if (!group || !group.files) return null;
@@ -159,7 +258,8 @@ export function BookList({
       if (searchLower) {
         const matchesTitle = metadata.title?.toLowerCase().includes(searchLower);
         const matchesAuthor = metadata.author?.toLowerCase().includes(searchLower);
-        const matchesSeries = metadata.series?.toLowerCase().includes(searchLower);
+        const matchesSeries = metadata.series?.toLowerCase().includes(searchLower) ||
+                             metadata.all_series?.some(s => s.name?.toLowerCase().includes(searchLower));
         const matchesNarrator = metadata.narrator?.toLowerCase().includes(searchLower) ||
                                metadata.narrators?.some(n => n.toLowerCase().includes(searchLower));
 
@@ -168,15 +268,15 @@ export function BookList({
         }
       }
 
-      // Cover filter
+      // Cover filter (check both local cache and ABS cover_url)
       if (filters.hasCover !== null) {
-        const hasCover = !!coverCache[group.id];
+        const hasCover = !!coverCache[group.id] || !!metadata.cover_url;
         if (filters.hasCover !== hasCover) return false;
       }
 
-      // Series filter
+      // Series filter - check all_series first, then fallback to primary series
       if (filters.hasSeries !== null) {
-        const hasSeries = !!metadata.series;
+        const hasSeries = metadata.all_series?.length > 0 || isValidSeries(metadata.series, metadata.author);
         if (filters.hasSeries !== hasSeries) return false;
       }
 
@@ -377,24 +477,24 @@ export function BookList({
             <h3 className="text-lg font-semibold text-gray-900 mb-2">No Files Scanned</h3>
             <p className="text-gray-600 mb-6 text-sm">Select a folder to scan for audiobook files and view metadata</p>
             <div className="flex flex-col gap-3">
-              {/* Smart Scan - default */}
+              {/* Quick Scan - default */}
               <button
                 onClick={() => onScan('normal')}
                 disabled={scanning}
                 className="w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 <Zap className="w-4 h-4" />
-                {scanning ? 'Scanning...' : 'Smart Scan'}
+                {scanning ? 'Scanning...' : 'Quick Scan'}
               </button>
 
-              {/* Clean Scan - secondary */}
+              {/* Standard Scan - secondary */}
               <button
                 onClick={() => onScan('force_fresh')}
                 disabled={scanning}
                 className="w-full px-4 py-2.5 bg-white border border-blue-300 text-blue-700 rounded-lg hover:bg-blue-50 transition-colors font-medium disabled:opacity-50 flex items-center justify-center gap-2 text-sm"
               >
                 <Sparkles className="w-4 h-4" />
-                Clean Scan (Clear Caches)
+                Standard Scan (Fresh Data)
               </button>
 
               {onImport && (
@@ -409,19 +509,19 @@ export function BookList({
               )}
               {onImportFromAbs && (
                 <button
-                  onClick={onImportFromAbs}
+                  onClick={() => onImportFromAbs()}
                   disabled={scanning}
                   className="w-full px-4 py-2 bg-gradient-to-r from-purple-500 to-indigo-500 text-white rounded-lg hover:from-purple-600 hover:to-indigo-600 transition-colors font-medium disabled:opacity-50 text-sm flex items-center justify-center gap-2"
                 >
                   <Cloud className="w-4 h-4" />
-                  Import from ABS Library
+                  Pull from ABS Library
                 </button>
               )}
             </div>
             <div className="mt-4 text-xs text-gray-500 space-y-1">
-              <p><strong>Smart Scan:</strong> Skips books with existing metadata</p>
-              <p><strong>Clean Scan:</strong> Fetches fresh data for all books</p>
-              <p><strong>Import from ABS:</strong> Load books from AudiobookShelf</p>
+              <p><strong>Quick:</strong> Skip books with complete metadata</p>
+              <p><strong>Standard:</strong> Fresh data from all enabled sources</p>
+              <p><strong>Pull from ABS:</strong> Import books from AudiobookShelf</p>
             </div>
           </div>
         </div>
@@ -728,27 +828,26 @@ export function BookList({
                   }`}
                   style={{ minHeight: ITEM_HEIGHT }}
                   onClick={(e) => {
-                    onSelectFile(group, actualIndex, e);
+                    // Pass filteredGroups so ScannerPage can do proper range selection
+                    onSelectFile(group, actualIndex, e, filteredGroups);
                   }}
                 >
                   <div className="p-4">
                     <div className="flex items-start gap-3">
-                      {/* Thumbnail */}
-                      <div className="flex-shrink-0 w-16 h-24 bg-gradient-to-br from-gray-100 to-gray-200 rounded shadow-sm overflow-hidden relative">
+                      {/* Thumbnail - Square */}
+                      <div className="flex-shrink-0 w-20 h-20 bg-gradient-to-br from-gray-100 to-gray-200 rounded shadow-sm overflow-hidden relative flex items-center justify-center">
                         {coverCache[group.id] ? (
-                          <img 
-                            src={coverCache[group.id]} 
+                          <img
+                            src={coverCache[group.id]}
                             alt={metadata.title}
-                            className="w-full h-full object-cover"
+                            className="max-w-full max-h-full object-contain"
                             loading="lazy"
                             onError={(e) => {
                               e.target.style.display = 'none';
                             }}
                           />
                         ) : (
-                          <div className="w-full h-full flex items-center justify-center">
-                            <Book className="w-6 h-6 text-gray-400" />
-                          </div>
+                          <Book className="w-6 h-6 text-gray-400" />
                         )}
                       </div>
 
@@ -812,14 +911,33 @@ export function BookList({
                           by {metadata.author}
                         </p>
 
-                        {metadata.series && (
-                          <div className="flex items-center gap-1 mb-1.5">
-                            <span className="text-[11px] font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded truncate max-w-[160px] flex items-center gap-1">
-                              {metadata.series}
-                              {metadata.sequence && (
-                                <span className="font-bold">#{metadata.sequence}</span>
-                              )}
-                            </span>
+                        {/* Series - show all_series or primary series */}
+                        {(metadata.all_series?.length > 0 || isValidSeries(metadata.series, metadata.author)) && (
+                          <div className="flex flex-wrap items-center gap-1 mb-1.5">
+                            {metadata.all_series?.length > 0 ? (
+                              // Show first series with count badge if multiple
+                              <>
+                                <span className="text-[11px] font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded truncate max-w-[140px] flex items-center gap-1">
+                                  {metadata.all_series[0].name}
+                                  {isValidSequence(metadata.all_series[0].sequence) && (
+                                    <span className="font-bold">#{metadata.all_series[0].sequence}</span>
+                                  )}
+                                </span>
+                                {metadata.all_series.length > 1 && (
+                                  <span className="text-[10px] px-1.5 py-0.5 bg-indigo-200 text-indigo-700 rounded-full font-medium">
+                                    +{metadata.all_series.length - 1}
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              // Fallback to primary series
+                              <span className="text-[11px] font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded truncate max-w-[160px] flex items-center gap-1">
+                                {metadata.series}
+                                {isValidSequence(metadata.sequence) && (
+                                  <span className="font-bold">#{metadata.sequence}</span>
+                                )}
+                              </span>
+                            )}
                           </div>
                         )}
 
