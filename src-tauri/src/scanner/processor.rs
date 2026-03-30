@@ -2906,6 +2906,13 @@ pub fn preferred_model() -> String {
         .unwrap_or_else(|_| "gpt-5.4-nano".to_string())
 }
 
+/// Returns the user's configured AI base URL, falling back to OpenAI.
+pub fn preferred_base_url() -> String {
+    crate::config::load_config()
+        .map(|c| c.ai_base_url)
+        .unwrap_or_else(|_| "https://api.openai.com".to_string())
+}
+
 pub async fn call_gpt_api(
     prompt: &str,
     api_key: &str,
@@ -2926,14 +2933,15 @@ pub async fn call_gpt_api(
 
     let client = crate::cache::shared_client();
 
-    // All GPT-5 models (including nano) use the Responses API
-    let use_responses_api = model.starts_with("gpt-5");
+    let base_url = preferred_base_url();
+    // GPT-5 models use Responses API; local/non-OpenAI endpoints always use Chat Completions
+    let is_openai = base_url.contains("openai.com");
+    let use_responses_api = is_openai && model.starts_with("gpt-5");
 
     let (endpoint, body) = if use_responses_api {
-        // All GPT-5 models use the /v1/responses endpoint with message array format
-        // Use "developer" role instead of "system" for Responses API
+        // OpenAI GPT-5 models use the /v1/responses endpoint
         (
-            "https://api.openai.com/v1/responses",
+            format!("{}/v1/responses", base_url),
             serde_json::json!({
                 "model": model,
                 "input": [
@@ -2986,7 +2994,7 @@ pub async fn call_gpt_api(
             body["max_tokens"] = serde_json::json!(max_tokens);
         }
 
-        ("https://api.openai.com/v1/chat/completions", body)
+        (format!("{}/v1/chat/completions", base_url), body)
     };
 
     let response = client

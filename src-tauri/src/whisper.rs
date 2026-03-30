@@ -141,7 +141,7 @@ async fn call_whisper_api(
         .part("file", part);
 
     let response = client
-        .post("https://api.openai.com/v1/audio/transcriptions")
+        .post(format!("{}/v1/audio/transcriptions", crate::scanner::processor::preferred_base_url()))
         .header("Authorization", format!("Bearer {}", api_key))
         .multipart(form)
         .send()

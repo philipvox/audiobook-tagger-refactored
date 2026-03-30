@@ -401,7 +401,7 @@ pub async fn resolve_with_gpt(
 
     let client = reqwest::Client::new();
     let response = client
-        .post("https://api.openai.com/v1/responses")
+        .post(format!("{}/v1/responses", crate::scanner::processor::preferred_base_url()))
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&request_body)
