@@ -57,9 +57,11 @@ pub struct Config {
     #[serde(default)]
     pub concurrency_file_scan: Option<usize>,
 
-    // AI model selection
+    // AI configuration
     #[serde(default = "default_ai_model")]
     pub ai_model: String,
+    #[serde(default = "default_ai_base_url")]
+    pub ai_base_url: String, // "https://api.openai.com" or local like "http://localhost:11434"
 
     // Age rating with web search (uses GPT to lookup book on Goodreads)
     #[serde(default)]
@@ -72,6 +74,10 @@ pub struct Config {
 
 fn default_preset() -> String {
     "balanced".to_string()
+}
+
+fn default_ai_base_url() -> String {
+    "https://api.openai.com".to_string()
 }
 
 fn default_ai_model() -> String {
@@ -157,6 +163,7 @@ impl Default for Config {
             concurrency_abs_push: None,
             concurrency_file_scan: None,
             ai_model: default_ai_model(),
+            ai_base_url: default_ai_base_url(),
             enable_age_rating_lookup: false,  // Disabled by default (uses extra API calls)
             custom_providers: default_custom_providers(),
         }

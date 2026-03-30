@@ -183,12 +183,21 @@ export function SettingsPage() {
             <div className="bg-neutral-900/50 rounded-xl p-5">
               <h3 className="text-sm font-medium text-white mb-4">AI Configuration</h3>
               <Input
-                label="OpenAI API Key"
+                label="API Key"
                 type="password"
                 value={localConfig.openai_api_key}
                 onChange={(v) => setLocalConfig({ ...localConfig, openai_api_key: v })}
                 placeholder="sk-..."
               />
+              <div className="mt-3">
+                <Input
+                  label="API Endpoint"
+                  value={localConfig.ai_base_url || 'https://api.openai.com'}
+                  onChange={(v) => setLocalConfig({ ...localConfig, ai_base_url: v })}
+                  placeholder="https://api.openai.com"
+                />
+                <p className="text-[10px] text-gray-600 mt-1">OpenAI, or any compatible endpoint (Ollama: http://localhost:11434, LM Studio: http://localhost:1234)</p>
+              </div>
               <div className="mt-3">
                 <label className="block text-xs text-gray-500 mb-1.5">AI Model</label>
                 <select

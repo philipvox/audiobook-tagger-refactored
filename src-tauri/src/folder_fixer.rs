@@ -56,7 +56,7 @@ async fn call_codex_api(prompt: &str, api_key: &str) -> Result<String, String> {
         }
 
         let response = match client
-            .post("https://api.openai.com/v1/responses")
+            .post(format!("{}/v1/responses", crate::scanner::processor::preferred_base_url()))
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .json(&body)

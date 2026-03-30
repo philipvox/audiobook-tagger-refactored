@@ -582,7 +582,7 @@ async fn synthesize_with_gpt(
     let client = crate::cache::shared_client();
 
     let response = client
-        .post("https://api.openai.com/v1/chat/completions")
+        .post(format!("{}/v1/chat/completions", crate::scanner::processor::preferred_base_url()))
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&request_body)
