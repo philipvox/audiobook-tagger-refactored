@@ -407,6 +407,7 @@ export function useScan() {
       resetTimeoutRef.current = null;
     }
 
+    let unlisten = null;
     try {
       setScanning(true);
       const startTime = Date.now();
@@ -418,6 +419,17 @@ export function useScan() {
         startTime,
         filesPerSecond: 0,
         covers_found: 0,
+      });
+
+      // Set up progress listener
+      unlisten = await listen('import_progress', (event) => {
+        const { current, total, message, phase } = event.payload;
+        setScanProgress(prev => ({
+          ...prev,
+          current: current || prev.current,
+          total: total || prev.total,
+          currentFile: message || `Import: ${phase}...`,
+        }));
       });
 
       console.log('📚 Importing from ABS library...', options.enrichWithCustomProviders ? '(with custom providers)' : '');
@@ -436,6 +448,7 @@ export function useScan() {
         return { success: true, count: result?.total_imported || 0 };
 
       } finally {
+        if (unlisten) unlisten();
         setScanning(false);
 
         resetTimeoutRef.current = setTimeout(() => {
@@ -452,6 +465,7 @@ export function useScan() {
       }
     } catch (error) {
       console.error('ABS import failed:', error);
+      if (unlisten) unlisten();
       setScanning(false);
       throw error;
     }
@@ -463,8 +477,30 @@ export function useScan() {
       return { success: false, updated: 0 };
     }
 
+    let unlisten = null;
     try {
       console.log(`📤 Pushing ${groupsToPush.length} books to ABS...`);
+
+      // Set up progress listener
+      setScanning(true);
+      setScanProgress({
+        current: 0,
+        total: groupsToPush.length,
+        currentFile: 'Connecting to ABS...',
+        startTime: Date.now(),
+        filesPerSecond: 0,
+        covers_found: 0,
+      });
+
+      unlisten = await listen('push_progress', (event) => {
+        const { current, total, message, phase } = event.payload;
+        setScanProgress(prev => ({
+          ...prev,
+          current: current || prev.current,
+          total: total || prev.total,
+          currentFile: message || `Push: ${phase}...`,
+        }));
+      });
 
       const request = {
         items: groupsToPush.map(g => ({
@@ -493,6 +529,9 @@ export function useScan() {
     } catch (error) {
       console.error('ABS push failed:', error);
       throw error;
+    } finally {
+      if (unlisten) unlisten();
+      setScanning(false);
     }
   }, []);
 
@@ -506,6 +545,7 @@ export function useScan() {
       return { success: false, count: 0 };
     }
 
+    let unlisten = null;
     try {
       setScanning(true);
       const startTime = Date.now();
@@ -516,6 +556,17 @@ export function useScan() {
         startTime,
         filesPerSecond: 0,
         covers_found: 0,
+      });
+
+      // Set up progress listener
+      unlisten = await listen('rescan_progress', (event) => {
+        const { current, total, message, phase } = event.payload;
+        setScanProgress(prev => ({
+          ...prev,
+          current: current || prev.current,
+          total: total || prev.total,
+          currentFile: message || `Rescan: ${phase}...`,
+        }));
       });
 
       console.log(`🔄 Rescan ABS imports: ${selectedGroups.length} books, mode=${mode}`);
@@ -576,6 +627,7 @@ export function useScan() {
       console.error('ABS rescan failed:', error);
       throw error;
     } finally {
+      if (unlisten) unlisten();
       setScanning(false);
       setScanProgress({
         current: 0,

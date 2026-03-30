@@ -1052,7 +1052,7 @@ async fn analyze_single_folder(
         build_book_detection_prompt(&folder_path, &folder_name, &files)
     };
 
-    match call_gpt_api(&prompt, &api_key, "gpt-5.1-codex-mini", 2000).await {
+    match call_gpt_api(&prompt, &api_key, &crate::scanner::processor::preferred_model(), 2000).await {
         Ok(response) => {
             match parse_gpt_book_response(&response) {
                 Ok(book_response) => {
@@ -1398,7 +1398,7 @@ async fn infer_chapter_names(
 
     let prompt = build_chapter_inference_prompt(title, author, files);
 
-    let response = call_gpt_api(&prompt, api_key, "gpt-5.1-codex-mini", 2000)
+    let response = call_gpt_api(&prompt, api_key, &crate::scanner::processor::preferred_model(), 2000)
         .await
         .map_err(|e| anyhow!("GPT API error: {}", e))?;
 

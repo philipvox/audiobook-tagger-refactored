@@ -103,30 +103,30 @@ export function ExportImportModal({ isOpen, onClose, groups, onImport }) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full overflow-hidden">
+      <div className="bg-neutral-900 rounded-xl shadow-2xl max-w-lg w-full overflow-hidden">
         {/* Header */}
-        <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-indigo-50 to-purple-50">
+        <div className="p-6 border-b border-neutral-800 bg-neutral-950">
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-2xl font-bold text-gray-900">Export / Import</h2>
-              <p className="text-sm text-gray-600 mt-1">
+              <h2 className="text-2xl font-bold text-gray-100">Export / Import</h2>
+              <p className="text-sm text-gray-400 mt-1">
                 {groups.length} book{groups.length === 1 ? '' : 's'} in library
               </p>
             </div>
-            <button onClick={handleClose} className="p-2 hover:bg-indigo-100 rounded-lg transition-colors">
-              <X className="w-6 h-6 text-gray-600" />
+            <button onClick={handleClose} className="p-2 hover:bg-neutral-800 rounded-lg transition-colors">
+              <X className="w-6 h-6 text-gray-400" />
             </button>
           </div>
         </div>
 
         {/* Mode Tabs */}
-        <div className="flex border-b border-gray-200">
+        <div className="flex border-b border-neutral-800">
           <button
             onClick={() => setMode('export')}
             className={`flex-1 py-3 px-4 text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
               mode === 'export'
-                ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50'
-                : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+                ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-950/50'
+                : 'text-gray-400 hover:text-gray-100 hover:bg-neutral-950'
             }`}
           >
             <Download className="w-4 h-4" />
@@ -136,8 +136,8 @@ export function ExportImportModal({ isOpen, onClose, groups, onImport }) {
             onClick={() => setMode('import')}
             className={`flex-1 py-3 px-4 text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
               mode === 'import'
-                ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50'
-                : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+                ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-950/50'
+                : 'text-gray-400 hover:text-gray-100 hover:bg-neutral-950'
             }`}
           >
             <Upload className="w-4 h-4" />
@@ -149,44 +149,44 @@ export function ExportImportModal({ isOpen, onClose, groups, onImport }) {
         <div className="p-6">
           {/* Format Selection */}
           <div className="mb-6">
-            <label className="block text-sm font-medium text-gray-700 mb-3">Format</label>
+            <label className="block text-sm font-medium text-gray-300 mb-3">Format</label>
             <div className="grid grid-cols-2 gap-3">
               <button
                 onClick={() => setFormat('csv')}
                 className={`p-4 rounded-lg border-2 transition-all flex items-center gap-3 ${
                   format === 'csv'
-                    ? 'border-indigo-500 bg-indigo-50'
-                    : 'border-gray-200 hover:border-gray-300'
+                    ? 'border-indigo-500 bg-indigo-950/50'
+                    : 'border-neutral-800 hover:border-neutral-700'
                 }`}
               >
-                <FileSpreadsheet className={`w-6 h-6 ${format === 'csv' ? 'text-indigo-600' : 'text-gray-400'}`} />
+                <FileSpreadsheet className={`w-6 h-6 ${format === 'csv' ? 'text-indigo-400' : 'text-gray-400'}`} />
                 <div className="text-left">
-                  <div className={`font-medium ${format === 'csv' ? 'text-indigo-900' : 'text-gray-700'}`}>CSV</div>
-                  <div className="text-xs text-gray-500">Spreadsheet format</div>
+                  <div className={`font-medium ${format === 'csv' ? 'text-indigo-300' : 'text-gray-300'}`}>CSV</div>
+                  <div className="text-xs text-gray-400">Spreadsheet format</div>
                 </div>
               </button>
               <button
                 onClick={() => setFormat('json')}
                 className={`p-4 rounded-lg border-2 transition-all flex items-center gap-3 ${
                   format === 'json'
-                    ? 'border-indigo-500 bg-indigo-50'
-                    : 'border-gray-200 hover:border-gray-300'
+                    ? 'border-indigo-500 bg-indigo-950/50'
+                    : 'border-neutral-800 hover:border-neutral-700'
                 }`}
               >
-                <FileJson className={`w-6 h-6 ${format === 'json' ? 'text-indigo-600' : 'text-gray-400'}`} />
+                <FileJson className={`w-6 h-6 ${format === 'json' ? 'text-indigo-400' : 'text-gray-400'}`} />
                 <div className="text-left">
-                  <div className={`font-medium ${format === 'json' ? 'text-indigo-900' : 'text-gray-700'}`}>JSON</div>
-                  <div className="text-xs text-gray-500">Full data backup</div>
+                  <div className={`font-medium ${format === 'json' ? 'text-indigo-300' : 'text-gray-300'}`}>JSON</div>
+                  <div className="text-xs text-gray-400">Full data backup</div>
                 </div>
               </button>
             </div>
           </div>
 
           {/* Mode-specific info */}
-          <div className="mb-6 p-4 bg-gray-50 rounded-lg">
+          <div className="mb-6 p-4 bg-neutral-950 rounded-lg">
             {mode === 'export' ? (
-              <div className="text-sm text-gray-600">
-                <p className="font-medium text-gray-900 mb-2">Export will include:</p>
+              <div className="text-sm text-gray-400">
+                <p className="font-medium text-gray-100 mb-2">Export will include:</p>
                 <ul className="space-y-1 list-disc list-inside">
                   <li>All metadata fields (title, author, narrator, etc.)</li>
                   <li>Series and sequence information</li>
@@ -195,8 +195,8 @@ export function ExportImportModal({ isOpen, onClose, groups, onImport }) {
                 </ul>
               </div>
             ) : (
-              <div className="text-sm text-gray-600">
-                <p className="font-medium text-gray-900 mb-2">Import will:</p>
+              <div className="text-sm text-gray-400">
+                <p className="font-medium text-gray-100 mb-2">Import will:</p>
                 <ul className="space-y-1 list-disc list-inside">
                   <li>Match books by folder path or title</li>
                   <li>Update metadata for matched books</li>
@@ -209,14 +209,14 @@ export function ExportImportModal({ isOpen, onClose, groups, onImport }) {
           {/* Result/Error Display */}
           {result && (
             <div className={`mb-4 p-4 rounded-lg flex items-start gap-3 ${
-              result.type === 'success' ? 'bg-green-50' : 'bg-amber-50'
+              result.type === 'success' ? 'bg-green-950/50 border border-green-900/50' : 'bg-amber-950/50 border border-amber-900/50'
             }`}>
               <Check className={`w-5 h-5 flex-shrink-0 ${
-                result.type === 'success' ? 'text-green-600' : 'text-amber-600'
+                result.type === 'success' ? 'text-green-400' : 'text-amber-400'
               }`} />
               <div className="text-sm">
                 <p className={`font-medium ${
-                  result.type === 'success' ? 'text-green-800' : 'text-amber-800'
+                  result.type === 'success' ? 'text-green-300' : 'text-amber-300'
                 }`}>
                   {result.message}
                 </p>
@@ -225,18 +225,18 @@ export function ExportImportModal({ isOpen, onClose, groups, onImport }) {
           )}
 
           {error && (
-            <div className="mb-4 p-4 bg-red-50 rounded-lg flex items-start gap-3">
-              <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
-              <div className="text-sm text-red-800">{error}</div>
+            <div className="mb-4 p-4 bg-red-950/50 border border-red-900/50 rounded-lg flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
+              <div className="text-sm text-red-300">{error}</div>
             </div>
           )}
         </div>
 
         {/* Footer */}
-        <div className="p-6 border-t border-gray-200 flex gap-3 justify-end bg-gray-50">
+        <div className="p-6 border-t border-neutral-800 flex gap-3 justify-end bg-neutral-950">
           <button
             onClick={handleClose}
-            className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors font-medium"
+            className="px-4 py-2 text-gray-300 bg-neutral-900 border border-neutral-700 rounded-lg hover:bg-neutral-800 transition-colors font-medium"
           >
             Close
           </button>
@@ -246,7 +246,7 @@ export function ExportImportModal({ isOpen, onClose, groups, onImport }) {
               disabled={exporting || groups.length === 0}
               className={`px-4 py-2 rounded-lg font-medium flex items-center gap-2 transition-colors ${
                 exporting || groups.length === 0
-                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
                   : 'bg-indigo-600 text-white hover:bg-indigo-700'
               }`}
             >
@@ -259,7 +259,7 @@ export function ExportImportModal({ isOpen, onClose, groups, onImport }) {
               disabled={importing}
               className={`px-4 py-2 rounded-lg font-medium flex items-center gap-2 transition-colors ${
                 importing
-                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
                   : 'bg-indigo-600 text-white hover:bg-indigo-700'
               }`}
             >

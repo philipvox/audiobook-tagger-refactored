@@ -76,12 +76,20 @@ pub async fn clear_cache() -> Result<String, String> {
     Ok("Cache cleared successfully".to_string())
 }
 
-/// Get cache statistics
+/// Get cache statistics including disk usage
 #[tauri::command]
-pub async fn get_cache_stats() -> Result<String, String> {
-    // Get count of cached items from sled
-    let count = crate::cache::count().unwrap_or(0);
-    Ok(format!("{} cached entries", count))
+pub async fn get_cache_stats() -> Result<serde_json::Value, String> {
+    let stats = crate::cache::stats().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "entry_count": stats.entry_count,
+        "disk_bytes": stats.disk_bytes,
+        "cover_count": stats.cover_count,
+        "display": format!("{} entries, {} covers, {:.1} MB on disk",
+            stats.entry_count,
+            stats.cover_count,
+            stats.disk_bytes as f64 / 1_048_576.0
+        ),
+    }))
 }
 
 /// Clear unused genres from AudiobookShelf

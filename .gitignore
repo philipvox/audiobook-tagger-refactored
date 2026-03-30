@@ -26,3 +26,25 @@ src-tauri/target/
 
 # Config (contains secrets)
 config.json
+
+# Claude Code
+.claude/
+
+# Personal scripts / data
+*.py
+*.m4b
+*.epub
+chunk.js
+The Talisman/
+__pycache__/
+stripe-textures/
+scripts/
+
+# Build helpers
+build-windows.ps1
+Dockerfile.linux-build
+.dockerignore
+
+# Installers
+*.exe
+*.msi

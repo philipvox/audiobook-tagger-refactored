@@ -20,14 +20,15 @@ static LIBRARY_CACHE: Lazy<Mutex<Option<(Instant, HashMap<String, AbsLibraryItem
 // Use finalize_series() after collecting all series data
 
 /// Finalize series data - call ONCE after all sources are merged
-/// Handles: normalization, validation, foreign language filtering, deduplication, sorting
+/// Handles: normalization, validation, author-as-series filtering, foreign language filtering, deduplication, sorting
 fn finalize_series(
     series: Vec<scanner::types::SeriesInfo>,
     title: &str,
+    author: Option<&str>,
     language: Option<&str>,
 ) -> Vec<scanner::types::SeriesInfo> {
     let processor = crate::series::processor();
-    processor.process(series, title, language)
+    processor.process_with_author(series, title, author, language)
 }
 
 /// Thin wrapper for foreign language detection (delegates to SeriesProcessor)
@@ -44,8 +45,8 @@ fn is_valid_series(name: &str, title: &str, sequence: Option<&str>) -> bool {
 
 /// Sort and deduplicate series - delegates to SeriesProcessor
 /// NOTE: Prefer using finalize_series_async() for GPT-enhanced cleanup
-fn deduplicate_series(series: &mut Vec<scanner::types::SeriesInfo>, title: &str, language: Option<&str>) {
-    let processed = finalize_series(std::mem::take(series), title, language);
+fn deduplicate_series(series: &mut Vec<scanner::types::SeriesInfo>, title: &str, author: Option<&str>, language: Option<&str>) {
+    let processed = finalize_series(std::mem::take(series), title, author, language);
     *series = processed;
 }
 
@@ -311,9 +312,12 @@ pub async fn push_abs_updates(window: tauri::Window, request: PushRequest) -> Re
         "total": matched_count
     }));
     
-    println!("✅ PUSH DONE: {} updated, {} covers in {:.1}s", 
+    println!("✅ PUSH DONE: {} updated, {} covers in {:.1}s",
         updated, covers_uploaded, elapsed.as_secs_f64());
-    
+
+    // Invalidate cache after push so next access will refresh
+    crate::commands::abs_cache::mark_cache_dirty();
+
     Ok(PushResult { updated, unmatched, failed, covers_uploaded })
 }
 
@@ -401,7 +405,7 @@ async fn upload_cover_to_abs(
     group_id: &str,
 ) -> Result<bool, String> {
     let cover_cache_key = format!("cover_{}", group_id);
-    let cover_data: Option<(Vec<u8>, String)> = crate::cache::get(&cover_cache_key);
+    let cover_data: Option<(Vec<u8>, String)> = crate::cache::get_cover(&cover_cache_key);
     
     if let Some((data, mime_type)) = cover_data {
         let extension = match mime_type.as_str() {
@@ -573,20 +577,16 @@ fn build_update_payload(metadata: &scanner::BookMetadata) -> Value {
 
     if let Some(ref s) = metadata.subtitle { map.insert("subtitle".to_string(), json!(s)); }
 
-    // Prepend themes/tropes to description for ABS (so they're visible in ABS UI)
-    let description_with_header = crate::scanner::processor::build_description_with_header(
-        metadata.description.as_deref(),
-        &metadata.themes,
-        &metadata.tropes,
-    );
-    if let Some(ref d) = description_with_header { map.insert("description".to_string(), json!(d)); }
+    if let Some(ref d) = metadata.description { map.insert("description".to_string(), json!(d)); }
 
     if let Some(ref p) = metadata.publisher { map.insert("publisher".to_string(), json!(p)); }
     if let Some(ref y) = metadata.year { map.insert("publishedYear".to_string(), json!(y)); }
     if let Some(ref i) = metadata.isbn { map.insert("isbn".to_string(), json!(i)); }
     if let Some(ref n) = metadata.narrator { map.insert("narrators".to_string(), json!([n])); }
     if !metadata.genres.is_empty() { map.insert("genres".to_string(), json!(metadata.genres)); }
-    
+
+    // Note: tags are handled separately - they go at top level, not inside metadata
+
     let authors: Vec<Value> = metadata.author.split(&[',', '&'][..])
         .map(|a| a.trim())
         .filter(|a| !a.is_empty())
@@ -622,11 +622,19 @@ fn build_update_payload(metadata: &scanner::BookMetadata) -> Value {
         vec![]
     };
 
-    if !series_array.is_empty() {
-        map.insert("series".to_string(), Value::Array(series_array));
-    }
+    // Always send series array - empty array clears existing series in ABS
+    // This ensures validated books don't keep invalid series from ABS
+    map.insert("series".to_string(), Value::Array(series_array));
 
-    json!({"metadata": map})
+    // Build final payload - tags go at TOP LEVEL, not inside metadata!
+    // The ABS Book model stores tags as a direct property, not inside metadata
+    // Apply DNA-aware tag policy: standard tags validated/limited, DNA tags pass through
+    let final_tags = crate::genres::enforce_tag_policy_with_dna(&metadata.tags);
+    if final_tags.is_empty() {
+        json!({"metadata": map})
+    } else {
+        json!({"metadata": map, "tags": final_tags})
+    }
 }
 
 // ============================================================================
@@ -640,6 +648,13 @@ pub struct AbsFullItem {
     pub path: String,
     #[serde(default)]
     pub media: Option<AbsMedia>,
+    #[serde(default, rename = "addedAt")]
+    pub added_at: Option<i64>,
+    #[serde(default, rename = "updatedAt")]
+    pub updated_at: Option<i64>,
+    /// Tags stored at top level in ABS (not inside metadata)
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -651,6 +666,42 @@ pub struct AbsMedia {
     pub cover_path: Option<String>,
     #[serde(default)]
     pub duration: Option<f64>,
+    #[serde(default, rename = "audioFiles")]
+    pub audio_files: Vec<AbsAudioFile>,
+    /// Tags stored in media object (ABS stores tags here)
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Chapters from ABS
+    #[serde(default)]
+    pub chapters: Vec<AbsChapter>,
+}
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct AbsChapter {
+    pub id: i32,
+    pub start: f64,
+    pub end: f64,
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct AbsAudioFile {
+    #[serde(default)]
+    pub ino: Option<String>,
+    #[serde(default)]
+    pub index: Option<i32>,
+    #[serde(default)]
+    pub duration: Option<f64>,
+    #[serde(default)]
+    pub metadata: Option<AbsAudioFileMetadata>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct AbsAudioFileMetadata {
+    #[serde(default)]
+    pub filename: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -880,7 +931,7 @@ pub async fn import_from_abs(window: tauri::Window, request: Option<AbsImportReq
 
     loop {
         let url = format!(
-            "{}/api/libraries/{}/items?limit={}&page={}&minified=0",
+            "{}/api/libraries/{}/items?limit={}&page={}&minified=0&expanded=1",
             config.abs_base_url, config.abs_library_id, limit, page
         );
 
@@ -928,11 +979,11 @@ pub async fn import_from_abs(window: tauri::Window, request: Option<AbsImportReq
             groups.push(group);
         }
 
-        if idx % 50 == 0 {
+        if idx % 20 == 0 || idx == all_items.len() - 1 {
             let _ = window.emit("import_progress", json!({
                 "phase": "processing",
-                "message": format!("Processing... {}/{}", idx, all_items.len()),
-                "current": idx,
+                "message": format!("Processing... {}/{}", idx + 1, all_items.len()),
+                "current": idx + 1,
                 "total": all_items.len()
             }));
         }
@@ -1046,9 +1097,11 @@ pub async fn import_from_abs(window: tauri::Window, request: Option<AbsImportReq
                                 }
                             }
 
-                            // Fill in missing description
+                            // Fill in missing description (strip themes/tropes header)
                             if group.metadata.description.is_none() && custom.description.is_some() {
-                                group.metadata.description = custom.description.clone();
+                                group.metadata.description = custom.description.as_ref().map(|d|
+                                    crate::scanner::processor::strip_themes_tropes_header(d)
+                                ).filter(|d| !d.is_empty());
                             }
 
                             // Fill in missing genres
@@ -1198,16 +1251,9 @@ pub async fn rescan_abs_imports(
     let mut failed = 0;
 
     if request.mode == "genres_only" {
-        // Just normalize genres, no API calls
+        // Just normalize genres, no API calls (age-specific genres now determined by GPT pipeline)
         for (idx, group) in request.groups.iter().enumerate() {
-            let cleaned_genres = crate::genres::enforce_genre_policy_with_split(&group.genres);
-            let mut final_genres = cleaned_genres;
-            crate::genres::enforce_children_age_genres(
-                &mut final_genres,
-                &group.title,
-                group.series.as_deref(),
-                Some(&group.author),
-            );
+            let final_genres = crate::genres::enforce_genre_policy_with_split(&group.genres);
 
             let mut metadata = scanner::BookMetadata::default();
             metadata.title = group.title.clone();
@@ -1415,9 +1461,11 @@ pub async fn rescan_abs_imports(
                                     }
                                 }
 
-                                // Fill in missing description
+                                // Fill in missing description (strip themes/tropes header)
                                 if new_metadata.description.is_none() && custom.description.is_some() {
-                                    new_metadata.description = custom.description.clone();
+                                    new_metadata.description = custom.description.as_ref().map(|d|
+                                        crate::scanner::processor::strip_themes_tropes_header(d)
+                                    ).filter(|d| !d.is_empty());
                                     println!("   📝 Added description from {}", custom.provider_name);
                                 }
 
@@ -1476,17 +1524,8 @@ pub async fn rescan_abs_imports(
                             new_metadata
                         };
 
-                        // Apply children's genre detection
-                        let mut final_genres = final_metadata.genres.clone();
-                        crate::genres::enforce_children_age_genres(
-                            &mut final_genres,
-                            &final_metadata.title,
-                            final_metadata.series.as_deref(),
-                            Some(&final_metadata.author),
-                        );
-
+                        // Age-specific genres now determined by GPT pipeline
                         let mut metadata = final_metadata;
-                        metadata.genres = final_genres;
                         metadata.confidence = Some(calculate_abs_confidence(&metadata));
 
                         (scanner::BookGroup {
@@ -1518,7 +1557,7 @@ pub async fn rescan_abs_imports(
                     }
                 }
             })
-            .buffer_unordered(50)
+            .buffer_unordered(10) // Reduced from 50 to prevent ABS memory issues
             .collect()
             .await;
 
@@ -1610,6 +1649,13 @@ pub async fn push_abs_imports(
                 let url = format!("{}/api/items/{}/media", config.abs_base_url, item.id);
                 let payload = build_update_payload(&item.metadata);
 
+                // Log what we're pushing
+                println!("📤 PUSH [{}]:", item.metadata.title);
+                println!("   Item ID: {}", item.id);
+                println!("   Metadata tags: {:?}", item.metadata.tags);
+                println!("   Metadata genres: {:?}", item.metadata.genres);
+                println!("   Payload: {}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+
                 // Retry logic for 5xx errors with exponential backoff
                 let max_retries = 3;
                 let mut last_error = String::new();
@@ -1631,7 +1677,12 @@ pub async fn push_abs_imports(
                     {
                         Ok(response) => {
                             let status = response.status();
+                            println!("   📤 [{}] Metadata PATCH to {} -> {}", item.metadata.title, url, status);
                             if status.is_success() {
+                                // Tags are now included in the main payload at top level
+                                if !item.metadata.tags.is_empty() {
+                                    println!("   🏷️  [{}] Tags included in payload: {:?}", item.metadata.title, item.metadata.tags);
+                                }
                                 updated.fetch_add(1, Ordering::Relaxed);
                                 success = true;
                                 break;
@@ -1663,10 +1714,10 @@ pub async fn push_abs_imports(
                 }
 
                 let current = processed.fetch_add(1, Ordering::Relaxed) + 1;
-                if current % 50 == 0 || current == total {
+                if current % 10 == 0 || current == total {
                     let _ = window.emit("push_progress", json!({
                         "phase": "pushing",
-                        "message": format!("Updating... {}/{}", current, total),
+                        "message": format!("Pushing to ABS... {}/{}", current, total),
                         "current": current,
                         "total": total
                     }));
@@ -1700,6 +1751,9 @@ pub async fn push_abs_imports(
             println!("   ... and {} more errors", errors.len() - 10);
         }
     }
+
+    // Invalidate cache after push so next access will refresh
+    crate::commands::abs_cache::mark_cache_dirty();
 
     Ok(AbsPushResult { updated, failed, errors })
 }
@@ -1742,7 +1796,10 @@ fn abs_item_to_book_group(item: &AbsFullItem, config: &config::Config) -> Option
 
     metadata.title = meta.title.clone().unwrap_or_default();
     metadata.subtitle = meta.subtitle.clone();
-    metadata.description = meta.description.clone();
+    // Strip any themes/tropes header from ABS description so metadata.description is always clean
+    metadata.description = meta.description.as_ref().map(|d|
+        crate::scanner::processor::strip_themes_tropes_header(d)
+    ).filter(|d| !d.is_empty());
     metadata.publisher = meta.publisher.clone();
     metadata.year = meta.published_year.clone();
     metadata.isbn = meta.isbn.clone();
@@ -1794,6 +1851,7 @@ fn abs_item_to_book_group(item: &AbsFullItem, config: &config::Config) -> Option
     // Step 1: Collect raw series data (no filtering yet)
     let raw_series: Vec<scanner::types::SeriesInfo> = if !meta.series.is_empty() {
         meta.series.iter()
+            .filter(|s| !s.name.trim().is_empty())  // Filter out empty series names
             .map(|s| scanner::types::SeriesInfo {
                 name: s.name.clone(),
                 sequence: s.sequence.clone(),
@@ -1801,9 +1859,14 @@ fn abs_item_to_book_group(item: &AbsFullItem, config: &config::Config) -> Option
             })
             .collect()
     } else if let Some(ref series_name) = meta.series_name {
-        // Parse combined series_name string (e.g., "Discworld #6, Discworld - Witches #2")
-        let processor = crate::series::processor();
-        processor.parse_combined_string(series_name)
+        // Only parse if series_name is non-empty
+        if series_name.trim().is_empty() {
+            Vec::new()
+        } else {
+            // Parse combined series_name string (e.g., "Discworld #6, Discworld - Witches #2")
+            let processor = crate::series::processor();
+            processor.parse_combined_string(series_name)
+        }
     } else {
         Vec::new()
     };
@@ -1813,6 +1876,7 @@ fn abs_item_to_book_group(item: &AbsFullItem, config: &config::Config) -> Option
         metadata.all_series = finalize_series(
             raw_series,
             &metadata.title,
+            Some(&metadata.author),
             metadata.language.as_deref(),
         );
 
@@ -1824,14 +1888,32 @@ fn abs_item_to_book_group(item: &AbsFullItem, config: &config::Config) -> Option
         }
     }
 
-    // Genres - normalize on import
+    // Genres - normalize on import (age-specific genres now determined by GPT pipeline)
     metadata.genres = crate::genres::enforce_genre_policy_with_split(&meta.genres);
-    crate::genres::enforce_children_age_genres(
-        &mut metadata.genres,
-        &metadata.title,
-        metadata.series.as_deref(),
-        Some(&metadata.author),
-    );
+
+    // Tags - load from ABS (can be at item level OR media level depending on ABS version)
+    let abs_tags: Vec<String> = if !item.tags.is_empty() {
+        item.tags.clone()
+    } else if !media.tags.is_empty() {
+        media.tags.clone()
+    } else {
+        vec![]
+    };
+
+    if !abs_tags.is_empty() {
+        // Use DNA-aware policy to preserve dna: prefixed tags
+        metadata.tags = crate::genres::enforce_tag_policy_with_dna(&abs_tags);
+        println!("   🏷️  Loaded {} tags from ABS for '{}': {:?}",
+            metadata.tags.len(), metadata.title, metadata.tags);
+    } else {
+        // Debug: log when no tags are found (only for first few items to avoid spam)
+        static TAG_DEBUG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let count = TAG_DEBUG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count < 5 {
+            println!("   ⚠️  No tags in ABS for '{}' (item.tags={}, media.tags={})",
+                metadata.title, item.tags.len(), media.tags.len());
+        }
+    }
 
     // Cover URL from ABS
     if let Some(ref cover_path) = media.cover_path {
@@ -1862,15 +1944,101 @@ fn abs_item_to_book_group(item: &AbsFullItem, config: &config::Config) -> Option
     // Calculate confidence for ABS imports
     metadata.confidence = Some(calculate_abs_confidence(&metadata));
 
+    // Store ABS server path for context (useful for title resolution)
+    metadata.source_path = Some(item.path.clone());
+
+    // Store timestamps for sorting
+    metadata.added_at = item.added_at;
+    metadata.updated_at = item.updated_at;
+
+    // Convert ABS audio files to AudioFile structs
+    let files: Vec<scanner::types::AudioFile> = media.audio_files.iter()
+        .enumerate()
+        .filter_map(|(idx, af)| {
+            let file_meta = af.metadata.as_ref()?;
+            let filename = file_meta.filename.clone().unwrap_or_else(|| format!("Track {}", idx + 1));
+            let path = file_meta.path.clone().unwrap_or_default();
+
+            Some(scanner::types::AudioFile {
+                id: af.ino.clone().unwrap_or_else(|| format!("{}_{}", item.id, idx)),
+                path,
+                filename,
+                changes: std::collections::HashMap::new(),
+                status: "ready".to_string(),
+            })
+        })
+        .collect();
+
+    // Determine group type based on file count
+    let group_type = if files.len() <= 1 {
+        scanner::types::GroupType::Single
+    } else {
+        scanner::types::GroupType::Chapters
+    };
+
     // Create BookGroup
     Some(scanner::BookGroup {
         id: item.id.clone(),
         group_name: metadata.title.clone(),
-        group_type: scanner::types::GroupType::Single,
+        group_type,
         metadata,
-        files: vec![], // No local files when importing from ABS
+        files,
         total_changes: 0,
         scan_status: scanner::types::ScanStatus::LoadedFromFile,
+    })
+}
+
+/// Response for get_abs_chapters
+#[derive(Debug, Serialize)]
+pub struct AbsChaptersResponse {
+    pub chapters: Vec<AbsChapter>,
+    pub duration: Option<f64>,
+    pub title: String,
+}
+
+/// Fetch chapters from an AudiobookShelf item
+#[tauri::command]
+pub async fn get_abs_chapters(abs_id: String) -> Result<AbsChaptersResponse, String> {
+    let config = config::load_config().map_err(|e| e.to_string())?;
+
+    if config.abs_base_url.is_empty() || config.abs_api_token.is_empty() {
+        return Err("ABS not configured".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Fetch the full item details which includes chapters
+    let url = format!("{}/api/items/{}?expanded=1", config.abs_base_url, abs_id);
+
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", config.abs_api_token))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch item: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("ABS returned status {}", response.status()));
+    }
+
+    let item: AbsFullItem = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    let media = item.media.ok_or("No media data in response")?;
+    let title = media.metadata
+        .as_ref()
+        .and_then(|m| m.title.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    Ok(AbsChaptersResponse {
+        chapters: media.chapters,
+        duration: media.duration,
+        title,
     })
 }
 
@@ -1993,7 +2161,7 @@ mod tests {
             scanner::types::SeriesInfo::new("Discworld".to_string(), Some("1".to_string()), None),
             scanner::types::SeriesInfo::new("Discworld".to_string(), Some("2".to_string()), None),
         ];
-        deduplicate_series(&mut series, "Going Postal", Some("English"));
+        deduplicate_series(&mut series, "Going Postal", Some("Terry Pratchett"), Some("English"));
         assert_eq!(series.len(), 1);
         assert_eq!(series[0].name, "Discworld");
     }
@@ -2004,7 +2172,7 @@ mod tests {
             scanner::types::SeriesInfo::new("Discworld - Witches".to_string(), Some("2".to_string()), None),
             scanner::types::SeriesInfo::new("Discworld".to_string(), Some("6".to_string()), None),
         ];
-        deduplicate_series(&mut series, "Equal Rites", Some("English"));
+        deduplicate_series(&mut series, "Equal Rites", Some("Terry Pratchett"), Some("English"));
         assert_eq!(series.len(), 2);
         // Parent should come first
         assert_eq!(series[0].name, "Discworld");
@@ -2018,7 +2186,7 @@ mod tests {
             scanner::types::SeriesInfo::new("Discworld".to_string(), Some("33".to_string()), None),
             scanner::types::SeriesInfo::new("Discworld - Witches".to_string(), Some("2".to_string()), None),
         ];
-        deduplicate_series(&mut series, "Going Postal", Some("English"));
+        deduplicate_series(&mut series, "Going Postal", Some("Terry Pratchett"), Some("English"));
         assert_eq!(series.len(), 3);
         // Parent should come first, then subseries alphabetically
         assert_eq!(series[0].name, "Discworld");
@@ -2030,7 +2198,7 @@ mod tests {
             scanner::types::SeriesInfo::new("DISCWORLD".to_string(), Some("1".to_string()), None),
             scanner::types::SeriesInfo::new("discworld".to_string(), Some("2".to_string()), None),
         ];
-        deduplicate_series(&mut series, "The Colour of Magic", Some("English"));
+        deduplicate_series(&mut series, "The Colour of Magic", Some("Terry Pratchett"), Some("English"));
         assert_eq!(series.len(), 1);
     }
 

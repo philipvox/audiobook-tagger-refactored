@@ -10,6 +10,7 @@
 
 use crate::scanner::types::{MetadataSource, SeriesInfo};
 use crate::normalize;
+use crate::validation::lookups::DISCWORLD_SEQUENCE;
 use std::collections::HashMap;
 
 /// Centralized series processor - call process() ONCE after all sources are merged
@@ -79,6 +80,9 @@ impl SeriesProcessor {
                 "collezione",
                 // Hindi/Punjabi romanized
                 "jag badalnare granth", "granth",
+                // Turkish
+                "tiyatro", "oyun dizisi", "dizisi", "serisi", "kitaplari", "kitaplar",
+                "hikaye", "hikayeler", "masallar", "romani", "romanlar",
                 // Generic foreign collection terms
                 "serie ", "reihe",
             ],
@@ -110,13 +114,25 @@ impl SeriesProcessor {
     /// This handles:
     /// 1. Normalization (canonical names, suffix removal)
     /// 2. Validation (reject invalid series)
-    /// 3. Foreign language filtering
-    /// 4. Smart deduplication (keeps best sequence)
-    /// 5. Hierarchical sorting (parent before child)
+    /// 3. Author-as-series filtering
+    /// 4. Foreign language filtering
+    /// 5. Smart deduplication (keeps best sequence)
+    /// 6. Hierarchical sorting (parent before child)
     pub fn process(
         &self,
         series: Vec<SeriesInfo>,
         title: &str,
+        book_language: Option<&str>,
+    ) -> Vec<SeriesInfo> {
+        self.process_with_author(series, title, None, book_language)
+    }
+
+    /// Process series with author for author-as-series filtering
+    pub fn process_with_author(
+        &self,
+        series: Vec<SeriesInfo>,
+        title: &str,
+        author: Option<&str>,
         book_language: Option<&str>,
     ) -> Vec<SeriesInfo> {
         if series.is_empty() {
@@ -130,13 +146,47 @@ impl SeriesProcessor {
         println!("   🔧 SeriesProcessor: processing {} series for '{}'", series.len(), title);
 
         // Step 1: Normalize all series names
+        // IMPORTANT: When normalizing a SUBSERIES to its parent (e.g., "Discworld - Death" → "Discworld"),
+        // we must CLEAR the sequence because the subseries sequence (#1 in Death) is NOT the same
+        // as the main series sequence (#4 in Discworld). Keeping the subseries sequence would corrupt the data.
         let normalized: Vec<SeriesInfo> = series
             .into_iter()
             .map(|mut s| {
                 let original = s.name.clone();
                 s.name = self.normalize_name(&s.name);
                 if s.name != original {
-                    println!("   🔄 Normalizing: '{}' → '{}'", original, s.name);
+                    // Check if this was a subseries normalization (contained " - ")
+                    // If so, clear the sequence as it's not valid for the parent series
+                    let was_subseries = original.contains(" - ") && !s.name.contains(" - ");
+                    if was_subseries && s.sequence.is_some() {
+                        println!("   🔄 Normalizing subseries: '{}' → '{}' (clearing invalid sequence #{})",
+                            original, s.name, s.sequence.as_ref().unwrap());
+                        s.sequence = None;
+                    } else {
+                        println!("   🔄 Normalizing: '{}' → '{}'", original, s.name);
+                    }
+                }
+                s
+            })
+            .collect();
+
+        // Step 1.5: Look up Discworld publication order - ALWAYS correct sequence for known titles
+        // GPT often gets subseries numbers wrong (e.g., "Discworld - Witches #3" becomes "Discworld #3")
+        // We use our authoritative publication order table to fix these
+        let title_lower = title.to_lowercase();
+        let normalized: Vec<SeriesInfo> = normalized
+            .into_iter()
+            .map(|mut s| {
+                // Check if this is a Discworld entry
+                if s.name.to_lowercase() == "discworld" {
+                    // Look up the title in our Discworld publication order table
+                    if let Some(&correct_seq) = DISCWORLD_SEQUENCE.get(title_lower.as_str()) {
+                        let current_seq = s.sequence.as_deref().unwrap_or("none");
+                        if current_seq != correct_seq {
+                            println!("   📚 Discworld sequence fix: '{}' #{} → #{}", title, current_seq, correct_seq);
+                            s.sequence = Some(correct_seq.to_string());
+                        }
+                    }
                 }
                 s
             })
@@ -154,9 +204,25 @@ impl SeriesProcessor {
             })
             .collect();
 
+        // Step 2.5: Filter author-as-series (when author is provided)
+        let author_filtered: Vec<SeriesInfo> = if let Some(auth) = author {
+            validated
+                .into_iter()
+                .filter(|s| {
+                    let is_author = self.is_author_as_series(&s.name, auth);
+                    if is_author {
+                        println!("   👤 Rejecting author-as-series: '{}' (author: {})", s.name, auth);
+                    }
+                    !is_author
+                })
+                .collect()
+        } else {
+            validated
+        };
+
         // Step 3: Filter foreign language series (for English books)
         let language_filtered: Vec<SeriesInfo> = if book_is_english {
-            validated
+            author_filtered
                 .into_iter()
                 .filter(|s| {
                     let is_foreign = self.is_foreign_language(&s.name);
@@ -167,7 +233,7 @@ impl SeriesProcessor {
                 })
                 .collect()
         } else {
-            validated
+            author_filtered
         };
 
         // Step 4: Smart deduplication (keeps entry with sequence)
@@ -334,6 +400,94 @@ impl SeriesProcessor {
         }
 
         true
+    }
+
+    /// Check if series name matches the author name (author-as-series pattern)
+    pub fn is_author_as_series(&self, series: &str, author: &str) -> bool {
+        if author.is_empty() {
+            return false;
+        }
+
+        let series_normalized = series
+            .to_lowercase()
+            .replace("dr.", "dr")
+            .replace(".", "")
+            .replace(",", "")
+            .trim()
+            .to_string();
+
+        let author_normalized = author
+            .to_lowercase()
+            .replace("dr.", "dr")
+            .replace(".", "")
+            .replace(",", "")
+            .trim()
+            .to_string();
+
+        // Direct match
+        if series_normalized == author_normalized {
+            return true;
+        }
+
+        // Check author last name only
+        let author_parts: Vec<&str> = author_normalized.split_whitespace().collect();
+        if author_parts.len() >= 2 {
+            if let Some(last_name) = author_parts.last() {
+                if series_normalized == *last_name {
+                    return true;
+                }
+            }
+        }
+
+        // Check "First and Second" pattern (illustrator pairs like "Audrey and Don Wood")
+        if series_normalized.contains(" and ") {
+            let series_parts: Vec<&str> = series_normalized.split(" and ").collect();
+            if series_parts.len() == 2 {
+                // Check if any part matches author's first or last name
+                for part in &series_parts {
+                    let part_trimmed = part.trim();
+                    // Direct match
+                    for author_part in &author_parts {
+                        if part_trimmed == *author_part {
+                            return true;
+                        }
+                    }
+                    // Also check if part contains all author words (e.g., "don wood" contains "don" and "wood")
+                    let part_words: Vec<&str> = part_trimmed.split_whitespace().collect();
+                    let matches_all = author_parts.iter().all(|ap| part_words.contains(ap));
+                    if matches_all && !author_parts.is_empty() {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Two-word series that looks like a person name and contains author's name parts
+        let series_words: Vec<&str> = series_normalized.split_whitespace().collect();
+        if series_words.len() == 2 {
+            let common_first_names = [
+                "james", "john", "mary", "anne", "peter", "paul", "david", "michael",
+                "robert", "william", "richard", "thomas", "charles", "george", "edward",
+                "elizabeth", "margaret", "jennifer", "susan", "patricia", "linda", "barbara",
+                "audrey", "don", "eric", "mo", "dr", "sandra", "roald", "beverly", "ann",
+                "anna", "alan", "arnold", "anita", "ani", "bernard", "b",
+            ];
+
+            let first = series_words[0];
+            let second = series_words[1];
+
+            // Check if first word is a common first name
+            if common_first_names.iter().any(|n| first.starts_with(n)) {
+                // And check if any part matches author
+                for author_part in &author_parts {
+                    if first == *author_part || second == *author_part {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// Smart deduplication - keeps entry with sequence when duplicates exist
@@ -599,7 +753,7 @@ Return ONLY valid JSON:
     // Call GPT API
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        crate::scanner::processor::call_gpt_api(&prompt, api_key, "gpt-5-nano", 1000)
+        crate::scanner::processor::call_gpt_api(&prompt, api_key, &crate::scanner::processor::preferred_model(), 1000)
     ).await;
 
     match result {
@@ -698,7 +852,14 @@ mod tests {
         assert!(processor.is_foreign_language("La Cabane Magique"));
         assert!(processor.is_foreign_language("Das magische Baumhaus"));
         assert!(processor.is_foreign_language("Jag Badalnare Granth"));
+        // Turkish series
+        assert!(processor.is_foreign_language("Tiyatro / Oyun Dizisi"));
+        assert!(processor.is_foreign_language("Shakespeare Serisi"));
+        assert!(processor.is_foreign_language("Klasik Kitaplari"));
+        // English should pass
         assert!(!processor.is_foreign_language("Magic Tree House"));
+        assert!(!processor.is_foreign_language("Inspector Banks"));
+        assert!(!processor.is_foreign_language("Discworld"));
     }
 
     #[test]
@@ -734,6 +895,29 @@ mod tests {
 
         // Should allow Fact Tracker for fact tracker book
         assert!(processor.is_valid("Magic Tree House Fact Tracker", "Vikings Fact Tracker", None));
+    }
+
+    #[test]
+    fn test_author_as_series() {
+        let processor = SeriesProcessor::new();
+
+        // Direct author match
+        assert!(processor.is_author_as_series("Audrey Wood", "Audrey Wood"));
+        assert!(processor.is_author_as_series("Bernard Most", "Bernard Most"));
+        assert!(processor.is_author_as_series("Barbara Cooney", "Barbara Cooney"));
+
+        // "First and Second" illustrator pattern
+        assert!(processor.is_author_as_series("Audrey and Don Wood", "Audrey Wood"));
+        assert!(processor.is_author_as_series("Audrey and Don Wood", "Don Wood"));
+
+        // Two-word person name matching author parts
+        assert!(processor.is_author_as_series("Anna Hines", "Anna Grossnickle Hines"));
+        assert!(processor.is_author_as_series("Ann McGovern", "Ann McGovern"));
+
+        // Should NOT match real series
+        assert!(!processor.is_author_as_series("Discworld", "Terry Pratchett"));
+        assert!(!processor.is_author_as_series("Harry Potter", "J.K. Rowling"));
+        assert!(!processor.is_author_as_series("Inspector Banks", "Peter Robinson"));
     }
 
     #[test]

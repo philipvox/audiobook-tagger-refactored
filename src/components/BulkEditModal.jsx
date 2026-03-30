@@ -11,6 +11,8 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
     language: false,
     year: false,
     series: false,
+    age_rating: false,
+    content_rating: false,
   });
 
   const [values, setValues] = useState({
@@ -22,6 +24,8 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
     year: '',
     series: '',
     sequence: '',
+    age_rating: '',
+    content_rating: '',
   });
 
   if (!isOpen || !selectedGroups || selectedGroups.length === 0) return null;
@@ -59,6 +63,12 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
       updates.series = values.series.trim() || null;
       updates.sequence = values.sequence.trim() || null;
     }
+    if (fieldsToEdit.age_rating && values.age_rating) {
+      updates.age_rating = values.age_rating;
+    }
+    if (fieldsToEdit.content_rating && values.content_rating) {
+      updates.content_rating = values.content_rating;
+    }
 
     if (Object.keys(updates).length > 0) {
       onSave(updates);
@@ -83,21 +93,21 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-xl w-full max-h-[90vh] overflow-hidden">
+      <div className="bg-neutral-900 rounded-xl shadow-2xl max-w-xl w-full max-h-[90vh] overflow-hidden">
         {/* Header */}
-        <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50">
+        <div className="p-6 border-b border-neutral-800 bg-gradient-to-r from-blue-900 to-indigo-50">
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-2xl font-bold text-gray-900">Bulk Edit</h2>
+              <h2 className="text-2xl font-bold text-gray-100">Bulk Edit</h2>
               <div className="flex items-center gap-2 mt-1">
                 <Users className="w-4 h-4 text-blue-600" />
-                <span className="text-sm text-gray-600">
+                <span className="text-sm text-gray-400">
                   Editing {selectedGroups.length} book{selectedGroups.length === 1 ? '' : 's'}
                 </span>
               </div>
             </div>
             <button onClick={onClose} className="p-2 hover:bg-blue-100 rounded-lg transition-colors">
-              <X className="w-6 h-6 text-gray-600" />
+              <X className="w-6 h-6 text-gray-400" />
             </button>
           </div>
         </div>
@@ -114,7 +124,7 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
         <div className="overflow-y-auto max-h-[calc(90vh-280px)] p-6">
           <div className="space-y-4">
             {/* Author */}
-            <div className={`p-4 rounded-lg border ${fieldsToEdit.author ? 'border-blue-300 bg-blue-50' : 'border-gray-200'}`}>
+            <div className={`p-4 rounded-lg border ${fieldsToEdit.author ? 'border-blue-300 bg-blue-900/30' : 'border-neutral-800'}`}>
               <label className="flex items-center gap-3 cursor-pointer">
                 <input
                   type="checkbox"
@@ -122,7 +132,7 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   onChange={() => handleToggleField('author')}
                   className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                 />
-                <span className="text-sm font-medium text-gray-700">Author</span>
+                <span className="text-sm font-medium text-gray-300">Author</span>
               </label>
               {fieldsToEdit.author && (
                 <input
@@ -130,13 +140,13 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   value={values.author}
                   onChange={(e) => handleValueChange('author', e.target.value)}
                   placeholder={getCommonValue('author') || "Enter author name"}
-                  className="w-full mt-3 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               )}
             </div>
 
             {/* Narrator */}
-            <div className={`p-4 rounded-lg border ${fieldsToEdit.narrator ? 'border-blue-300 bg-blue-50' : 'border-gray-200'}`}>
+            <div className={`p-4 rounded-lg border ${fieldsToEdit.narrator ? 'border-blue-300 bg-blue-900/30' : 'border-neutral-800'}`}>
               <label className="flex items-center gap-3 cursor-pointer">
                 <input
                   type="checkbox"
@@ -144,7 +154,7 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   onChange={() => handleToggleField('narrator')}
                   className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                 />
-                <span className="text-sm font-medium text-gray-700">Narrator</span>
+                <span className="text-sm font-medium text-gray-300">Narrator</span>
               </label>
               {fieldsToEdit.narrator && (
                 <input
@@ -152,13 +162,13 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   value={values.narrator}
                   onChange={(e) => handleValueChange('narrator', e.target.value)}
                   placeholder={getCommonValue('narrator') || "Enter narrator name"}
-                  className="w-full mt-3 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               )}
             </div>
 
             {/* Series */}
-            <div className={`p-4 rounded-lg border ${fieldsToEdit.series ? 'border-blue-300 bg-blue-50' : 'border-gray-200'}`}>
+            <div className={`p-4 rounded-lg border ${fieldsToEdit.series ? 'border-blue-300 bg-blue-900/30' : 'border-neutral-800'}`}>
               <label className="flex items-center gap-3 cursor-pointer">
                 <input
                   type="checkbox"
@@ -166,7 +176,7 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   onChange={() => handleToggleField('series')}
                   className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                 />
-                <span className="text-sm font-medium text-gray-700">Series</span>
+                <span className="text-sm font-medium text-gray-300">Series</span>
               </label>
               {fieldsToEdit.series && (
                 <div className="mt-3 grid grid-cols-3 gap-2">
@@ -175,21 +185,21 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                     value={values.series}
                     onChange={(e) => handleValueChange('series', e.target.value)}
                     placeholder={getCommonValue('series') || "Series name"}
-                    className="col-span-2 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="col-span-2 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                   <input
                     type="text"
                     value={values.sequence}
                     onChange={(e) => handleValueChange('sequence', e.target.value)}
                     placeholder="Book #"
-                    className="px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                 </div>
               )}
             </div>
 
             {/* Genres */}
-            <div className={`p-4 rounded-lg border ${fieldsToEdit.genres ? 'border-blue-300 bg-blue-50' : 'border-gray-200'}`}>
+            <div className={`p-4 rounded-lg border ${fieldsToEdit.genres ? 'border-blue-300 bg-blue-900/30' : 'border-neutral-800'}`}>
               <label className="flex items-center gap-3 cursor-pointer">
                 <input
                   type="checkbox"
@@ -197,8 +207,8 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   onChange={() => handleToggleField('genres')}
                   className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                 />
-                <span className="text-sm font-medium text-gray-700">
-                  Genres <span className="text-xs text-gray-500">(comma-separated, max 3)</span>
+                <span className="text-sm font-medium text-gray-300">
+                  Genres <span className="text-xs text-gray-400">(comma-separated, max 3)</span>
                 </span>
               </label>
               {fieldsToEdit.genres && (
@@ -207,13 +217,13 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   value={values.genres}
                   onChange={(e) => handleValueChange('genres', e.target.value)}
                   placeholder={getCommonValue('genres') || "Fantasy, Adventure, Fiction"}
-                  className="w-full mt-3 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               )}
             </div>
 
             {/* Publisher */}
-            <div className={`p-4 rounded-lg border ${fieldsToEdit.publisher ? 'border-blue-300 bg-blue-50' : 'border-gray-200'}`}>
+            <div className={`p-4 rounded-lg border ${fieldsToEdit.publisher ? 'border-blue-300 bg-blue-900/30' : 'border-neutral-800'}`}>
               <label className="flex items-center gap-3 cursor-pointer">
                 <input
                   type="checkbox"
@@ -221,7 +231,7 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   onChange={() => handleToggleField('publisher')}
                   className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                 />
-                <span className="text-sm font-medium text-gray-700">Publisher</span>
+                <span className="text-sm font-medium text-gray-300">Publisher</span>
               </label>
               {fieldsToEdit.publisher && (
                 <input
@@ -229,14 +239,14 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   value={values.publisher}
                   onChange={(e) => handleValueChange('publisher', e.target.value)}
                   placeholder={getCommonValue('publisher') || "Enter publisher name"}
-                  className="w-full mt-3 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               )}
             </div>
 
             {/* Year & Language */}
             <div className="grid grid-cols-2 gap-4">
-              <div className={`p-4 rounded-lg border ${fieldsToEdit.year ? 'border-blue-300 bg-blue-50' : 'border-gray-200'}`}>
+              <div className={`p-4 rounded-lg border ${fieldsToEdit.year ? 'border-blue-300 bg-blue-900/30' : 'border-neutral-800'}`}>
                 <label className="flex items-center gap-3 cursor-pointer">
                   <input
                     type="checkbox"
@@ -244,7 +254,7 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                     onChange={() => handleToggleField('year')}
                     className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                   />
-                  <span className="text-sm font-medium text-gray-700">Year</span>
+                  <span className="text-sm font-medium text-gray-300">Year</span>
                 </label>
                 {fieldsToEdit.year && (
                   <input
@@ -252,12 +262,12 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                     value={values.year}
                     onChange={(e) => handleValueChange('year', e.target.value)}
                     placeholder="YYYY"
-                    className="w-full mt-3 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                 )}
               </div>
 
-              <div className={`p-4 rounded-lg border ${fieldsToEdit.language ? 'border-blue-300 bg-blue-50' : 'border-gray-200'}`}>
+              <div className={`p-4 rounded-lg border ${fieldsToEdit.language ? 'border-blue-300 bg-blue-900/30' : 'border-neutral-800'}`}>
                 <label className="flex items-center gap-3 cursor-pointer">
                   <input
                     type="checkbox"
@@ -265,13 +275,13 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                     onChange={() => handleToggleField('language')}
                     className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                   />
-                  <span className="text-sm font-medium text-gray-700">Language</span>
+                  <span className="text-sm font-medium text-gray-300">Language</span>
                 </label>
                 {fieldsToEdit.language && (
                   <select
                     value={values.language}
                     onChange={(e) => handleValueChange('language', e.target.value)}
-                    className="w-full mt-3 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   >
                     <option value="">Select...</option>
                     <option value="en">English</option>
@@ -286,14 +296,68 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                 )}
               </div>
             </div>
+
+            {/* Age Rating & Content Rating */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className={`p-4 rounded-lg border ${fieldsToEdit.age_rating ? 'border-blue-300 bg-blue-900/30' : 'border-neutral-800'}`}>
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={fieldsToEdit.age_rating}
+                    onChange={() => handleToggleField('age_rating')}
+                    className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                  />
+                  <span className="text-sm font-medium text-gray-300">Age Rating</span>
+                </label>
+                {fieldsToEdit.age_rating && (
+                  <select
+                    value={values.age_rating}
+                    onChange={(e) => handleValueChange('age_rating', e.target.value)}
+                    className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    <option value="">Select...</option>
+                    <option value="Childrens">Children's</option>
+                    <option value="Teens">Teens</option>
+                    <option value="Young Adult">Young Adult</option>
+                    <option value="Adult">Adult</option>
+                  </select>
+                )}
+              </div>
+
+              <div className={`p-4 rounded-lg border ${fieldsToEdit.content_rating ? 'border-blue-300 bg-blue-900/30' : 'border-neutral-800'}`}>
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={fieldsToEdit.content_rating}
+                    onChange={() => handleToggleField('content_rating')}
+                    className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                  />
+                  <span className="text-sm font-medium text-gray-300">Content Rating</span>
+                </label>
+                {fieldsToEdit.content_rating && (
+                  <select
+                    value={values.content_rating}
+                    onChange={(e) => handleValueChange('content_rating', e.target.value)}
+                    className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    <option value="">Select...</option>
+                    <option value="G">G - General Audiences</option>
+                    <option value="PG">PG - Parental Guidance</option>
+                    <option value="PG-13">PG-13 - Parents Strongly Cautioned</option>
+                    <option value="R">R - Restricted</option>
+                    <option value="X">X - Adults Only</option>
+                  </select>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
         {/* Footer */}
-        <div className="p-6 border-t border-gray-200 flex gap-3 justify-end bg-gray-50">
+        <div className="p-6 border-t border-neutral-800 flex gap-3 justify-end bg-neutral-950">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors font-medium"
+            className="px-4 py-2 text-gray-300 bg-neutral-900 border border-neutral-700 rounded-lg hover:bg-neutral-950 transition-colors font-medium"
           >
             Cancel
           </button>
@@ -303,7 +367,7 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
             className={`px-4 py-2 rounded-lg font-medium flex items-center gap-2 transition-colors ${
               hasAnyFieldSelected
                 ? 'bg-blue-600 text-white hover:bg-blue-700'
-                : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                : 'bg-gray-600 text-gray-400 cursor-not-allowed'
             }`}
           >
             <Save className="w-4 h-4" />

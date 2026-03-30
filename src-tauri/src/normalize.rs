@@ -5,6 +5,7 @@
 
 use regex::Regex;
 use std::collections::HashSet;
+use crate::validation::lookups::{INVALID_SERIES, AUTHOR_AS_SERIES};
 
 /// Words that should remain lowercase in titles (unless first/last word)
 const LOWERCASE_WORDS: &[&str] = &[
@@ -513,6 +514,16 @@ pub fn is_valid_series_with_author(series: &str, author: Option<&str>) -> bool {
     ];
 
     if invalid.contains(&lower.as_str()) {
+        return false;
+    }
+
+    // Check against comprehensive INVALID_SERIES lookup (includes "test", publishers, etc.)
+    if INVALID_SERIES.contains(lower.as_str()) {
+        return false;
+    }
+
+    // Check against AUTHOR_AS_SERIES lookup (author names used as series)
+    if AUTHOR_AS_SERIES.contains(lower.as_str()) {
         return false;
     }
 

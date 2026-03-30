@@ -8,6 +8,7 @@ use crate::audible::{AudibleMetadata, AudibleSeries};
 use crate::cache;
 use crate::config::Config;
 use crate::normalize;
+use crate::validation::lookups::{INVALID_SERIES, AUTHOR_AS_SERIES, SERIES_CANONICAL, DISCWORLD_SEQUENCE};
 use futures::stream::{self, StreamExt};
 use indexmap::IndexSet;
 use lofty::probe::Probe;
@@ -603,7 +604,7 @@ async fn process_book_group_with_options(
             if group.scan_status == ScanStatus::LoadedFromFile {
                 // Check if cover is actually in cache (not just URL in metadata)
                 let cover_cache_key = format!("cover_{}", group.id);
-                let has_cached_cover = cache::get::<(Vec<u8>, String)>(&cover_cache_key).is_some();
+                let has_cached_cover = cache::has_cover(&cover_cache_key);
 
                 if has_cached_cover {
                     println!("   ⚡ Skipping API calls for '{}' (metadata.json + cover cached)", group.metadata.title);
@@ -625,7 +626,7 @@ async fn process_book_group_with_options(
                         Ok(cover) if cover.data.is_some() => {
                             if let Some(ref data) = cover.data {
                                 let mime_type = cover.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
-                                let _ = cache::set(&cover_cache_key, &(data.clone(), mime_type));
+                                let _ = cache::set_cover(&cover_cache_key, data, &mime_type);
                                 covers_found.fetch_add(1, Ordering::Relaxed);
                                 group.metadata.cover_url = cover.url;
                                 group.metadata.cover_mime = cover.mime_type;
@@ -699,7 +700,7 @@ async fn process_book_group_with_options(
 
             // IMPORTANT: Even with cached metadata, we need to check/fetch covers
             let cover_cache_key = format!("cover_{}", group.id);
-            let has_cover = cache::get::<(Vec<u8>, String)>(&cover_cache_key).is_some();
+            let has_cover = cache::has_cover(&cover_cache_key);
 
             if !has_cover && !group.metadata.title.is_empty() {
                 println!("   📷 Fetching cover for cached book: '{}'", group.metadata.title);
@@ -713,7 +714,7 @@ async fn process_book_group_with_options(
                     Ok(cover) if cover.data.is_some() => {
                         if let Some(ref data) = cover.data {
                             let mime_type = cover.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
-                            let _ = cache::set(&cover_cache_key, &(data.clone(), mime_type));
+                            let _ = cache::set_cover(&cover_cache_key, data, &mime_type);
                             covers_found.fetch_add(1, Ordering::Relaxed);
                             group.metadata.cover_url = cover.url;
                             group.metadata.cover_mime = cover.mime_type;
@@ -923,7 +924,7 @@ async fn process_book_group_with_options(
                 if let Some(ref data) = cover.data {
                     let cover_cache_key = format!("cover_{}", group.id);
                     let mime_type = cover.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
-                    let _ = cache::set(&cover_cache_key, &(data.clone(), mime_type));
+                    let _ = cache::set_cover(&cover_cache_key, data, &mime_type);
                     covers_found.fetch_add(1, Ordering::Relaxed);
                 }
                 final_metadata.cover_url = cover.url;
@@ -1576,7 +1577,7 @@ JSON only:
         year_instruction
     );
     
-    match call_gpt_api(&prompt, api_key, "gpt-5-nano", 4000).await {
+    match call_gpt_api(&prompt, api_key, &preferred_model(), 4000).await {
         Ok(json_str) => {
             // Detect truncated JSON responses
             let trimmed = json_str.trim();
@@ -1605,13 +1606,7 @@ JSON only:
                     if !metadata.genres.is_empty() {
                         // Split any combined genres first
                         metadata.genres = crate::genres::split_combined_genres(&metadata.genres);
-                        // Enforce age-specific children's genres
-                        crate::genres::enforce_children_age_genres(
-                            &mut metadata.genres,
-                            &metadata.title,
-                            metadata.series.as_deref(),
-                            Some(&metadata.author),
-                        );
+                        // Age-specific genres now determined by GPT pipeline
                         sources.genres = Some(MetadataSource::Gpt);
                     }
                     if metadata.publisher.is_some() {
@@ -1898,6 +1893,8 @@ fn fallback_metadata(
         runtime_minutes: audible_data.as_ref().and_then(|d| d.runtime_minutes),
         explicit: None,
         publish_date: audible_data.as_ref().and_then(|d| d.release_date.clone()),
+        age_rating: None,
+        content_rating: None,
         sources: Some(sources),
         // Collection fields - detection happens in normalize_metadata
         is_collection: false,
@@ -1908,6 +1905,10 @@ fn fallback_metadata(
         tropes: vec![],
         themes_source: None,
         tropes_source: None,
+        tags: vec![],
+        source_path: None,
+        added_at: None,
+        updated_at: None,
     }
 }
 
@@ -2059,6 +2060,8 @@ fn create_metadata_from_audible(
         runtime_minutes: audible_data.runtime_minutes,
         explicit: None,
         publish_date: audible_data.release_date,
+        age_rating: None,
+        content_rating: None,
         sources: Some(sources),
         // Collection fields - detection happens in normalize_metadata
         is_collection: false,
@@ -2069,6 +2072,10 @@ fn create_metadata_from_audible(
         tropes: vec![],
         themes_source: None,
         tropes_source: None,
+        tags: vec![],
+        source_path: None,
+        added_at: None,
+        updated_at: None,
     })
 }
 
@@ -2265,6 +2272,46 @@ fn normalize_metadata(mut metadata: BookMetadata) -> BookMetadata {
         }
     }
 
+    // AGE RATING AND CONTENT RATING DETERMINATION
+    // Only populate if not already set
+    if metadata.age_rating.is_none() || metadata.content_rating.is_none() {
+        let (age_rating, content_rating, rating_tags) = crate::genres::determine_ratings_with_tags(
+            &metadata.genres,
+            &metadata.tags,
+            metadata.explicit,
+            Some(&metadata.title),
+            metadata.series.as_deref(),
+            metadata.description.as_deref(),
+        );
+
+        // Set age_rating if not already set
+        if metadata.age_rating.is_none() {
+            metadata.age_rating = age_rating;
+        }
+
+        // Set content_rating if not already set
+        if metadata.content_rating.is_none() {
+            metadata.content_rating = content_rating;
+        }
+
+        // Add rating tags to tags array (avoid duplicates)
+        for tag in rating_tags {
+            if !metadata.tags.contains(&tag) {
+                metadata.tags.push(tag);
+            }
+        }
+
+        // Update sources if we set ratings
+        if let Some(ref mut sources) = metadata.sources {
+            if metadata.age_rating.is_some() && sources.age_rating.is_none() {
+                sources.age_rating = Some(MetadataSource::Gpt); // Derived from analysis
+            }
+            if metadata.content_rating.is_some() && sources.content_rating.is_none() {
+                sources.content_rating = Some(MetadataSource::Gpt);
+            }
+        }
+    }
+
     metadata
 }
 
@@ -2322,6 +2369,8 @@ pub async fn enrich_with_gpt(
                 runtime_minutes: None,
                 explicit: None,
                 publish_date: None,
+                age_rating: None,
+                content_rating: None,
                 sources: Some(sources),
                 // Collection fields
                 is_collection: false,
@@ -2332,6 +2381,10 @@ pub async fn enrich_with_gpt(
                 tropes: vec![],
                 themes_source: None,
                 tropes_source: None,
+                tags: vec![],
+                source_path: None,
+                added_at: None,
+                updated_at: None,
             };
         }
     };
@@ -2402,7 +2455,7 @@ JSON:"#,
         crate::genres::APPROVED_GENRES.join(", ")
     );
 
-    match call_gpt_api(&prompt, api_key, "gpt-5-nano", 4000).await {
+    match call_gpt_api(&prompt, api_key, &preferred_model(), 4000).await {
         Ok(json_str) => {
             match serde_json::from_str::<serde_json::Value>(&json_str) {
                 Ok(json) => {
@@ -2533,6 +2586,8 @@ JSON:"#,
                         runtime_minutes: None,
                         explicit: None,
                         publish_date: None,
+                        age_rating: None,
+                        content_rating: None,
                         sources: Some(sources),
                         // Collection fields
                         is_collection: false,
@@ -2543,6 +2598,10 @@ JSON:"#,
                         tropes: vec![],
                         themes_source: None,
                         tropes_source: None,
+                        tags: vec![],
+                        source_path: None,
+                        added_at: None,
+                        updated_at: None,
                     });
 
                     // Extract themes/tropes if we have a description
@@ -2607,6 +2666,8 @@ JSON:"#,
                         runtime_minutes: None,
                         explicit: None,
                         publish_date: None,
+                        age_rating: None,
+                        content_rating: None,
                         sources: Some(sources),
                         // Collection fields
                         is_collection: false,
@@ -2617,6 +2678,10 @@ JSON:"#,
                         tropes: vec![],
                         themes_source: None,
                         tropes_source: None,
+                        tags: vec![],
+                        source_path: None,
+                        added_at: None,
+                        updated_at: None,
                     })
                 }
             }
@@ -2662,6 +2727,8 @@ JSON:"#,
                 runtime_minutes: None,
                 explicit: None,
                 publish_date: None,
+                age_rating: None,
+                content_rating: None,
                 sources: Some(sources),
                 // Collection fields
                 is_collection: false,
@@ -2672,6 +2739,10 @@ JSON:"#,
                 tropes: vec![],
                 themes_source: None,
                 tropes_source: None,
+                tags: vec![],
+                source_path: None,
+                added_at: None,
+                updated_at: None,
             })
         }
     }
@@ -2788,7 +2859,7 @@ Return JSON only:
         folder_name, raw_title, raw_author
     );
 
-    match call_gpt_api(&prompt, api_key, "gpt-5-nano", 4000).await {
+    match call_gpt_api(&prompt, api_key, &preferred_model(), 4000).await {
         Ok(json_str) => {
             match serde_json::from_str::<CleanedSearchQuery>(&json_str) {
                 Ok(cleaned) => {
@@ -2828,13 +2899,32 @@ Return JSON only:
     }
 }
 
+/// Returns the user's preferred AI model from config, falling back to gpt-5.4-nano.
+pub fn preferred_model() -> String {
+    crate::config::load_config()
+        .map(|c| c.ai_model)
+        .unwrap_or_else(|_| "gpt-5.4-nano".to_string())
+}
+
 pub async fn call_gpt_api(
     prompt: &str,
     api_key: &str,
     model: &str,
     max_tokens: u32
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
+    // Check cache first (hash the prompt + model as key)
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    prompt.hash(&mut hasher);
+    model.hash(&mut hasher);
+    let cache_key = format!("gpt_{}_{}", model, hasher.finish());
+
+    if let Some(cached) = cache::get::<String>(&cache_key) {
+        return Ok(cached);
+    }
+
+    let client = crate::cache::shared_client();
 
     // All GPT-5 models (including nano) use the Responses API
     let use_responses_api = model.starts_with("gpt-5");
@@ -2991,7 +3081,17 @@ pub async fn call_gpt_api(
         .trim_end_matches("```")
         .trim();
 
-    Ok(json_str.to_string())
+    let result = json_str.to_string();
+    // Only cache if the result looks like valid complete JSON (not truncated)
+    let looks_complete = (result.starts_with('{') && result.ends_with('}'))
+        || (result.starts_with('[') && result.ends_with(']'))
+        || (!result.starts_with('{') && !result.starts_with('['));
+    if looks_complete {
+        let _ = cache::set(&cache_key, &result);
+    } else {
+        println!("   ⚠️  GPT response appears truncated, not caching: {}...", &result[..result.len().min(80)]);
+    }
+    Ok(result)
 }
 
 /// Clean series list with GPT to filter out irrelevant series for this specific edition
@@ -3041,7 +3141,7 @@ Return JSON: {{"valid_series": ["series1", "series2"]}}"#,
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        call_gpt_api(&prompt, api_key, "gpt-5-nano", 500)
+        call_gpt_api(&prompt, api_key, &preferred_model(), 500)
     ).await;
 
     match result {
@@ -3170,7 +3270,7 @@ Return ONLY the cleaned description text, nothing else. No quotes, no JSON, just
         title, author, text_only
     );
 
-    match call_gpt_api(&prompt, api_key, "gpt-5-nano", 4000).await {
+    match call_gpt_api(&prompt, api_key, &preferred_model(), 4000).await {
         Ok(response) => {
             let cleaned = response.trim()
                 .trim_matches('"')
@@ -3268,7 +3368,7 @@ Tropes: [trope1], [trope2], [trope3]"#,
 
         let gpt_result = tokio::time::timeout(
             std::time::Duration::from_secs(20),
-            call_gpt_api(&prompt, api_key, "gpt-5-nano", 2000)
+            call_gpt_api(&prompt, api_key, &preferred_model(), 2000)
         ).await;
 
         match gpt_result {
@@ -3539,7 +3639,7 @@ APPROVED GENRES: {}
     // Call GPT-5-nano
     let gpt_result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        call_gpt_api(&prompt, api_key, "gpt-5-nano", 2000)
+        call_gpt_api(&prompt, api_key, &preferred_model(), 2000)
     ).await;
 
     match gpt_result {
@@ -3598,14 +3698,8 @@ APPROVED GENRES: {}
         }
     }
 
-    // Normalize genres
+    // Normalize genres (age-specific genres now determined by GPT pipeline)
     metadata.genres = crate::genres::enforce_genre_policy_with_split(&metadata.genres);
-    crate::genres::enforce_children_age_genres(
-        &mut metadata.genres,
-        &metadata.title,
-        metadata.series.as_deref(),
-        Some(&metadata.author),
-    );
 
     // Extract themes/tropes if we have a description
     if let Some(ref desc) = metadata.description {
@@ -3621,6 +3715,46 @@ APPROVED GENRES: {}
                 metadata.tropes = themes_tropes.tropes;
                 metadata.themes_source = Some("gpt".to_string());
                 metadata.tropes_source = Some("gpt".to_string());
+            }
+        }
+    }
+
+    // Final validation: check series against lookup tables (catches GPT mistakes)
+    if let Some(ref series) = metadata.series {
+        let series_lower = series.to_lowercase();
+
+        // Check INVALID_SERIES (publishers, generic terms, garbage)
+        if INVALID_SERIES.contains(series_lower.as_str()) {
+            println!("   🚫 Rejecting invalid series '{}' (in INVALID_SERIES)", series);
+            metadata.series = None;
+            metadata.sequence = None;
+        }
+        // Check AUTHOR_AS_SERIES (author names mistakenly used as series)
+        else if AUTHOR_AS_SERIES.contains(series_lower.as_str()) {
+            println!("   🚫 Rejecting author-as-series '{}' (in AUTHOR_AS_SERIES)", series);
+            metadata.series = None;
+            metadata.sequence = None;
+        }
+        // Normalize series name if there's a canonical form
+        else if let Some(&canonical) = SERIES_CANONICAL.get(series_lower.as_str()) {
+            if canonical != series {
+                println!("   📝 Normalizing series '{}' → '{}'", series, canonical);
+                metadata.series = Some(canonical.to_string());
+            }
+        }
+    }
+
+    // Fix Discworld sequences using authoritative publication order
+    // GPT often gets subseries numbers wrong (e.g., "Witches #3" instead of "Discworld #6")
+    if let Some(ref series) = metadata.series {
+        if series.to_lowercase() == "discworld" {
+            let title_lower = metadata.title.to_lowercase();
+            if let Some(&correct_seq) = DISCWORLD_SEQUENCE.get(title_lower.as_str()) {
+                let current_seq = metadata.sequence.as_deref().unwrap_or("none");
+                if current_seq != correct_seq {
+                    println!("   📚 Discworld sequence fix: '{}' #{} → #{}", metadata.title, current_seq, correct_seq);
+                    metadata.sequence = Some(correct_seq.to_string());
+                }
             }
         }
     }
@@ -3912,10 +4046,63 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
         vec![]
     };
 
+    // Extract subtitle - Audible shows it in various places
+    // Method 1: Look for subtitle in the page (often after title with ":")
+    let subtitle = {
+        // Try JSON-LD first
+        let jsonld_subtitle = regex::Regex::new(r#""name"\s*:\s*"[^"]+:\s*([^"]+)""#)
+            .ok()
+            .and_then(|re| re.captures(&product_html))
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string());
+
+        // Try meta description which sometimes has subtitle
+        let meta_subtitle = if jsonld_subtitle.is_none() {
+            regex::Regex::new(r#"<h1[^>]*class="[^"]*bc-heading[^"]*"[^>]*>([^<]+)</h1>\s*<[^>]*class="[^"]*bc-text[^"]*subtitle[^"]*"[^>]*>([^<]+)<"#)
+                .ok()
+                .and_then(|re| re.captures(&product_html))
+                .and_then(|c| c.get(2))
+                .map(|m| {
+                    // Simple HTML entity decode
+                    m.as_str().trim()
+                        .replace("&amp;", "&")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .replace("&quot;", "\"")
+                        .replace("&#39;", "'")
+                        .replace("&apos;", "'")
+                })
+        } else {
+            None
+        };
+
+        // Try og:description which sometimes contains subtitle info
+        let desc_subtitle = if jsonld_subtitle.is_none() && meta_subtitle.is_none() {
+            regex::Regex::new(r#"<meta[^>]*property="og:description"[^>]*content="([^"]+)""#)
+                .ok()
+                .and_then(|re| re.captures(&product_html))
+                .and_then(|c| c.get(1))
+                .and_then(|m| {
+                    let desc = m.as_str();
+                    // Sometimes subtitle appears at start of description before a period
+                    if desc.len() < 100 && !desc.contains("narrat") && !desc.contains("writ") {
+                        Some(desc.trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        };
+
+        jsonld_subtitle.or(meta_subtitle).or(desc_subtitle)
+            .filter(|s| !s.is_empty() && s.len() > 2 && s.len() < 200)
+    };
+
     let result = AudibleMetadata {
         asin: Some(asin),
         title: extracted_title,
-        subtitle: None,  // Audible scraping doesn't extract subtitles
+        subtitle,
         authors: extracted_authors,
         narrators: extracted_narrators,
         series: series_vec,
@@ -3932,6 +4119,12 @@ async fn fetch_audible_metadata(title: &str, author: &str) -> Option<AudibleMeta
     // Cache the result for future lookups
     let _ = cache::set(&cache_key, &Some(result.clone()));
     Some(result)
+}
+
+/// Public wrapper for subtitle lookup via Audible scraping
+/// Used by the subtitle fix command
+pub async fn fetch_audible_metadata_for_subtitle(title: &str, author: &str) -> Option<AudibleMetadata> {
+    fetch_audible_metadata(title, author).await
 }
 
 /// Fetch metadata via AudiobookShelf search API (preferred when ABS is configured)
@@ -4539,6 +4732,195 @@ fn extract_book_number_from_folder(folder: &str) -> Option<String> {
     None
 }
 
+// =============================================================================
+// Folder Hierarchy Parsing — Extract Author/Series/Book from path structure
+// =============================================================================
+
+/// Parsed folder hierarchy from a full path
+#[derive(Debug, Clone, Default)]
+pub struct FolderHierarchy {
+    pub author: Option<String>,
+    pub series: Option<String>,
+    pub book_folder: Option<String>,
+    pub sequence: Option<String>,
+}
+
+/// Parse a full path like "/audiobooks/Brandon Sanderson/The Stormlight Archive/01 - The Way of Kings/"
+/// Returns structured hierarchy: author, series (if present), book folder, sequence
+///
+/// Supports these structures:
+/// - /root/Author/Series/Book/ → author, series, book
+/// - /root/Author/Book/ → author, book (no series)
+/// - /root/Author - Series/Book/ → author from "Author - Series" pattern
+pub fn parse_folder_hierarchy(path: &str) -> FolderHierarchy {
+    let mut result = FolderHierarchy::default();
+
+    // Normalize path separators and split
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        return result;
+    }
+
+    // Find the library root marker
+    // Common patterns: "audiobooks", "Audiobooks", "media", "library", "books"
+    let root_markers = ["audiobooks", "audiobook", "media", "library", "books", "audio"];
+    let mut root_idx = None;
+
+    for (i, part) in parts.iter().enumerate() {
+        let lower = part.to_lowercase();
+        if root_markers.iter().any(|m| lower == *m || lower.ends_with(m)) {
+            root_idx = Some(i);
+            break;
+        }
+    }
+
+    // If no root marker found, try to detect structure from the end
+    // Assume: last = book folder, second-to-last = series or author
+    let start_idx = root_idx.map(|i| i + 1).unwrap_or(0);
+    let relevant_parts: Vec<&str> = parts[start_idx..].to_vec();
+
+    match relevant_parts.len() {
+        0 => {}
+        1 => {
+            // Just one folder after root - it's the book folder
+            result.book_folder = Some(relevant_parts[0].to_string());
+            // Try to extract sequence from it
+            result.sequence = extract_sequence_from_folder_name(relevant_parts[0]);
+        }
+        2 => {
+            // Two folders: Author/Book or Series/Book
+            // Check if first looks like an author name (has space, proper case)
+            let first = relevant_parts[0];
+            let second = relevant_parts[1];
+
+            if folder_looks_like_author_name(first) {
+                result.author = Some(first.to_string());
+                result.book_folder = Some(second.to_string());
+                // Try to extract series from book folder name
+                let (series, seq) = extract_series_from_folder(second);
+                result.series = series;
+                result.sequence = seq.or_else(|| extract_sequence_from_folder_name(second));
+            } else {
+                // Might be Series/Book without explicit author
+                result.series = Some(first.to_string());
+                result.book_folder = Some(second.to_string());
+                result.sequence = extract_sequence_from_folder_name(second);
+            }
+        }
+        _ => {
+            // Three or more: Author/Series/Book/[optional deeper]
+            result.author = Some(relevant_parts[0].to_string());
+            result.series = Some(relevant_parts[1].to_string());
+
+            // Book folder is the next one (index 2)
+            if relevant_parts.len() > 2 {
+                result.book_folder = Some(relevant_parts[2].to_string());
+                result.sequence = extract_sequence_from_folder_name(relevant_parts[2]);
+            }
+        }
+    }
+
+    // Handle "Author - Series" combined folder pattern
+    // e.g., "Brandon Sanderson - Stormlight Archive"
+    if let Some(author) = result.author.clone() {
+        if author.contains(" - ") {
+            let parts: Vec<&str> = author.splitn(2, " - ").collect();
+            if parts.len() == 2 {
+                result.author = Some(parts[0].trim().to_string());
+                // Only use this as series if we don't already have one
+                if result.series.is_none() {
+                    result.series = Some(parts[1].trim().to_string());
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Check if a folder name looks like an author name (used by folder hierarchy parser)
+fn folder_looks_like_author_name(name: &str) -> bool {
+    // Author names typically:
+    // - Have spaces (first last)
+    // - Don't start with numbers
+    // - Don't have series indicators like "#", "Book"
+    // - Are properly capitalized
+
+    if name.is_empty() {
+        return false;
+    }
+
+    // Starts with number = not an author
+    if name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        return false;
+    }
+
+    // Contains series indicators = not an author
+    let lower = name.to_lowercase();
+    if lower.contains(" book ") || lower.contains("#") || lower.contains("volume") {
+        return false;
+    }
+
+    // Has a space (most author names are "First Last")
+    if name.contains(' ') {
+        return true;
+    }
+
+    // Single word but proper case (could be single-name author like "Colleen")
+    let first_char = name.chars().next().unwrap_or('a');
+    first_char.is_uppercase()
+}
+
+/// Extract sequence number from a book folder name
+/// Handles: "01 - Title", "Book 3 - Title", "[3] Title", "Title #5"
+fn extract_sequence_from_folder_name(folder: &str) -> Option<String> {
+    // Pattern 1: "01 - Title" or "1 - Title" (number at start followed by separator)
+    if let Some(re) = regex::Regex::new(r"^(\d{1,3})\s*[-–—\.]\s*").ok() {
+        if let Some(caps) = re.captures(folder) {
+            if let Some(num) = caps.get(1) {
+                let n = num.as_str().trim_start_matches('0');
+                if !n.is_empty() {
+                    return Some(n.to_string());
+                }
+            }
+        }
+    }
+
+    // Pattern 2: "[N]" at start
+    if let Some(re) = regex::Regex::new(r"^\[(\d+)\]").ok() {
+        if let Some(caps) = re.captures(folder) {
+            if let Some(num) = caps.get(1) {
+                return Some(num.as_str().trim_start_matches('0').to_string());
+            }
+        }
+    }
+
+    // Pattern 3: "Book N" anywhere
+    if let Some(re) = regex::Regex::new(r"(?i)book\s*[#]?(\d+)").ok() {
+        if let Some(caps) = re.captures(folder) {
+            if let Some(num) = caps.get(1) {
+                return Some(num.as_str().trim_start_matches('0').to_string());
+            }
+        }
+    }
+
+    // Pattern 4: "#N" anywhere
+    if let Some(re) = regex::Regex::new(r"#(\d+)").ok() {
+        if let Some(caps) = re.captures(folder) {
+            if let Some(num) = caps.get(1) {
+                return Some(num.as_str().trim_start_matches('0').to_string());
+            }
+        }
+    }
+
+    None
+}
+
 /// Check if file tags are already clean (no GPT extraction needed)
 fn tags_are_clean(title: Option<&str>, artist: Option<&str>) -> bool {
     let title = match title {
@@ -4641,7 +5023,7 @@ JSON:"#,
     );
     
     for attempt in 1..=2 {
-        match call_gpt_api(&prompt, api_key, "gpt-5-nano", 4000).await {
+        match call_gpt_api(&prompt, api_key, &preferred_model(), 4000).await {
             Ok(json_str) => {
                 match serde_json::from_str::<serde_json::Value>(&json_str) {
                     Ok(json) => {
@@ -5207,7 +5589,7 @@ async fn process_group_super_scanner(
         if let Some(ref data) = cover.data {
             let cover_cache_key = format!("cover_{}", group.id);
             let mime_type = cover.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
-            let _ = cache::set(&cover_cache_key, &(data.clone(), mime_type.clone()));
+            let _ = cache::set_cover(&cover_cache_key, data, &mime_type);
             group.metadata.cover_url = cover.url;
             group.metadata.cover_mime = Some(mime_type);
             covers_found.fetch_add(1, Ordering::Relaxed);
@@ -5421,7 +5803,7 @@ JSON:"#,
     );
 
     // Call GPT API with increased token limit
-    let response = match call_gpt_api(&prompt, api_key, "gpt-5-nano", 4000).await {
+    let response = match call_gpt_api(&prompt, api_key, &preferred_model(), 4000).await {
         Ok(r) => r,
         Err(e) => {
             println!("   ⚠️ SuperScanner GPT API error: {}", e);
@@ -5643,15 +6025,8 @@ fn parse_super_scanner_gpt_response_enhanced(
 
     // GENRE POST-PROCESSING (like normal scanner)
     if !genres.is_empty() {
-        // Split any combined genres
+        // Split any combined genres (age-specific genres now determined by GPT pipeline)
         genres = crate::genres::split_combined_genres(&genres);
-        // Enforce age-specific children's genres
-        crate::genres::enforce_children_age_genres(
-            &mut genres,
-            &title,
-            series.as_deref(),
-            Some(&author),
-        );
         // Limit to 3 genres
         genres.truncate(3);
         sources.genres = Some(MetadataSource::Gpt);
@@ -5763,6 +6138,8 @@ fn parse_super_scanner_gpt_response_enhanced(
         runtime_minutes,
         explicit: None,
         publish_date,
+        age_rating: None,
+        content_rating: None,
         sources: Some(sources),
         is_collection: false,
         collection_books: vec![],
@@ -5772,6 +6149,10 @@ fn parse_super_scanner_gpt_response_enhanced(
         tropes: vec![],
         themes_source: None,
         tropes_source: None,
+        tags: vec![],
+        source_path: None,
+        added_at: None,
+        updated_at: None,
     };
 
     // Apply FULL normalization pipeline (like normal scanner)
@@ -5907,6 +6288,8 @@ fn parse_super_scanner_gpt_response(
         runtime_minutes,
         explicit,
         publish_date: None,
+        age_rating: None,
+        content_rating: None,
         sources: None,
         is_collection: false,
         collection_books: vec![],
@@ -5916,6 +6299,10 @@ fn parse_super_scanner_gpt_response(
         tropes: vec![],
         themes_source: None,
         tropes_source: None,
+        tags: vec![],
+        source_path: None,
+        added_at: None,
+        updated_at: None,
     })
 }
 
@@ -6043,6 +6430,8 @@ fn create_fallback_metadata_super(
         runtime_minutes,
         explicit: None,
         publish_date,
+        age_rating: None,
+        content_rating: None,
         sources: Some(sources),
         is_collection: false,
         collection_books: vec![],
@@ -6052,10 +6441,658 @@ fn create_fallback_metadata_super(
         tropes: vec![],
         themes_source: None,
         tropes_source: None,
+        tags: vec![],
+        source_path: None,
+        added_at: None,
+        updated_at: None,
     };
 
     // Apply FULL normalization pipeline
     normalize_metadata(metadata)
+}
+
+// =============================================================================
+// GPT-POWERED GENRE CLEANUP
+// =============================================================================
+
+/// Clean and improve genres using GPT analysis
+/// Takes messy/incorrect genres and returns proper genres from the approved taxonomy
+pub async fn cleanup_genres_with_gpt(
+    title: &str,
+    author: &str,
+    current_genres: &[String],
+    description: Option<&str>,
+    api_key: &str,
+) -> Result<Vec<String>, String> {
+    let approved_genres = r#"APPROVED GENRES (use ONLY these exact genres):
+
+FICTION:
+- Literary Fiction, Contemporary Fiction, Historical Fiction, Classics
+- Mystery, Thriller, Crime, Horror, Romance, Fantasy, Science Fiction
+- Western, Adventure, Humor, Satire, Women's Fiction, LGBTQ+ Fiction
+- Short Stories, Anthology
+
+NON-FICTION:
+- Biography, Autobiography, Memoir, History, True Crime
+- Science, Popular Science, Psychology, Self-Help, Business, Personal Finance
+- Health & Wellness, Philosophy, Religion & Spirituality, Politics
+- Essays, Journalism, Travel, Food & Cooking, Nature, Sports, Music, Art
+
+AUDIENCE (add ONE if clearly applicable):
+- Young Adult, Middle Grade, Children's, New Adult, Adult
+
+CHILDREN'S AGE (use instead of generic "Children's" when possible):
+- Children's 0-2, Children's 3-5, Children's 6-8, Children's 9-12, Teen 13-17"#;
+
+    let current = if current_genres.is_empty() {
+        "None/Unknown".to_string()
+    } else {
+        current_genres.join(", ")
+    };
+
+    let desc_str = description.unwrap_or("No description available");
+
+    let prompt = format!(
+r#"You are an audiobook librarian. Clean up and correct the genres for this book.
+
+BOOK INFO:
+Title: {title}
+Author: {author}
+Current Genres: {current}
+Description: {desc_str}
+
+{approved_genres}
+
+INSTRUCTIONS:
+1. Select 1-3 PRIMARY genres from the approved list that best describe this book
+2. Fix any misspellings or non-standard genre names
+3. Map similar genres to approved ones (e.g., "Suspense" → "Thriller", "Sci-Fi" → "Science Fiction")
+4. Add an audience category if clearly applicable (Young Adult, Children's, etc.)
+5. For children's books, use specific age ranges when possible
+6. Remove duplicates and overly specific sub-genres
+7. Keep the most accurate and useful genres only
+
+Return ONLY a JSON array of genres, nothing else:
+["Genre1", "Genre2"]"#,
+        title = title,
+        author = author,
+        current = current,
+        desc_str = desc_str,
+        approved_genres = approved_genres,
+    );
+
+    match call_gpt_api(&prompt, api_key, &preferred_model(), 200).await {
+        Ok(response) => {
+            // Parse the JSON array response
+            let cleaned = response.trim();
+            match serde_json::from_str::<Vec<String>>(cleaned) {
+                Ok(genres) => {
+                    // Filter to only approved genres (case-insensitive match)
+                    let approved: Vec<String> = genres
+                        .into_iter()
+                        .filter(|g| {
+                            crate::genres::APPROVED_GENRES.iter().any(|a|
+                                a.eq_ignore_ascii_case(g)
+                            )
+                        })
+                        .map(|g| {
+                            // Normalize case to match approved list
+                            crate::genres::APPROVED_GENRES
+                                .iter()
+                                .find(|a| a.eq_ignore_ascii_case(&g))
+                                .map(|a| a.to_string())
+                                .unwrap_or(g)
+                        })
+                        .collect();
+
+                    if approved.is_empty() {
+                        // If GPT returned nothing valid, keep original
+                        Err("GPT returned no valid genres".to_string())
+                    } else {
+                        Ok(approved)
+                    }
+                }
+                Err(e) => Err(format!("Failed to parse GPT response: {} - Raw: {}", e, cleaned)),
+            }
+        }
+        Err(e) => Err(format!("GPT API error: {}", e)),
+    }
+}
+
+// =============================================================================
+// GPT-POWERED TAG ASSIGNMENT
+// =============================================================================
+
+/// Assign tags to a book using GPT analysis
+/// Sends book metadata to GPT and gets back suggested tags from the approved taxonomy
+pub async fn assign_tags_with_gpt(
+    title: &str,
+    author: &str,
+    genres: &[String],
+    description: Option<&str>,
+    duration_minutes: Option<u32>,
+    api_key: &str,
+) -> Result<Vec<String>, String> {
+    // Build the approved tags list organized by category for the prompt
+    let tags_by_category = format!(
+r#"SUB-GENRE TAGS:
+- Mystery/Thriller: cozy-mystery, police-procedural, legal-thriller, domestic-thriller, noir, whodunit, heist
+- Romance: rom-com, historical-romance, paranormal-romance, dark-romance, clean-romance, small-town-romance
+- Fantasy: epic-fantasy, urban-fantasy, dark-fantasy, cozy-fantasy, grimdark, portal-fantasy, fairy-tale-retelling
+- Sci-Fi: space-opera, dystopian, post-apocalyptic, cyberpunk, time-travel, first-contact, alternate-history
+- Horror: gothic, supernatural, psychological-horror, folk-horror, haunted-house, cosmic-horror
+
+MOOD TAGS: atmospheric, cozy, dark, emotional, funny, heartbreaking, heartwarming, hopeful, inspiring, mysterious, romantic, suspenseful, thought-provoking, whimsical
+
+PACING TAGS: fast-paced, slow-burn, page-turner, action-packed, easy-listening
+
+STYLE TAGS: character-driven, plot-driven, unreliable-narrator, multiple-pov, dual-timeline, first-person
+
+ROMANCE TROPES: enemies-to-lovers, friends-to-lovers, second-chance, forced-proximity, fake-relationship, forbidden-love, grumpy-sunshine, only-one-bed, found-family
+
+STORY TROPES: found-family, chosen-one, reluctant-hero, antihero, morally-grey, revenge, quest, survival, underdog, coming-of-age, redemption-arc
+
+CREATURE TAGS: vampires, werewolves, fae, witches, dragons, ghosts, aliens, magic-users
+
+SETTING TAGS: small-town, big-city, academy, college, castle, spaceship, forest
+
+PERIOD TAGS: regency, victorian, medieval, 1920s, wwii, civil-war
+
+THEME TAGS: family, friendship, grief, healing, identity, justice, loyalty, mental-health, trauma, faith
+
+SERIES TAGS: standalone, in-series, trilogy, duology, long-series
+
+AUDIOBOOK TAGS: under-5-hours, 5-10-hours, 10-15-hours, 15-20-hours, over-20-hours, full-cast, author-narrated, great-character-voices
+
+RECOGNITION TAGS: bestseller, award-winner, debut, classic"#
+    );
+
+    let genres_str = if genres.is_empty() {
+        "Unknown".to_string()
+    } else {
+        genres.join(", ")
+    };
+
+    let desc_str = description.unwrap_or("No description available");
+
+    // Add duration tag hint if available
+    let duration_hint = match duration_minutes {
+        Some(m) if m < 300 => "Duration: under 5 hours",
+        Some(m) if m < 600 => "Duration: 5-10 hours",
+        Some(m) if m < 900 => "Duration: 10-15 hours",
+        Some(m) if m < 1200 => "Duration: 15-20 hours",
+        Some(_) => "Duration: over 20 hours",
+        None => "Duration: unknown",
+    };
+
+    let prompt = format!(
+r#"You are an audiobook librarian assigning descriptive tags from a controlled taxonomy.
+
+BOOK INFO:
+Title: {title}
+Author: {author}
+Genres: {genres_str}
+{duration_hint}
+Description: {desc_str}
+
+AVAILABLE TAGS (use ONLY these exact tags):
+{tags_by_category}
+
+INSTRUCTIONS:
+1. Analyze the book and select 5-15 relevant tags from the lists above
+2. REQUIRED - Include these:
+   - One sub-genre tag if it matches the genre
+   - One mood tag
+   - One length tag based on duration
+   - One series tag (standalone, in-series, trilogy, etc.)
+3. Add trope/theme tags that fit the story
+4. Use lowercase-hyphenated format exactly as shown
+5. Do NOT include any age-related tags - age ratings are handled by a separate system
+
+Return ONLY a JSON array of tags, nothing else:
+["tag1", "tag2", "tag3", ...]"#,
+        title = title,
+        author = author,
+        genres_str = genres_str,
+        duration_hint = duration_hint,
+        desc_str = desc_str,
+        tags_by_category = tags_by_category,
+    );
+
+    match call_gpt_api(&prompt, api_key, &preferred_model(), 500).await {
+        Ok(response) => {
+            // Parse the JSON array response
+            match serde_json::from_str::<Vec<String>>(&response) {
+                Ok(tags) => {
+                    // Filter to only approved tags (GPT now handles rating tags too)
+                    let approved: Vec<String> = tags
+                        .into_iter()
+                        .filter(|t| crate::genres::APPROVED_TAGS.contains(&t.as_str()))
+                        .collect();
+
+                    if approved.is_empty() {
+                        Err("GPT returned no valid tags".to_string())
+                    } else {
+                        Ok(approved)
+                    }
+                }
+                Err(e) => Err(format!("Failed to parse GPT response: {}", e)),
+            }
+        }
+        Err(e) => Err(format!("GPT API error: {}", e)),
+    }
+}
+
+/// Check if a description is "bad" and needs fixing
+/// Returns true if description is missing, too short, has HTML, or is mostly promotional
+pub fn is_description_bad(description: Option<&str>) -> bool {
+    match description {
+        None => true,
+        Some(d) => {
+            let d = d.trim();
+            // Too short
+            if d.len() < 50 {
+                return true;
+            }
+            // Has HTML tags
+            if d.contains("<") && d.contains(">") {
+                return true;
+            }
+            // Mostly promotional phrases
+            let promo_phrases = [
+                "buy now", "download today", "listen now", "order now",
+                "new york times", "bestseller", "#1", "award-winning",
+                "don't miss", "click here", "subscribe", "free trial",
+            ];
+            let lower = d.to_lowercase();
+            let promo_count = promo_phrases.iter().filter(|p| lower.contains(*p)).count();
+            if promo_count >= 2 {
+                return true;
+            }
+            // Too much repetition (copy-paste errors)
+            let words: Vec<&str> = d.split_whitespace().collect();
+            if words.len() > 20 {
+                let unique: std::collections::HashSet<_> = words.iter().collect();
+                if (unique.len() as f32 / words.len() as f32) < 0.5 {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Extract narrator name from description text using regex patterns
+/// Looks for patterns like "read by John Smith", "narrated by Jane Doe", etc.
+pub fn extract_narrator_from_description(description: &str) -> Option<String> {
+    use regex::Regex;
+
+    // Patterns to match (case insensitive)
+    let patterns = [
+        // "read by John Smith" or "Read by John Smith and Jane Doe"
+        r"(?i)\b(?:read|voiced|performed)\s+by\s+([A-Z][a-zA-Z''-]+(?:\s+[A-Z][a-zA-Z''-]+)*(?:\s+(?:and|&)\s+[A-Z][a-zA-Z''-]+(?:\s+[A-Z][a-zA-Z''-]+)*)*)",
+        // "narrated by Jane Doe"
+        r"(?i)\bnarrated\s+by\s+([A-Z][a-zA-Z''-]+(?:\s+[A-Z][a-zA-Z''-]+)*(?:\s+(?:and|&)\s+[A-Z][a-zA-Z''-]+(?:\s+[A-Z][a-zA-Z''-]+)*)*)",
+        // "narrator: Bob Jones" or "Narrator - Bob Jones"
+        r"(?i)\bnarrator[:\s-]+\s*([A-Z][a-zA-Z''-]+(?:\s+[A-Z][a-zA-Z''-]+)*(?:\s+(?:and|&)\s+[A-Z][a-zA-Z''-]+(?:\s+[A-Z][a-zA-Z''-]+)*)*)",
+        // "(Read by Mary Wilson)"
+        r"(?i)\(\s*(?:read|narrated|voiced|performed)\s+by\s+([A-Z][a-zA-Z''-]+(?:\s+[A-Z][a-zA-Z''-]+)*(?:\s+(?:and|&)\s+[A-Z][a-zA-Z''-]+(?:\s+[A-Z][a-zA-Z''-]+)*)*)\s*\)",
+    ];
+
+    for pattern in patterns {
+        if let Ok(re) = Regex::new(pattern) {
+            if let Some(caps) = re.captures(description) {
+                if let Some(matched) = caps.get(1) {
+                    let narrator = matched.as_str().trim();
+                    // Clean up the narrator name
+                    let narrator = narrator
+                        .trim_end_matches(|c: char| c == '.' || c == ',' || c == ')' || c == ';')
+                        .trim();
+
+                    // Validate: must have at least 2 parts (first and last name) and not be too long
+                    let parts: Vec<&str> = narrator.split_whitespace().collect();
+                    if parts.len() >= 2 && parts.len() <= 8 && narrator.len() >= 5 && narrator.len() <= 100 {
+                        // Check for "and" or "&" to handle multiple narrators
+                        if narrator.contains(" and ") || narrator.contains(" & ") {
+                            // Multiple narrators - convert "A and B" to "A; B" for ABS format
+                            let normalized = narrator
+                                .replace(" and ", "; ")
+                                .replace(" & ", "; ");
+                            return Some(normalized);
+                        }
+                        return Some(narrator.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Validate if a description matches the book using GPT
+/// Returns (is_valid, reason) - is_valid is false if description is wrong book or garbage
+pub async fn validate_description_matches_book(
+    description: &str,
+    title: &str,
+    author: &str,
+    api_key: &str,
+) -> Result<(bool, String), String> {
+    let prompt = format!(
+        r#"You are validating an audiobook description. Determine if this description is usable for someone browsing a library.
+
+BOOK INFO:
+Title: "{}"
+Author: {}
+
+DESCRIPTION TO VALIDATE:
+{}
+
+ANALYZE FOR THESE PROBLEMS:
+1. WRONG BOOK: Does this description appear to be about a DIFFERENT book? (wrong characters, wrong plot, wrong author mentioned)
+2. GARBAGE: Is this garbage text? (placeholder, lorem ipsum, encoding errors, mostly HTML, copy-paste errors, truncated)
+3. PROMOTIONAL ONLY: Is this actually promotional text with no real content about the book?
+4. IN MEDIAS RES: Does this description start abruptly mid-story without introducing what the book is about?
+   - Bad example: "After the war that cost him so much, Kylar Stern is broken and alone..."
+   - This assumes the reader already knows the character/world from previous books
+   - A good description should work as a standalone introduction for new readers
+
+Respond in JSON format:
+{{"valid": true/false, "reason": "brief explanation if invalid, empty if valid"}}
+
+Return valid=false if:
+- Description is for wrong book
+- Description is garbage/promotional text
+- Description starts mid-story without proper introduction (references characters, events, or situations as if continuing a previous book)
+
+Return valid=true only if the description works as a self-contained introduction that could help a new reader understand what the book is about."#,
+        title, author, description
+    );
+
+    match call_gpt_api(&prompt, api_key, &preferred_model(), 200).await {
+        Ok(response) => {
+            // Parse the JSON response
+            let response = response.trim();
+
+            // Try to extract valid and reason from JSON
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(response) {
+                let valid = json.get("valid").and_then(|v| v.as_bool()).unwrap_or(true);
+                let reason = json.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                Ok((valid, reason))
+            } else {
+                // Fallback: look for "valid": true/false pattern
+                let valid = response.to_lowercase().contains("\"valid\": true")
+                    || response.to_lowercase().contains("\"valid\":true");
+                let reason = if !valid {
+                    "Description may not match the book".to_string()
+                } else {
+                    String::new()
+                };
+                Ok((valid, reason))
+            }
+        }
+        Err(e) => Err(format!("GPT validation error: {}", e)),
+    }
+}
+
+/// Fix or generate a book description using GPT
+/// If existing description is salvageable, cleans it
+/// If missing or unusable, generates a new one from GPT's knowledge
+pub async fn fix_description_with_gpt(
+    title: &str,
+    author: &str,
+    genres: &[String],
+    existing_description: Option<&str>,
+    api_key: &str,
+) -> Result<String, String> {
+    let genres_str = if genres.is_empty() {
+        "Unknown".to_string()
+    } else {
+        genres.join(", ")
+    };
+
+    // Determine if we should clean or generate from scratch
+    let has_salvageable_content = existing_description
+        .map(|d| {
+            let d = d.trim();
+            // Strip HTML and check if there's real content
+            let html_regex = regex::Regex::new(r"<[^>]+>").unwrap();
+            let clean = html_regex.replace_all(d, " ");
+            let clean = clean.trim();
+            clean.len() >= 100 && !clean.to_lowercase().contains("click here")
+        })
+        .unwrap_or(false);
+
+    let prompt = if has_salvageable_content {
+        // Clean existing description
+        let existing = existing_description.unwrap_or("");
+        format!(
+            r#"Rewrite this audiobook description for "{}" by {}.
+
+EXISTING DESCRIPTION:
+{}
+
+RULES:
+1. Remove HTML tags, encoding errors, promotional text
+2. Remove "Narrated by...", "A [Publisher] audiobook", review quotes
+3. Remove calls to action and sales pitch
+4. Keep the core plot/content summary
+5. Fix grammar and formatting
+6. Target 150-300 characters
+7. Third person, present tense
+
+CRITICAL - FIX "IN MEDIAS RES" DESCRIPTIONS:
+If the description starts mid-story without context (e.g., "After the war that cost him so much, Kylar Stern is broken..."), you MUST rewrite it to:
+- Introduce who/what the main character is (e.g., "Kylar Stern, a former assassin...")
+- Provide enough context for someone unfamiliar with the series
+- Make it work as a standalone introduction, not a continuation
+
+You may need to add brief context from your knowledge of this book/series, but keep changes minimal and accurate.
+
+Return ONLY the cleaned description text."#,
+            title, author, existing
+        )
+    } else {
+        // Generate from scratch using GPT's knowledge
+        format!(
+            r#"Write a brief audiobook description for "{}" by {}.
+Genre: {}
+
+RULES:
+1. Write 2-3 sentences summarizing the book's premise
+2. Use third person, present tense
+3. Be factual - only include what you know about this book
+4. Target 150-250 characters
+5. Focus on plot/premise, not praise
+6. If you don't know this book well, write a generic but accurate description based on the genre
+
+Return ONLY the description text."#,
+            title, author, genres_str
+        )
+    };
+
+    match call_gpt_api(&prompt, api_key, &preferred_model(), 500).await {
+        Ok(response) => {
+            let mut cleaned = response.trim().to_string();
+
+            // Handle JSON responses like {"description":"..."} or {"text":"..."}
+            if cleaned.starts_with('{') && cleaned.ends_with('}') {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&cleaned) {
+                    // Try common field names
+                    if let Some(desc) = json.get("description").and_then(|v| v.as_str()) {
+                        cleaned = desc.to_string();
+                    } else if let Some(text) = json.get("text").and_then(|v| v.as_str()) {
+                        cleaned = text.to_string();
+                    } else if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
+                        cleaned = content.to_string();
+                    }
+                }
+            }
+
+            // Also handle markdown code blocks
+            if cleaned.starts_with("```") {
+                let lines: Vec<&str> = cleaned.lines().collect();
+                if lines.len() > 2 {
+                    cleaned = lines[1..lines.len()-1].join("\n");
+                }
+            }
+
+            // Final cleanup
+            let cleaned = cleaned.trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim();
+
+            if cleaned.len() >= 50 {
+                Ok(cleaned.to_string())
+            } else {
+                Err("Generated description too short".to_string())
+            }
+        }
+        Err(e) => Err(format!("GPT API error: {}", e)),
+    }
+}
+
+/// Result of cleaning a messy title
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CleanedTitleResult {
+    pub clean_title: String,
+    pub extracted_subtitle: Option<String>,
+    pub extracted_author: Option<String>,
+    pub extracted_narrator: Option<String>,
+    pub extracted_series: Option<String>,
+    pub extracted_sequence: Option<String>,
+    pub extracted_year: Option<String>,
+}
+
+/// Clean a messy audiobook title using GPT
+/// Extracts embedded metadata like narrator, author, series, year
+///
+/// Examples of messy titles:
+/// - "1984 - The Talisman (with Peter Straub - read by Frank Muller)"
+/// - "1986 Stallion Gate (Unabr) Read by Frank Muller"
+/// - "15 - Traitors Gate - Anne Perry - Thomas Pitt"
+pub async fn clean_title_with_gpt(
+    messy_title: &str,
+    known_author: Option<&str>,
+    known_narrator: Option<&str>,
+    known_series: Option<&str>,
+    api_key: &str,
+) -> Result<CleanedTitleResult, String> {
+    let prompt = format!(
+        r#"Parse this messy audiobook title and extract metadata.
+
+MESSY TITLE: "{}"
+{}{}{}
+
+EXTRACT:
+1. clean_title: The actual book title only (no author, narrator, year, series number)
+2. subtitle: If there's a subtitle after a colon or dash
+3. author: If author name is embedded in the title
+4. narrator: If narrator is mentioned (look for "read by", "narrated by", "reader:")
+5. series: If a series name is embedded
+6. sequence: If a book/series number is embedded (like "15 -" or "Book 3")
+7. year: If a publication year is at the start (4 digits like 1984, 1986)
+
+RULES:
+- Remove "(Unabr)", "(Unabridged)", "(Abridged)", "(Abr)" markers
+- Remove format indicators like "[Audiobook]", "(Audio)", etc.
+- The clean title should be just the book name
+- If something is already provided (known author/narrator/series), don't re-extract it
+
+Return JSON only:
+{{"clean_title": "...", "subtitle": null, "author": null, "narrator": null, "series": null, "sequence": null, "year": null}}"#,
+        messy_title,
+        known_author.map(|a| format!("\nKNOWN AUTHOR: {}", a)).unwrap_or_default(),
+        known_narrator.map(|n| format!("\nKNOWN NARRATOR: {}", n)).unwrap_or_default(),
+        known_series.map(|s| format!("\nKNOWN SERIES: {}", s)).unwrap_or_default(),
+    );
+
+    match call_gpt_api(&prompt, api_key, &preferred_model(), 300).await {
+        Ok(response) => {
+            // Parse JSON response
+            let cleaned = response.trim();
+            // Try to extract JSON from response (might have markdown code blocks)
+            let json_str = if cleaned.starts_with("```") {
+                cleaned
+                    .lines()
+                    .skip(1)
+                    .take_while(|l| !l.starts_with("```"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                cleaned.to_string()
+            };
+
+            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(v) => {
+                    let get_str = |key: &str| -> Option<String> {
+                        v.get(key)
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty() && *s != "null")
+                            .map(|s| s.to_string())
+                    };
+
+                    let clean_title = get_str("clean_title")
+                        .unwrap_or_else(|| messy_title.to_string());
+
+                    Ok(CleanedTitleResult {
+                        clean_title,
+                        extracted_subtitle: get_str("subtitle"),
+                        extracted_author: get_str("author"),
+                        extracted_narrator: get_str("narrator"),
+                        extracted_series: get_str("series"),
+                        extracted_sequence: get_str("sequence"),
+                        extracted_year: get_str("year"),
+                    })
+                }
+                Err(e) => {
+                    // If JSON parse fails, at least return the response as clean title
+                    println!("⚠️ Failed to parse title cleanup JSON: {}", e);
+                    Ok(CleanedTitleResult {
+                        clean_title: cleaned.trim_matches('"').to_string(),
+                        extracted_subtitle: None,
+                        extracted_author: None,
+                        extracted_narrator: None,
+                        extracted_series: None,
+                        extracted_sequence: None,
+                        extracted_year: None,
+                    })
+                }
+            }
+        }
+        Err(e) => Err(format!("GPT API error: {}", e)),
+    }
+}
+
+/// Batch assign tags to multiple books
+pub async fn batch_assign_tags_with_gpt(
+    books: Vec<(String, String, String, Vec<String>, Option<String>, Option<u32>)>, // (id, title, author, genres, description, duration)
+    api_key: &str,
+    concurrency: usize,
+) -> Vec<(String, Result<Vec<String>, String>)> {
+    use futures::stream::{self, StreamExt};
+
+    let results: Vec<_> = stream::iter(books)
+        .map(|(id, title, author, genres, desc, duration)| {
+            let api_key = api_key.to_string();
+            async move {
+                let result = assign_tags_with_gpt(
+                    &title,
+                    &author,
+                    &genres,
+                    desc.as_deref(),
+                    duration,
+                    &api_key,
+                ).await;
+                (id, result)
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+    results
 }
 
 #[cfg(test)]

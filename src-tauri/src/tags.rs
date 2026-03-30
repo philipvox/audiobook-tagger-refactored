@@ -119,6 +119,16 @@ fn write_m4a_tags_sync(
                 // Store publisher (copyright holder often used)
                 tag.set_copyright(&change.new);
             },
+            "age_rating" => {
+                // Store age rating (Childrens, Teens, Young Adult, Adult)
+                tag.remove_data_of(&Fourcc(*b"ager"));
+                tag.add_data(Fourcc(*b"ager"), Data::Utf8(change.new.clone()));
+            },
+            "content_rating" => {
+                // Store content rating (G, PG, PG-13, R, X)
+                tag.remove_data_of(&Fourcc(*b"rtng"));
+                tag.add_data(Fourcc(*b"rtng"), Data::Utf8(change.new.clone()));
+            },
             _ => {}
         }
     }
@@ -219,6 +229,16 @@ fn write_standard_tags_sync(
                 // Store publisher in TPUB frame (standard ID3v2)
                 tag.remove_key(&ItemKey::Publisher);
                 tag.insert_text(ItemKey::Publisher, change.new.clone());
+            },
+            "age_rating" => {
+                // Store age rating in TXXX:AGE-RATING frame
+                tag.remove_key(&ItemKey::Unknown("AGE-RATING".to_string()));
+                tag.insert_text(ItemKey::Unknown("AGE-RATING".to_string()), change.new.clone());
+            },
+            "content_rating" => {
+                // Store content rating in TXXX:CONTENT-RATING frame
+                tag.remove_key(&ItemKey::Unknown("CONTENT-RATING".to_string()));
+                tag.insert_text(ItemKey::Unknown("CONTENT-RATING".to_string()), change.new.clone());
             },
             _ => {}
         }

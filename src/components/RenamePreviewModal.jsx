@@ -71,21 +71,21 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[80vh] overflow-hidden flex flex-col">
-        <div className="p-6 border-b border-gray-200">
+      <div className="bg-neutral-900 rounded-xl shadow-2xl max-w-4xl w-full max-h-[80vh] overflow-hidden flex flex-col">
+        <div className="p-6 border-b border-neutral-800">
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-2xl font-bold text-gray-900">Rename Preview</h2>
-              <p className="text-gray-600 mt-1">Review proposed changes before renaming</p>
+              <h2 className="text-2xl font-bold text-gray-100">Rename Preview</h2>
+              <p className="text-gray-400 mt-1">Review proposed changes before renaming</p>
             </div>
             <FileType className="w-8 h-8 text-gray-400" />
           </div>
         </div>
 
         {/* Template Selection */}
-        <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
+        <div className="px-6 py-4 border-b border-neutral-800 bg-neutral-950">
           <div className="flex items-center gap-4">
-            <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+            <label className="text-sm font-medium text-gray-300 flex items-center gap-2">
               <Settings className="w-4 h-4" />
               Template:
             </label>
@@ -98,7 +98,7 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
                     const template = templates.find(t => t.id === e.target.value);
                     setSelectedTemplate(template);
                   }}
-                  className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="px-3 py-1.5 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 >
                   {templates.map(t => (
                     <option key={t.id} value={t.id}>{t.name}</option>
@@ -110,13 +110,13 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
                     setShowCustom(true);
                     setCustomTemplate(selectedTemplate?.file_template || '');
                   }}
-                  className="px-2 py-1.5 text-xs text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded transition-colors flex items-center gap-1"
+                  className="px-2 py-1.5 text-xs text-blue-600 hover:text-blue-800 hover:bg-blue-900/30 rounded transition-colors flex items-center gap-1"
                 >
                   <Edit3 className="w-3 h-3" />
                   Custom
                 </button>
 
-                <div className="text-xs text-gray-500 ml-2 font-mono truncate flex-1">
+                <div className="text-xs text-gray-400 ml-2 font-mono truncate flex-1">
                   {selectedTemplate?.file_template}
                 </div>
               </div>
@@ -127,11 +127,11 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
                   value={customTemplate}
                   onChange={(e) => setCustomTemplate(e.target.value)}
                   placeholder="{author} - {title}"
-                  className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono"
+                  className="flex-1 px-3 py-1.5 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono"
                 />
                 <button
                   onClick={() => setShowCustom(false)}
-                  className="px-2 py-1.5 text-xs text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded transition-colors"
+                  className="px-2 py-1.5 text-xs text-gray-400 hover:text-gray-200 hover:bg-neutral-800 rounded transition-colors"
                 >
                   Cancel
                 </button>
@@ -140,14 +140,14 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
           </div>
 
           {/* Template help */}
-          <div className="mt-2 text-xs text-gray-500">
+          <div className="mt-2 text-xs text-gray-400">
             <span className="font-medium">Variables:</span>{' '}
-            <code className="bg-gray-200 px-1 rounded">{'{author}'}</code>{' '}
-            <code className="bg-gray-200 px-1 rounded">{'{title}'}</code>{' '}
-            <code className="bg-gray-200 px-1 rounded">{'{series}'}</code>{' '}
-            <code className="bg-gray-200 px-1 rounded">{'{sequence}'}</code>{' '}
-            <code className="bg-gray-200 px-1 rounded">{'{year}'}</code>{' '}
-            <code className="bg-gray-200 px-1 rounded">{'{narrator}'}</code>
+            <code className="bg-gray-600 px-1 rounded">{'{author}'}</code>{' '}
+            <code className="bg-gray-600 px-1 rounded">{'{title}'}</code>{' '}
+            <code className="bg-gray-600 px-1 rounded">{'{series}'}</code>{' '}
+            <code className="bg-gray-600 px-1 rounded">{'{sequence}'}</code>{' '}
+            <code className="bg-gray-600 px-1 rounded">{'{year}'}</code>{' '}
+            <code className="bg-gray-600 px-1 rounded">{'{narrator}'}</code>
           </div>
         </div>
 
@@ -155,7 +155,7 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
           {loading ? (
             <div className="flex items-center justify-center py-12">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-              <span className="ml-3 text-gray-600">Generating previews...</span>
+              <span className="ml-3 text-gray-400">Generating previews...</span>
             </div>
           ) : (
             <div className="space-y-4">
@@ -163,14 +163,14 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
                 <div
                   key={idx}
                   className={`p-4 rounded-lg border-2 ${
-                    preview.changed ? 'bg-blue-50 border-blue-200' : 'bg-gray-50 border-gray-200'
+                    preview.changed ? 'bg-blue-900/30 border-blue-700' : 'bg-neutral-950 border-neutral-800'
                   }`}
                 >
                   {preview.changed ? (
                     <div className="space-y-3">
                       <div className="text-sm">
-                        <div className="text-xs text-gray-500 mb-1">From:</div>
-                        <div className="font-mono text-sm bg-white px-3 py-2 rounded border">
+                        <div className="text-xs text-gray-400 mb-1">From:</div>
+                        <div className="font-mono text-sm bg-neutral-900 px-3 py-2 rounded border">
                           {preview.old_path.split('/').pop()}
                         </div>
                       </div>
@@ -178,14 +178,14 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
                         <ArrowRight className="w-5 h-5 text-blue-600" />
                       </div>
                       <div className="text-sm">
-                        <div className="text-xs text-gray-500 mb-1">To:</div>
+                        <div className="text-xs text-gray-400 mb-1">To:</div>
                         <div className="font-mono text-sm bg-green-50 px-3 py-2 rounded border border-green-200">
                           {preview.new_path.split('/').pop()}
                         </div>
                       </div>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-3 text-sm text-gray-600">
+                    <div className="flex items-center gap-3 text-sm text-gray-400">
                       <CheckCircle className="w-5 h-5 text-gray-400" />
                       No changes needed
                     </div>
@@ -196,13 +196,13 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
           )}
         </div>
 
-        <div className="p-6 border-t border-gray-200 bg-gray-50">
+        <div className="p-6 border-t border-neutral-800 bg-neutral-950">
           <div className="flex items-center justify-between">
-            <div className="text-sm text-gray-600">
+            <div className="text-sm text-gray-400">
               {changedCount > 0 && `${changedCount} file(s) will be renamed`}
             </div>
             <div className="flex gap-3">
-              <button onClick={onCancel} className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors font-medium">
+              <button onClick={onCancel} className="px-4 py-2 text-gray-300 bg-neutral-900 border border-neutral-700 rounded-lg hover:bg-neutral-950 transition-colors font-medium">
                 Cancel
               </button>
               <button
@@ -210,7 +210,7 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
                 disabled={changedCount === 0 || loading}
                 className={`px-4 py-2 rounded-lg font-medium flex items-center gap-2 transition-colors ${
                   changedCount === 0 || loading
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
                     : 'bg-blue-600 text-white hover:bg-blue-700'
                 }`}
               >

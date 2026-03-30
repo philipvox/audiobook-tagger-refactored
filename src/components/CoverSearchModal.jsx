@@ -91,7 +91,7 @@ export function CoverSearchModal({ isOpen, onClose, group, onCoverUpdated }) {
     if (score >= 80) return 'bg-green-100 text-green-800';
     if (score >= 60) return 'bg-blue-100 text-blue-800';
     if (score >= 40) return 'bg-yellow-100 text-yellow-800';
-    return 'bg-gray-100 text-gray-800';
+    return 'bg-neutral-800 text-gray-200';
   };
 
   // Source icon/color
@@ -100,13 +100,13 @@ export function CoverSearchModal({ isOpen, onClose, group, onCoverUpdated }) {
       'iTunes': { bg: 'bg-pink-50', text: 'text-pink-700', icon: '🍎' },
       'Audible': { bg: 'bg-orange-50', text: 'text-orange-700', icon: '🎧' },
       'Amazon': { bg: 'bg-yellow-50', text: 'text-yellow-700', icon: '📦' },
-      'Google Books': { bg: 'bg-blue-50', text: 'text-blue-700', icon: '📚' },
+      'Google Books': { bg: 'bg-blue-900/30', text: 'text-blue-300', icon: '📚' },
     };
     // Check if source starts with any known prefix
     for (const [key, style] of Object.entries(styles)) {
       if (source && source.startsWith(key)) return style;
     }
-    return { bg: 'bg-gray-50', text: 'text-gray-700', icon: '🖼️' };
+    return { bg: 'bg-neutral-950', text: 'text-gray-300', icon: '🖼️' };
   };
 
   // Get size label
@@ -147,12 +147,12 @@ export function CoverSearchModal({ isOpen, onClose, group, onCoverUpdated }) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="p-4 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50 flex-shrink-0">
+      <div className="bg-neutral-900 rounded-xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="p-4 border-b border-neutral-800 bg-gradient-to-r from-blue-900 to-indigo-50 flex-shrink-0">
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-xl font-bold text-gray-900">Find Better Cover</h2>
-              <p className="text-sm text-gray-600 mt-0.5">{group?.metadata.title}</p>
+              <h2 className="text-xl font-bold text-gray-100">Find Better Cover</h2>
+              <p className="text-sm text-gray-400 mt-0.5">{group?.metadata.title}</p>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -161,10 +161,10 @@ export function CoverSearchModal({ isOpen, onClose, group, onCoverUpdated }) {
                 className="p-2 hover:bg-blue-100 rounded-lg transition-colors"
                 title="Refresh search"
               >
-                <RefreshCw className={`w-5 h-5 text-gray-600 ${searching ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`w-5 h-5 text-gray-400 ${searching ? 'animate-spin' : ''}`} />
               </button>
               <button onClick={onClose} className="p-2 hover:bg-blue-100 rounded-lg transition-colors">
-                <X className="w-6 h-6 text-gray-600" />
+                <X className="w-6 h-6 text-gray-400" />
               </button>
             </div>
           </div>
@@ -174,12 +174,12 @@ export function CoverSearchModal({ isOpen, onClose, group, onCoverUpdated }) {
           {searching ? (
             <div className="text-center py-12">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-              <p className="text-gray-600">Searching iTunes, Audible, Google Books...</p>
+              <p className="text-gray-400">Searching iTunes, Audible, Google Books...</p>
             </div>
           ) : uniqueCovers.length === 0 ? (
             <div className="text-center py-12">
               <ImageIcon className="w-16 h-16 text-gray-300 mx-auto mb-4" />
-              <p className="text-gray-600 mb-4">No covers found from online sources</p>
+              <p className="text-gray-400 mb-4">No covers found from online sources</p>
               <button onClick={handleUploadCustom} className="btn btn-primary flex items-center gap-2 mx-auto">
                 <Upload className="w-4 h-4" />
                 Upload Custom Cover
@@ -187,7 +187,7 @@ export function CoverSearchModal({ isOpen, onClose, group, onCoverUpdated }) {
             </div>
           ) : (
             <div className="space-y-4">
-              <div className="flex items-center justify-between text-sm text-gray-600">
+              <div className="flex items-center justify-between text-sm text-gray-400">
                 <span>Found {uniqueCovers.length} cover sources (sorted by quality)</span>
                 {uniqueCovers[0]?.quality_score > 0 && (
                   <span className="flex items-center gap-1">
@@ -224,10 +224,10 @@ export function CoverSearchModal({ isOpen, onClose, group, onCoverUpdated }) {
                 })}
               </div>
 
-              <div className="border-t border-gray-200 pt-4">
+              <div className="border-t border-neutral-800 pt-4">
                 <button
                   onClick={handleUploadCustom}
-                  className="w-full px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+                  className="w-full px-4 py-3 bg-neutral-800 hover:bg-neutral-700 text-gray-300 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
                 >
                   <Upload className="w-4 h-4" />
                   Upload Custom Cover Instead
@@ -260,12 +260,12 @@ function CoverCard({
   return (
     <div
       className={`border rounded-lg overflow-hidden hover:shadow-lg transition-shadow ${
-        isBest ? 'border-green-300 ring-2 ring-green-100' : 'border-gray-200'
+        isBest ? 'border-green-300 ring-2 ring-green-100' : 'border-neutral-800'
       }`}
     >
       {/* Square aspect ratio container */}
       <div
-        className="w-full bg-gray-100 relative"
+        className="w-full bg-neutral-800 relative"
         style={{ aspectRatio: '1 / 1' }}
       >
         {isBest && (
@@ -286,7 +286,7 @@ function CoverCard({
         </div>
       </div>
 
-      <div className="p-3 bg-white flex-1 flex flex-col">
+      <div className="p-3 bg-neutral-900 flex-1 flex flex-col">
         {/* Source and Quality badges */}
         <div className="flex items-start justify-between mb-2">
           <div className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium ${sourceStyle.bg} ${sourceStyle.text}`}>
@@ -305,17 +305,17 @@ function CoverCard({
           <div className="relative mb-2">
             <button
               onClick={() => setShowDropdown(!showDropdown)}
-              className="w-full flex items-center justify-between px-2 py-1.5 bg-gray-50 border border-gray-200 rounded text-xs hover:bg-gray-100 transition-colors"
+              className="w-full flex items-center justify-between px-2 py-1.5 bg-neutral-950 border border-neutral-800 rounded text-xs hover:bg-neutral-800 transition-colors"
             >
               <span className="flex items-center gap-2">
                 <span className="font-medium">{selectedResolution.width}×{selectedResolution.height}</span>
-                <span className="text-gray-500">{getSizeLabel(selectedResolution.width, selectedResolution.height)}</span>
+                <span className="text-gray-400">{getSizeLabel(selectedResolution.width, selectedResolution.height)}</span>
               </span>
               <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
             </button>
 
             {showDropdown && (
-              <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-40 overflow-y-auto">
+              <div className="absolute top-full left-0 right-0 mt-1 bg-neutral-900 border border-neutral-800 rounded-lg shadow-lg z-20 max-h-40 overflow-y-auto">
                 {resolutionOptions.map((res, i) => (
                   <button
                     key={i}
@@ -323,13 +323,13 @@ function CoverCard({
                       setSelectedResolution(res);
                       setShowDropdown(false);
                     }}
-                    className={`w-full px-3 py-2 text-left text-xs hover:bg-gray-50 flex items-center justify-between ${
-                      res.url === selectedResolution.url ? 'bg-blue-50' : ''
+                    className={`w-full px-3 py-2 text-left text-xs hover:bg-neutral-950 flex items-center justify-between ${
+                      res.url === selectedResolution.url ? 'bg-blue-900/30' : ''
                     }`}
                   >
                     <div>
                       <span className="font-medium">{res.width}×{res.height}</span>
-                      <span className="text-gray-500 ml-2">{getSizeLabel(res.width, res.height)}</span>
+                      <span className="text-gray-400 ml-2">{getSizeLabel(res.width, res.height)}</span>
                     </div>
                     {res.url === selectedResolution.url && (
                       <Check className="w-4 h-4 text-blue-600" />
@@ -340,7 +340,7 @@ function CoverCard({
             )}
           </div>
         ) : (
-          <div className="text-xs text-gray-500 mb-2">
+          <div className="text-xs text-gray-400 mb-2">
             {selectedResolution.width > 0 && `${selectedResolution.width}×${selectedResolution.height}`}
           </div>
         )}
@@ -351,7 +351,7 @@ function CoverCard({
           disabled={downloading}
           className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2 mt-auto ${
             downloading && selectedUrl === selectedResolution.url
-              ? 'bg-gray-300 cursor-not-allowed text-gray-500'
+              ? 'bg-gray-600 cursor-not-allowed text-gray-400'
               : isBest
                 ? 'bg-green-600 hover:bg-green-700 text-white'
                 : 'bg-blue-600 hover:bg-blue-700 text-white'

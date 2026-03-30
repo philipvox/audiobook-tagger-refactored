@@ -18,6 +18,18 @@ pub mod genres;
 pub mod converter;
 pub mod custom_providers;
 pub mod pipeline;
+pub mod bulk_covers;
+pub mod abs_cache;
+pub mod title_resolver;
+pub mod alignment;
+pub mod validation;
+pub mod series_analysis;
+pub mod age_rating;
+pub mod isbn;
+pub mod book_dna;
+pub mod classify;
+pub mod gather;
+pub mod authors;
 
 // Re-export all commands for easy access
 // pub use config::*;

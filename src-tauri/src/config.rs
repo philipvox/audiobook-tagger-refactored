@@ -57,6 +57,14 @@ pub struct Config {
     #[serde(default)]
     pub concurrency_file_scan: Option<usize>,
 
+    // AI model selection
+    #[serde(default = "default_ai_model")]
+    pub ai_model: String,
+
+    // Age rating with web search (uses GPT to lookup book on Goodreads)
+    #[serde(default)]
+    pub enable_age_rating_lookup: bool,
+
     // Custom metadata providers (abs-agg, etc.)
     #[serde(default = "default_custom_providers")]
     pub custom_providers: Vec<CustomProvider>,
@@ -64,6 +72,10 @@ pub struct Config {
 
 fn default_preset() -> String {
     "balanced".to_string()
+}
+
+fn default_ai_model() -> String {
+    "gpt-5.4-nano".to_string()
 }
 
 /// Default custom providers - abs-agg community providers
@@ -144,6 +156,8 @@ impl Default for Config {
             concurrency_json_writes: None,
             concurrency_abs_push: None,
             concurrency_file_scan: None,
+            ai_model: default_ai_model(),
+            enable_age_rating_lookup: false,  // Disabled by default (uses extra API calls)
             custom_providers: default_custom_providers(),
         }
     }
@@ -219,7 +233,7 @@ impl Config {
             scale(15),  // metadata
             scale(5),   // super_scanner
             scale(100), // json_writes
-            scale(60),  // abs_push
+            scale(5),   // abs_push - keep low to prevent ABS memory issues
             scale(10),  // file_scan
         )
     }

@@ -280,13 +280,13 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+      <div className="bg-neutral-900 rounded-xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col">
         {/* Header */}
-        <div className="p-4 border-b border-gray-200 bg-gradient-to-r from-purple-50 to-indigo-50 flex-shrink-0">
+        <div className="p-4 border-b border-neutral-800 bg-gradient-to-r from-purple-50 to-indigo-50 flex-shrink-0">
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-xl font-bold text-gray-900">Bulk Cover Assignment</h2>
-              <p className="text-sm text-gray-600 mt-0.5">
+              <h2 className="text-xl font-bold text-gray-100">Bulk Cover Assignment</h2>
+              <p className="text-sm text-gray-400 mt-0.5">
                 {selectedGroups.length} books selected • {assignedCount} covers assigned
               </p>
             </div>
@@ -294,14 +294,14 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
               {droppedImages.length > 0 && (
                 <button
                   onClick={reAutoMatch}
-                  className="px-3 py-1.5 bg-white border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
+                  className="px-3 py-1.5 bg-neutral-900 border border-neutral-700 text-gray-300 rounded-lg text-sm hover:bg-neutral-950 flex items-center gap-2"
                 >
                   <Sparkles className="w-4 h-4" />
                   Re-match
                 </button>
               )}
               <button onClick={onClose} className="p-2 hover:bg-purple-100 rounded-lg transition-colors">
-                <X className="w-6 h-6 text-gray-600" />
+                <X className="w-6 h-6 text-gray-400" />
               </button>
             </div>
           </div>
@@ -310,23 +310,23 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
         {/* Main content */}
         <div className="flex-1 overflow-hidden flex">
           {/* Left: Drop zone & images */}
-          <div className="w-1/2 border-r border-gray-200 flex flex-col">
+          <div className="w-1/2 border-r border-neutral-800 flex flex-col">
             {/* Drop zone */}
             <div
               className={`m-4 mb-2 border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
                 isDragging
                   ? 'border-purple-500 bg-purple-50'
-                  : 'border-gray-300 hover:border-purple-400'
+                  : 'border-neutral-700 hover:border-purple-400'
               }`}
               onDrop={handleDrop}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
             >
               <Upload className={`w-10 h-10 mx-auto mb-3 ${isDragging ? 'text-purple-500' : 'text-gray-400'}`} />
-              <p className="text-sm text-gray-600 mb-2">
+              <p className="text-sm text-gray-400 mb-2">
                 Drop cover images here
               </p>
-              <p className="text-xs text-gray-500 mb-3">
+              <p className="text-xs text-gray-400 mb-3">
                 Filenames will be matched to book titles
               </p>
               <button
@@ -340,7 +340,7 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
             {/* Dropped images grid */}
             <div className="flex-1 overflow-y-auto p-4 pt-2">
               {droppedImages.length === 0 ? (
-                <div className="text-center py-8 text-gray-500 text-sm">
+                <div className="text-center py-8 text-gray-400 text-sm">
                   No images added yet
                 </div>
               ) : (
@@ -353,10 +353,10 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
                       <div
                         key={idx}
                         className={`relative group rounded-lg overflow-hidden border-2 ${
-                          isAssigned ? 'border-green-400 bg-green-50' : 'border-gray-200'
+                          isAssigned ? 'border-green-400 bg-green-50' : 'border-neutral-800'
                         }`}
                       >
-                        <div className="aspect-square bg-gray-100">
+                        <div className="aspect-square bg-neutral-800">
                           <img
                             src={img.url}
                             alt={img.name}
@@ -376,7 +376,7 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
                             <Check className="w-3 h-3 text-white" />
                           </div>
                         )}
-                        <div className="p-1.5 text-[10px] text-gray-600 truncate bg-white">
+                        <div className="p-1.5 text-[10px] text-gray-400 truncate bg-neutral-900">
                           {img.name}
                         </div>
                       </div>
@@ -390,8 +390,8 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
           {/* Right: Books list */}
           <div className="w-1/2 flex flex-col">
             <div className="p-4 pb-2">
-              <h3 className="font-semibold text-gray-900">Books to Assign</h3>
-              <p className="text-xs text-gray-500">Click an image thumbnail to change assignment</p>
+              <h3 className="font-semibold text-gray-100">Books to Assign</h3>
+              <p className="text-xs text-gray-400">Click an image thumbnail to change assignment</p>
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 pt-2">
@@ -406,12 +406,12 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
                       className={`p-3 rounded-lg border ${
                         assignment
                           ? 'border-green-200 bg-green-50'
-                          : 'border-gray-200 bg-white'
+                          : 'border-neutral-800 bg-neutral-900'
                       }`}
                     >
                       <div className="flex items-center gap-3">
                         {/* Assigned cover or placeholder */}
-                        <div className="w-12 h-12 bg-gray-100 rounded flex-shrink-0 overflow-hidden flex items-center justify-center">
+                        <div className="w-12 h-12 bg-neutral-800 rounded flex-shrink-0 overflow-hidden flex items-center justify-center">
                           {assignedImage ? (
                             <img
                               src={assignedImage.url}
@@ -425,10 +425,10 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
 
                         {/* Book info */}
                         <div className="flex-1 min-w-0">
-                          <div className="font-medium text-sm text-gray-900 truncate">
+                          <div className="font-medium text-sm text-gray-100 truncate">
                             {group.metadata?.title || 'Untitled'}
                           </div>
-                          <div className="text-xs text-gray-500 truncate">
+                          <div className="text-xs text-gray-400 truncate">
                             {group.metadata?.author || 'Unknown Author'}
                           </div>
                           {assignment && (
@@ -454,7 +454,7 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
                                   assignImage(group.id, parseInt(val));
                                 }
                               }}
-                              className="text-xs border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                              className="text-xs border border-neutral-700 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-500"
                             >
                               <option value="">No cover</option>
                               {droppedImages.map((img, i) => (
@@ -476,8 +476,8 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
         </div>
 
         {/* Footer */}
-        <div className="p-4 border-t border-gray-200 bg-gray-50 flex items-center justify-between">
-          <div className="text-sm text-gray-600">
+        <div className="p-4 border-t border-neutral-800 bg-neutral-950 flex items-center justify-between">
+          <div className="text-sm text-gray-400">
             {unassignedBooks.length > 0 && (
               <span className="text-amber-600 flex items-center gap-1">
                 <AlertCircle className="w-4 h-4" />
@@ -485,7 +485,7 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
               </span>
             )}
             {unassignedImages.length > 0 && unassignedBooks.length === 0 && (
-              <span className="text-gray-500">
+              <span className="text-gray-400">
                 {unassignedImages.length} unused image{unassignedImages.length !== 1 ? 's' : ''}
               </span>
             )}
@@ -494,7 +494,7 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
           <div className="flex items-center gap-3">
             <button
               onClick={onClose}
-              className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+              className="px-4 py-2 bg-neutral-900 border border-neutral-700 text-gray-300 rounded-lg hover:bg-neutral-950 transition-colors"
             >
               Cancel
             </button>

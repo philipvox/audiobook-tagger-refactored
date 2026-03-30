@@ -2,303 +2,260 @@ use serde::{Serialize, Deserialize};
 use anyhow::Result;
 use std::collections::HashMap;
 
-/// Primary approved genres for audiobook categorization
-/// These are the genres that will be written to file tags
+// =============================================================================
+// TAXONOMY: Genres & Tags for Secret Library
+// Based on /root/TAXONOMY.md on server
+// =============================================================================
+
+/// Primary GENRES for audiobook categorization (1-3 per book)
+/// These are the main browsing categories
 pub const APPROVED_GENRES: &[&str] = &[
     // Fiction Genres
-    "Action", "Adventure", "Anthology", "Chick Lit", "Classic", "Collection",
-    "Comedy", "Coming of Age", "Contemporary", "Crime", "Drama", "Dystopian",
-    "Erotica", "Family Saga", "Fantasy", "Fiction", "Gothic", "Historical Fiction",
-    "Horror", "Humor", "Legal Thriller", "Literary Fiction", "Magic", "Military",
-    "Mystery", "Mythology", "Paranormal", "Political Thriller", "Post-Apocalyptic",
-    "Psychological Thriller", "Romance", "Satire", "Science Fiction", "Short Stories",
-    "Spy", "Supernatural", "Suspense", "Techno-Thriller", "Thriller", "Time Travel",
-    "Urban Fantasy", "War", "Western", "Women's Fiction",
+    "Literary Fiction",
+    "Contemporary Fiction",
+    "Historical Fiction",
+    "Classics",
+    "Mystery",
+    "Thriller",
+    "Crime",
+    "Horror",
+    "Romance",
+    "Fantasy",
+    "Science Fiction",
+    "Western",
+    "Adventure",
+    "Humor",
+    "Satire",
+    "Women's Fiction",
+    "LGBTQ+ Fiction",
+    "Short Stories",
+    "Anthology",
 
     // Non-Fiction Genres
-    "Arts", "Autobiography", "Biography", "Business", "Cooking", "Current Events",
-    "Economics", "Education", "Essays", "Gardening", "Health", "History", "Humor",
-    "Journalism", "LGBTQ+", "Memoir", "Music", "Nature", "Non-Fiction", "Parenting",
-    "Philosophy", "Photography", "Poetry", "Politics", "Psychology", "Reference",
-    "Religion", "Science", "Self-Help", "Social Science", "Spirituality", "Sports",
-    "Technology", "Travel", "True Crime",
+    "Biography",
+    "Autobiography",
+    "Memoir",
+    "History",
+    "True Crime",
+    "Science",
+    "Popular Science",
+    "Psychology",
+    "Self-Help",
+    "Business",
+    "Personal Finance",
+    "Health & Wellness",
+    "Philosophy",
+    "Religion & Spirituality",
+    "Politics",
+    "Essays",
+    "Journalism",
+    "Travel",
+    "Food & Cooking",
+    "Nature",
+    "Sports",
+    "Music",
+    "Art",
+    "Education",
+    "Parenting & Family",
+    "Relationships",
+    "Non-Fiction",
 
-    // Children's Age Categories (IMPORTANT - these are mutually exclusive)
-    "Children's 0-2",      // Baby/Toddler books
-    "Children's 3-5",      // Preschool/Kindergarten
-    "Children's 6-8",      // Early Reader/Chapter Books
-    "Children's 9-12",     // Middle Grade
-    "Teen 13-17",          // Young Adult / Teen
+    // Audience Categories
+    "Young Adult",
+    "Middle Grade",
+    "Children's",
+    "New Adult",
+    "Adult",
 
-    // Legacy age categories (for backwards compatibility)
-    "Children's", "Middle Grade", "Teen", "Young Adult", "Adult", "New Adult",
+    // Children's Age-Specific (for detailed categorization)
+    "Children's 0-2",
+    "Children's 3-5",
+    "Children's 6-8",
+    "Children's 9-12",
+    "Teen 13-17",
 
-    // Format/Style
-    "Graphic Novel", "Comics", "Manga",
+    // Format (Optional)
+    "Audiobook Original",
+    "Full Cast Production",
+    "Dramatized",
+    "Podcast Fiction",
 ];
 
-/// Children's series with known age ranges
-pub fn get_children_series_ages() -> std::collections::HashMap<&'static str, &'static str> {
-    let mut map = std::collections::HashMap::new();
+/// TAGS - Descriptive metadata (5-15 per book, lowercase-hyphenated)
+pub const APPROVED_TAGS: &[&str] = &[
+    // Sub-Genre: Mystery & Thriller
+    "cozy-mystery", "police-procedural", "legal-thriller", "medical-thriller",
+    "techno-thriller", "spy", "domestic-thriller", "noir", "hardboiled",
+    "amateur-sleuth", "locked-room", "whodunit", "heist", "cold-case", "forensic",
 
-    // Ages 0-2 (Baby/Toddler)
-    map.insert("goodnight moon", "Children's 0-2");
-    map.insert("pat the bunny", "Children's 0-2");
-    map.insert("brown bear", "Children's 0-2");
-    map.insert("eric carle", "Children's 0-2");
-    map.insert("sandra boynton", "Children's 0-2");
+    // Sub-Genre: Romance
+    "rom-com", "contemporary-romance", "historical-romance", "paranormal-romance",
+    "fantasy-romance", "romantasy", "dark-romance", "clean-romance", "sports-romance",
+    "military-romance", "royal-romance", "billionaire-romance", "small-town-romance",
+    "holiday-romance", "workplace-romance",
 
-    // Ages 3-5 (Preschool)
-    map.insert("curious george", "Children's 3-5");
-    map.insert("peppa pig", "Children's 3-5");
-    map.insert("paw patrol", "Children's 3-5");
-    map.insert("llama llama", "Children's 3-5");
-    map.insert("pete the cat", "Children's 3-5");
-    map.insert("elephant and piggie", "Children's 3-5");
-    map.insert("mo willems", "Children's 3-5");
-    map.insert("dr. seuss", "Children's 3-5");
-    map.insert("dr seuss", "Children's 3-5");
-    map.insert("clifford", "Children's 3-5");
-    map.insert("berenstain bears", "Children's 3-5");
-    map.insert("arthur", "Children's 3-5");
-    map.insert("disney princess", "Children's 3-5");
-    map.insert("disney frozen", "Children's 3-5");
+    // Sub-Genre: Fantasy
+    "epic-fantasy", "urban-fantasy", "dark-fantasy", "high-fantasy", "low-fantasy",
+    "sword-and-sorcery", "portal-fantasy", "cozy-fantasy", "grimdark",
+    "progression-fantasy", "cultivation", "litrpg", "gamelit", "mythic-fantasy",
+    "gaslamp-fantasy", "fairy-tale-retelling",
 
-    // Ages 6-8 (Early Reader/Chapter Books)
-    map.insert("magic tree house", "Children's 6-8");
-    map.insert("junie b. jones", "Children's 6-8");
-    map.insert("ivy + bean", "Children's 6-8");
-    map.insert("dogman", "Children's 6-8");
-    map.insert("dog man", "Children's 6-8");
-    map.insert("captain underpants", "Children's 6-8");
-    map.insert("dork diaries", "Children's 6-8");
-    map.insert("diary of a wimpy kid", "Children's 6-8");
-    map.insert("bad guys", "Children's 6-8");
-    map.insert("geronimo stilton", "Children's 6-8");
-    map.insert("cam jansen", "Children's 6-8");
-    map.insert("nate the great", "Children's 6-8");
-    map.insert("a to z mysteries", "Children's 6-8");
-    map.insert("flat stanley", "Children's 6-8");
-    map.insert("rainbow magic", "Children's 6-8");
-    map.insert("fancy nancy", "Children's 6-8");
-    map.insert("fly guy", "Children's 6-8");
-    map.insert("wings of fire", "Children's 6-8");
-    map.insert("babysitters club", "Children's 6-8");
+    // Sub-Genre: Science Fiction
+    "space-opera", "dystopian", "post-apocalyptic", "cyberpunk", "biopunk",
+    "steampunk", "hard-sci-fi", "soft-sci-fi", "military-sci-fi", "time-travel",
+    "first-contact", "alien-invasion", "climate-fiction", "alternate-history",
+    "near-future",
 
-    // Ages 9-12 (Middle Grade)
-    map.insert("percy jackson", "Children's 9-12");
-    map.insert("heroes of olympus", "Children's 9-12");
-    map.insert("kane chronicles", "Children's 9-12");
-    map.insert("rick riordan", "Children's 9-12");
-    map.insert("harry potter", "Children's 9-12");
-    map.insert("narnia", "Children's 9-12");
-    map.insert("chronicles of narnia", "Children's 9-12");
-    map.insert("land of stories", "Children's 9-12");
-    map.insert("keeper of the lost cities", "Children's 9-12");
-    map.insert("nevermoor", "Children's 9-12");
-    map.insert("rangers apprentice", "Children's 9-12");
-    map.insert("ranger's apprentice", "Children's 9-12");
-    map.insert("warriors", "Children's 9-12"); // Warrior Cats
-    map.insert("warrior cats", "Children's 9-12");
-    map.insert("redwall", "Children's 9-12");
-    map.insert("spiderwick", "Children's 9-12");
-    map.insert("how to train your dragon", "Children's 9-12");
-    map.insert("eragon", "Children's 9-12");
-    map.insert("inheritance cycle", "Children's 9-12");
-    map.insert("artemis fowl", "Children's 9-12");
-    map.insert("fablehaven", "Children's 9-12");
-    map.insert("alex rider", "Children's 9-12");
-    map.insert("goosebumps", "Children's 9-12");
-    map.insert("animorphs", "Children's 9-12");
-    map.insert("hatchet", "Children's 9-12");
-    map.insert("holes", "Children's 9-12");
-    map.insert("wonder", "Children's 9-12");
-    map.insert("matilda", "Children's 9-12");
-    map.insert("roald dahl", "Children's 9-12");
-    map.insert("charlie and the chocolate factory", "Children's 9-12");
-    map.insert("bfg", "Children's 9-12");
-    map.insert("lemony snicket", "Children's 9-12");
-    map.insert("series of unfortunate events", "Children's 9-12");
+    // Sub-Genre: Horror
+    "gothic", "supernatural", "cosmic-horror", "psychological-horror", "folk-horror",
+    "body-horror", "slasher", "haunted-house", "creature-feature", "occult",
+    "southern-gothic",
 
-    // Ages 13-17 (Teen/Young Adult)
-    map.insert("hunger games", "Teen 13-17");
-    map.insert("divergent", "Teen 13-17");
-    map.insert("maze runner", "Teen 13-17");
-    map.insert("twilight", "Teen 13-17");
-    map.insert("throne of glass", "Teen 13-17");
-    map.insert("sarah j maas", "Teen 13-17");
-    map.insert("court of thorns and roses", "Teen 13-17");
-    map.insert("acotar", "Teen 13-17");
-    map.insert("six of crows", "Teen 13-17");
-    map.insert("shadow and bone", "Teen 13-17");
-    map.insert("leigh bardugo", "Teen 13-17");
-    map.insert("mortal instruments", "Teen 13-17");
-    map.insert("cassandra clare", "Teen 13-17");
-    map.insert("shadowhunters", "Teen 13-17");
-    map.insert("red queen", "Teen 13-17");
-    map.insert("the fault in our stars", "Teen 13-17");
-    map.insert("john green", "Teen 13-17");
-    map.insert("looking for alaska", "Teen 13-17");
-    map.insert("perks of being a wallflower", "Teen 13-17");
-    map.insert("to all the boys", "Teen 13-17");
-    map.insert("hate u give", "Teen 13-17");
-    map.insert("children of blood and bone", "Teen 13-17");
-    map.insert("legendborn", "Teen 13-17");
-    map.insert("daughter of the moon goddess", "Teen 13-17");
-    map.insert("house of salt and sorrows", "Teen 13-17");
-    map.insert("shatter me", "Teen 13-17");
-    map.insert("cinder", "Teen 13-17");
-    map.insert("lunar chronicles", "Teen 13-17");
-    map.insert("vampire academy", "Teen 13-17");
+    // Mood Tags
+    "adventurous", "atmospheric", "bittersweet", "cathartic", "cozy", "dark",
+    "emotional", "feel-good", "funny", "haunting", "heartbreaking", "heartwarming",
+    "hopeful", "inspiring", "intense", "lighthearted", "melancholic", "mysterious",
+    "nostalgic", "reflective", "romantic", "sad", "suspenseful", "tense",
+    "thought-provoking", "unsettling", "uplifting", "whimsical",
 
-    map
-}
+    // Pacing Tags
+    "fast-paced", "slow-burn", "medium-paced", "page-turner", "unputdownable",
+    "leisurely", "action-packed",
 
-/// Detect the appropriate age category from title, series, or author
-pub fn detect_children_age_category(title: &str, series: Option<&str>, author: Option<&str>) -> Option<String> {
-    let series_ages = get_children_series_ages();
+    // Style Tags
+    "character-driven", "plot-driven", "dialogue-heavy", "descriptive", "lyrical",
+    "sparse-prose", "unreliable-narrator", "multiple-pov", "dual-timeline",
+    "epistolary", "first-person", "third-person", "nonlinear",
 
-    // Combine all text to search
-    let search_text = format!(
-        "{} {} {}",
-        title.to_lowercase(),
-        series.unwrap_or("").to_lowercase(),
-        author.unwrap_or("").to_lowercase()
-    );
+    // Romance Tropes
+    "enemies-to-lovers", "friends-to-lovers", "strangers-to-lovers", "second-chance",
+    "forced-proximity", "fake-relationship", "marriage-of-convenience",
+    "forbidden-love", "love-triangle", "grumpy-sunshine", "opposites-attract",
+    "he-falls-first", "she-falls-first", "only-one-bed", "age-gap", "boss-employee",
+    "single-parent", "secret-identity", "arranged-marriage", "mutual-pining",
 
-    // Check against known series/authors
-    for (keyword, age_category) in series_ages.iter() {
-        if search_text.contains(keyword) {
-            return Some(age_category.to_string());
-        }
-    }
+    // General Story Tropes
+    "found-family", "chosen-one", "reluctant-hero", "antihero", "morally-grey",
+    "villain-origin", "redemption-arc", "revenge", "quest", "survival", "underdog",
+    "fish-out-of-water", "hidden-identity", "mistaken-identity", "rags-to-riches",
+    "mentor-figure", "prophecy", "coming-of-age", "self-discovery", "starting-over",
 
-    None
-}
+    // Creature/Being Tags
+    "vampires", "werewolves", "shifters", "fae", "witches", "demons", "angels",
+    "ghosts", "dragons", "mermaids", "gods", "monsters", "aliens", "zombies",
+    "psychics", "magic-users", "immortals",
 
-/// Ensure children's books have proper age-specific genres
-/// This should be called after GPT processing to enforce age categories
-pub fn enforce_children_age_genres(
-    genres: &mut Vec<String>,
-    title: &str,
-    series: Option<&str>,
-    author: Option<&str>,
-) {
-    // Check if we can detect the age category
-    if let Some(age_genre) = detect_children_age_category(title, series, author) {
-        // Remove generic children's/ya/middle grade tags and replace with specific age
-        genres.retain(|g| {
-            let lower = g.to_lowercase();
-            !lower.contains("children") &&
-            !lower.contains("middle grade") &&
-            lower != "young adult" &&
-            lower != "teen" &&
-            lower != "ya"
-        });
+    // Setting Tags
+    "small-town", "big-city", "rural", "coastal", "island", "cabin", "castle",
+    "palace", "academy", "college", "high-school", "office", "hospital",
+    "courtroom", "military-base", "space-station", "spaceship", "forest",
+    "desert", "mountains", "arctic", "tropical",
 
-        // Add the specific age genre if not already present
-        if !genres.iter().any(|g| g == &age_genre) {
-            // Insert at beginning for priority
-            genres.insert(0, age_genre);
-        }
+    // Historical Period Tags
+    "regency", "victorian", "medieval", "ancient", "renaissance", "tudor", "viking",
+    "1920s", "1950s", "1960s", "1970s", "1980s", "wwi", "wwii", "civil-war",
 
-        // Limit to 3 genres
-        genres.truncate(3);
-    }
-}
+    // Theme Tags
+    "family", "friendship", "grief", "healing", "identity", "justice", "love",
+    "loyalty", "power", "sacrifice", "survival", "trauma", "war", "class", "race",
+    "gender", "disability", "mental-health", "addiction", "faith", "forgiveness",
+    "hope", "loss", "marriage", "divorce", "aging", "death",
 
-/// Map legacy age categories to new age-specific ones based on context
-pub fn upgrade_legacy_age_genre(genre: &str, title: &str, series: Option<&str>) -> String {
-    let lower = genre.to_lowercase();
+    // Content Level Tags
+    "clean", "fade-to-black", "mild-steam", "steamy", "explicit",
+    "low-violence", "moderate-violence", "graphic-violence",
+    "clean-language", "mild-language", "strong-language",
 
-    // If already specific, return as-is
-    if lower.starts_with("children's ") && lower.chars().any(|c| c.is_ascii_digit()) {
-        return genre.to_string();
-    }
-    if lower.starts_with("teen ") && lower.chars().any(|c| c.is_ascii_digit()) {
-        return genre.to_string();
-    }
+    // Audiobook-Specific: Production
+    "full-cast", "single-narrator", "dual-narrators", "author-narrated",
+    "celebrity-narrator", "dramatized", "sound-effects",
 
-    // Try to detect specific age
-    if let Some(specific) = detect_children_age_category(title, series, None) {
-        return specific;
-    }
+    // Audiobook-Specific: Narrator Voice
+    "male-narrator", "female-narrator", "multiple-narrators",
+    "great-character-voices", "soothing-narrator",
 
-    // Default mappings for generic categories
-    match lower.as_str() {
-        "children's" | "children" | "kids" => "Children's 6-8".to_string(), // Safe default
-        "middle grade" => "Children's 9-12".to_string(),
-        "young adult" | "ya" | "teen" => "Teen 13-17".to_string(),
-        _ => genre.to_string(),
-    }
-}
+    // Audiobook-Specific: Listening Experience
+    "good-for-commute", "good-for-sleep", "good-for-roadtrip",
+    "requires-focus", "easy-listening", "great-reread",
+
+    // Audiobook-Specific: Length
+    "under-5-hours", "5-10-hours", "10-15-hours", "15-20-hours", "over-20-hours",
+
+    // Series Tags
+    "standalone", "in-series", "duology", "trilogy", "long-series",
+
+    // Age Rating Tags
+    "age-childrens", "age-middle-grade", "age-teens", "age-young-adult", "age-adult",
+
+    // Audience Intent Tags
+    "for-kids", "for-teens", "for-ya", "not-for-kids",
+
+    // Content Rating Tags (movie-style)
+    "rated-g", "rated-pg", "rated-pg13", "rated-r", "rated-x",
+
+    // Reading Age Recommendation Tags
+    "age-rec-all", "age-rec-0", "age-rec-3", "age-rec-4", "age-rec-6", "age-rec-8", "age-rec-10",
+    "age-rec-12", "age-rec-14", "age-rec-16", "age-rec-18",
+
+    // Award/Recognition Tags
+    "bestseller", "award-winner", "critically-acclaimed", "debut", "classic",
+    "cult-favorite",
+];
 
 /// Genre aliases - maps alternative names to approved genres
 fn get_genre_aliases() -> HashMap<&'static str, &'static str> {
     let mut map = HashMap::new();
 
-    // Common aliases
+    // Common fiction aliases
     map.insert("sci-fi", "Science Fiction");
     map.insert("scifi", "Science Fiction");
     map.insert("sf", "Science Fiction");
+    map.insert("literary", "Literary Fiction");
+    map.insert("general fiction", "Literary Fiction");
+    map.insert("fiction", "Literary Fiction");
+
+    // Non-fiction aliases
+    map.insert("nonfiction", "Non-Fiction");
+    map.insert("non fiction", "Non-Fiction");
+    map.insert("bio", "Biography");
+    map.insert("autobio", "Autobiography");
+    map.insert("auto-biography", "Autobiography");
+    map.insert("memoirs", "Memoir");
     map.insert("personal development", "Self-Help");
     map.insert("self improvement", "Self-Help");
-    map.insert("literary fiction", "Literary Fiction");
-    map.insert("literary", "Literary Fiction");
+    map.insert("self help", "Self-Help");
 
     // Age-specific mappings
-    map.insert("ya", "Teen 13-17");
-    map.insert("young-adult", "Teen 13-17");
-    map.insert("ya fiction", "Teen 13-17");
-    map.insert("young adult", "Teen 13-17");
-    map.insert("teen fiction", "Teen 13-17");
-    map.insert("children", "Children's 6-8");
-    map.insert("kids", "Children's 6-8");
-    map.insert("juvenile", "Children's 6-8");
-    map.insert("juvenile fiction", "Children's 6-8");
+    map.insert("ya", "Young Adult");
+    map.insert("young-adult", "Young Adult");
+    map.insert("ya fiction", "Young Adult");
+    map.insert("teen fiction", "Young Adult");
+    map.insert("teen", "Young Adult");
+    map.insert("children", "Children's");
+    map.insert("kids", "Children's");
+    map.insert("juvenile", "Children's");
+    map.insert("juvenile fiction", "Children's");
     map.insert("picture book", "Children's 3-5");
     map.insert("picture books", "Children's 3-5");
     map.insert("early reader", "Children's 6-8");
     map.insert("early readers", "Children's 6-8");
     map.insert("chapter book", "Children's 6-8");
     map.insert("chapter books", "Children's 6-8");
-    map.insert("middle grade", "Children's 9-12");
-    map.insert("middle-grade", "Children's 9-12");
-    map.insert("mg", "Children's 9-12");
-
-    map.insert("nonfiction", "Non-Fiction");
-    map.insert("non fiction", "Non-Fiction");
-    map.insert("bio", "Biography");
-    map.insert("autobio", "Autobiography");
-    map.insert("auto-biography", "Autobiography");
-    map.insert("memoir", "Memoir");
-    map.insert("memoirs", "Memoir");
-
-    // Fantasy subgenres
-    map.insert("epic fantasy", "Fantasy");
-    map.insert("high fantasy", "Fantasy");
-    map.insert("dark fantasy", "Fantasy");
-    map.insert("sword and sorcery", "Fantasy");
-    map.insert("fairytale", "Fantasy");
-    map.insert("fairy tale", "Fantasy");
-
-    // Science Fiction subgenres
-    map.insert("space opera", "Science Fiction");
-    map.insert("hard sci-fi", "Science Fiction");
-    map.insert("cyberpunk", "Science Fiction");
-    map.insert("steampunk", "Science Fiction");
-    map.insert("military sci-fi", "Science Fiction");
+    map.insert("middle grade", "Middle Grade");
+    map.insert("middle-grade", "Middle Grade");
+    map.insert("mg", "Middle Grade");
 
     // Thriller subgenres
+    map.insert("suspense", "Thriller");
     map.insert("suspense thriller", "Thriller");
     map.insert("action thriller", "Thriller");
-    map.insert("medical thriller", "Thriller");
+    map.insert("psychological thriller", "Thriller");
 
-    // Romance subgenres
+    // Romance subgenres (map to Romance genre, tags handle subgenre)
     map.insert("romantic suspense", "Romance");
     map.insert("contemporary romance", "Romance");
     map.insert("historical romance", "Romance");
-    map.insert("paranormal romance", "Paranormal");
+    map.insert("paranormal romance", "Romance");
     map.insert("romantic comedy", "Romance");
 
     // Mystery subgenres
@@ -314,198 +271,77 @@ fn get_genre_aliases() -> HashMap<&'static str, &'static str> {
     map.insert("dark fiction", "Horror");
     map.insert("ghost story", "Horror");
 
+    // Fantasy subgenres
+    map.insert("epic fantasy", "Fantasy");
+    map.insert("high fantasy", "Fantasy");
+    map.insert("dark fantasy", "Fantasy");
+    map.insert("urban fantasy", "Fantasy");
+    map.insert("sword and sorcery", "Fantasy");
+    map.insert("fairytale", "Fantasy");
+    map.insert("fairy tale", "Fantasy");
+
+    // Science Fiction subgenres
+    map.insert("space opera", "Science Fiction");
+    map.insert("hard sci-fi", "Science Fiction");
+    map.insert("cyberpunk", "Science Fiction");
+    map.insert("steampunk", "Science Fiction");
+    map.insert("military sci-fi", "Science Fiction");
+    map.insert("dystopian", "Science Fiction");
+    map.insert("post-apocalyptic", "Science Fiction");
+
     // Other mappings
-    map.insert("general fiction", "Fiction");
-    map.insert("general", "Fiction");
-    map.insert("audiobook", "Fiction"); // Shouldn't be a genre
-    map.insert("unabridged", "Fiction"); // Shouldn't be a genre
-    map.insert("adult fiction", "Fiction");
-    map.insert("inspirational", "Spirituality");
-    map.insert("faith", "Religion");
-    map.insert("christian", "Religion");
-    map.insert("cooking & food", "Cooking");
-    map.insert("food & drink", "Cooking");
-    map.insert("health & fitness", "Health");
-    map.insert("health & wellness", "Health");
-    map.insert("mind body spirit", "Spirituality");
-    map.insert("new age", "Spirituality");
+    map.insert("audiobook", ""); // Skip - not a genre
+    map.insert("unabridged", ""); // Skip - not a genre
+    map.insert("adult fiction", "Literary Fiction");
+    map.insert("inspirational", "Religion & Spirituality");
+    map.insert("faith", "Religion & Spirituality");
+    map.insert("christian", "Religion & Spirituality");
+    map.insert("christian fiction", "Religion & Spirituality");
+    map.insert("spirituality", "Religion & Spirituality");
+    map.insert("cooking & food", "Food & Cooking");
+    map.insert("food & drink", "Food & Cooking");
+    map.insert("cookbook", "Food & Cooking");
+    map.insert("health & fitness", "Health & Wellness");
+    map.insert("health & wellness", "Health & Wellness");
+    map.insert("health", "Health & Wellness");
+    map.insert("wellness", "Health & Wellness");
+    map.insert("mind body spirit", "Religion & Spirituality");
+    map.insert("new age", "Religion & Spirituality");
     map.insert("true story", "Non-Fiction");
     map.insert("based on true story", "Non-Fiction");
 
     map
 }
 
-#[derive(Debug, Deserialize)]
-struct OpenAIResponse {
-    choices: Vec<OpenAIChoice>,
-}
+/// Tag aliases - maps alternative tag names to approved tags
+fn get_tag_aliases() -> HashMap<&'static str, &'static str> {
+    let mut map = HashMap::new();
 
-#[derive(Debug, Deserialize)]
-struct OpenAIChoice {
-    message: OpenAIMessage,
-}
+    // Common tag variations
+    map.insert("enemies to lovers", "enemies-to-lovers");
+    map.insert("friends to lovers", "friends-to-lovers");
+    map.insert("slow burn", "slow-burn");
+    map.insert("found family", "found-family");
+    map.insert("coming of age", "coming-of-age");
+    map.insert("small town", "small-town");
+    map.insert("page turner", "page-turner");
+    map.insert("fast paced", "fast-paced");
+    map.insert("character driven", "character-driven");
+    map.insert("plot driven", "plot-driven");
+    map.insert("thought provoking", "thought-provoking");
+    map.insert("feel good", "feel-good");
+    map.insert("heart warming", "heartwarming");
+    map.insert("heart breaking", "heartbreaking");
 
-#[derive(Debug, Deserialize)]
-struct OpenAIMessage {
-    content: String,
-}
+    // Length variations
+    map.insert("short", "under-5-hours");
+    map.insert("medium", "10-15-hours");
+    map.insert("long", "over-20-hours");
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CleanedMetadata {
-    pub title: Option<String>,
-    pub subtitle: Option<String>,
-    pub author: Option<String>,
-    pub narrator: Option<String>,
-    pub series: Option<String>,
-    pub sequence: Option<String>,
-    pub genre: Option<String>,
-    pub year: Option<String>,
-    pub publisher: Option<String>,
-    pub description: Option<String>,
-    pub language: Option<String>,
-}
-
-pub async fn clean_metadata_with_ai(
-    title: Option<&str>,
-    artist: Option<&str>,
-    album: Option<&str>,
-    genre: Option<&str>,
-    comment: Option<&str>,
-    api_key: &str,
-) -> Result<CleanedMetadata> {
-    let cache_key = format!("{}|{}|{}|{}|{}", 
-        title.unwrap_or(""), artist.unwrap_or(""), album.unwrap_or(""),
-        genre.unwrap_or(""), comment.unwrap_or("")
-    );
-    
-    if let Some(cached) = crate::genre_cache::get_metadata_cached(&cache_key) {
-        println!("          💾 Cache hit!");
-        return Ok(cached);
-    }
-    
-    let approved_genres = APPROVED_GENRES.join(", ");
-    
-    let comment_preview = comment.map(|c| {
-        if c.len() > 500 {
-            format!("{}...", &c[..500])
-        } else {
-            c.to_string()
-        }
-    });
-    
-    let prompt = format!(
-r#"You are a metadata cleaning expert for audiobook libraries. Clean and extract metadata.
-
-CURRENT METADATA:
-- Title: {}
-- Author: {}
-- Genre: {}
-- Comment: {}
-
-APPROVED GENRES (max 3): {}
-
-TASKS:
-1. Title: Remove (Unabridged), [Retail], 320kbps
-2. Author: Clean name, remove "by", "Read by", "Narrated by"
-3. Narrator: CRITICAL - Extract from comment. Look for "Narrated by", "Read by", "Performed by"
-4. Genre: Map to approved genres, max 3, comma-separated
-5. Series: Extract if present
-
-Return ONLY JSON (no markdown):
-{{"title":"clean title","author":"author","narrator":"narrator or null","genre":"Genre1, Genre2"}}
-
-JSON:"#,
-        title.unwrap_or("N/A"),
-        artist.unwrap_or("N/A"),
-        genre.unwrap_or("N/A"),
-        comment_preview.as_deref().unwrap_or("N/A"),
-        approved_genres
-    );
-    
-    println!("          📤 Sending to GPT-5-nano API...");
-
-    let system_prompt = "You clean audiobook metadata. Return ONLY valid JSON, no markdown.";
-    let full_prompt = format!("{}\n\n{}", system_prompt, prompt);
-
-    let client = reqwest::Client::new();
-    let response = client
-        .post("https://api.openai.com/v1/responses")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "model": "gpt-5-nano",
-            "input": full_prompt,
-            "max_output_tokens": 1000,
-            "text": {
-                "verbosity": "low"
-            }
-        }))
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let error_text = response.text().await?;
-        println!("          ❌ API error: {}", error_text);
-        anyhow::bail!("API error");
-    }
-
-    let response_text = response.text().await?;
-
-    // Parse the OpenAI Responses API format
-    #[derive(serde::Deserialize)]
-    struct ResponsesApiResponse {
-        output: Vec<OutputItem>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct OutputItem {
-        content: Option<Vec<ContentItem>>,
-        #[serde(rename = "type")]
-        item_type: String,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct ContentItem {
-        text: Option<String>,
-        #[serde(rename = "type")]
-        content_type: String,
-    }
-
-    let responses_result: ResponsesApiResponse = serde_json::from_str(&response_text)
-        .map_err(|e| anyhow::anyhow!("Failed to parse GPT-5-nano response: {}. Raw: {}", e, response_text))?;
-
-    // Extract text content from the response
-    let content = responses_result.output.iter()
-        .filter(|item| item.item_type == "message")
-        .filter_map(|item| item.content.as_ref())
-        .flatten()
-        .filter(|c| c.content_type == "output_text" || c.content_type == "text")
-        .filter_map(|c| c.text.as_ref())
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No text content in GPT-5-nano response"))?;
-
-    let json_str = content.trim()
-        .trim_start_matches("```json").trim_start_matches("```")
-        .trim_end_matches("```").trim();
-
-    match serde_json::from_str::<CleanedMetadata>(json_str) {
-        Ok(cleaned) => {
-            println!("          ✅ AI: Title={:?}, Author={:?}, Narrator={:?}, Genre={:?}",
-                cleaned.title, cleaned.author, cleaned.narrator, cleaned.genre);
-            crate::genre_cache::set_metadata_cached(&cache_key, cleaned.clone());
-            Ok(cleaned)
-        }
-        Err(e) => {
-            println!("          ❌ Parse error: {}", e);
-            println!("          JSON: {}", json_str);
-            anyhow::bail!("Parse failed")
-        }
-    }
+    map
 }
 
 /// Map a genre string to an approved genre
-///
-/// Uses exact matching first, then tries aliases, then fuzzy matching
 pub fn map_genre_basic(genre: &str) -> Option<String> {
     let normalized = genre.trim().to_lowercase();
 
@@ -527,6 +363,9 @@ pub fn map_genre_basic(genre: &str) -> Option<String> {
     // Try aliases
     let aliases = get_genre_aliases();
     if let Some(&mapped) = aliases.get(normalized.as_str()) {
+        if mapped.is_empty() {
+            return None; // Explicitly skip this genre
+        }
         return Some(mapped.to_string());
     }
 
@@ -542,68 +381,34 @@ pub fn map_genre_basic(genre: &str) -> Option<String> {
     None
 }
 
-/// Map a genre with sub-genre information
-///
-/// Returns (primary_genre, sub_genre) tuple for hierarchical categorization
-pub fn map_genre_hierarchical(genre: &str) -> (Option<String>, Option<String>) {
-    let normalized = genre.trim().to_lowercase();
+/// Map a tag string to an approved tag
+pub fn map_tag(tag: &str) -> Option<String> {
+    let normalized = tag.trim().to_lowercase().replace(' ', "-");
 
-    // Check for subgenre patterns like "Fiction > Fantasy > Epic Fantasy"
-    if normalized.contains(" > ") {
-        let parts: Vec<&str> = normalized.split(" > ").collect();
-        if parts.len() >= 2 {
-            let primary = map_genre_basic(parts.last().unwrap_or(&""));
-            let sub = if parts.len() >= 2 {
-                map_genre_basic(parts.get(parts.len() - 2).unwrap_or(&""))
-            } else {
-                None
-            };
-            return (primary, sub);
+    // Check exact match
+    for approved in APPROVED_TAGS {
+        if *approved == normalized {
+            return Some(approved.to_string());
         }
     }
 
-    // Check for subgenre patterns like "Epic Fantasy"
-    let fantasy_subs = ["epic fantasy", "high fantasy", "dark fantasy", "urban fantasy", "sword and sorcery"];
-    let scifi_subs = ["space opera", "hard sci-fi", "cyberpunk", "steampunk", "military sci-fi"];
-    let romance_subs = ["contemporary romance", "historical romance", "paranormal romance", "romantic suspense"];
-    let mystery_subs = ["cozy mystery", "police procedural", "noir", "detective"];
-    let thriller_subs = ["psychological thriller", "legal thriller", "techno-thriller", "political thriller"];
+    // Try aliases
+    let aliases = get_tag_aliases();
+    if let Some(&mapped) = aliases.get(tag.trim().to_lowercase().as_str()) {
+        return Some(mapped.to_string());
+    }
 
-    for sub in fantasy_subs {
-        if normalized.contains(sub) {
-            return (Some("Fantasy".to_string()), Some(sub.to_string()));
-        }
-    }
-    for sub in scifi_subs {
-        if normalized.contains(sub) {
-            return (Some("Science Fiction".to_string()), Some(sub.to_string()));
-        }
-    }
-    for sub in romance_subs {
-        if normalized.contains(sub) {
-            return (Some("Romance".to_string()), Some(sub.to_string()));
-        }
-    }
-    for sub in mystery_subs {
-        if normalized.contains(sub) {
-            return (Some("Mystery".to_string()), Some(sub.to_string()));
-        }
-    }
-    for sub in thriller_subs {
-        if normalized.contains(sub) {
-            return (Some("Thriller".to_string()), Some(sub.to_string()));
+    // Partial match
+    for approved in APPROVED_TAGS {
+        if normalized.contains(approved) || approved.contains(&normalized.as_str()) {
+            return Some(approved.to_string());
         }
     }
 
-    (map_genre_basic(genre), None)
+    None
 }
 
 /// Enforce genre policy: max 3 genres, prioritized, no duplicates
-///
-/// Priority order:
-/// 1. Specific genres (Mystery, Thriller, Fantasy, etc.)
-/// 2. Age categories (Young Adult, Children's)
-/// 3. Broad categories (Fiction, Non-Fiction)
 pub fn enforce_genre_policy_basic(genres: &[String]) -> Vec<String> {
     let mut mapped: Vec<String> = genres
         .iter()
@@ -614,9 +419,11 @@ pub fn enforce_genre_policy_basic(genres: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     mapped.retain(|g| seen.insert(g.clone()));
 
-    // Priority sorting: specific genres first
-    let broad_genres = ["Fiction", "Non-Fiction", "Adult"];
-    let age_genres = ["Children's", "Young Adult", "Teen", "Middle Grade", "New Adult"];
+    // Priority sorting: specific genres first, broad categories last
+    let broad_genres = ["Non-Fiction", "Adult", "Literary Fiction"];
+    let age_genres = ["Children's", "Young Adult", "Teen", "Middle Grade", "New Adult",
+                      "Children's 0-2", "Children's 3-5", "Children's 6-8",
+                      "Children's 9-12", "Teen 13-17"];
 
     mapped.sort_by(|a, b| {
         let a_is_broad = broad_genres.contains(&a.as_str());
@@ -638,33 +445,56 @@ pub fn enforce_genre_policy_basic(genres: &[String]) -> Vec<String> {
     // Take top 3
     mapped.truncate(3);
 
-    // If empty, default to Fiction
-    if mapped.is_empty() {
-        mapped.push("Fiction".to_string());
-    }
+    // If empty, don't force a default - let caller decide
+    mapped
+}
 
-    // Don't have both Fiction and a specific fiction genre
-    if mapped.len() > 1 && mapped.contains(&"Fiction".to_string()) {
-        // Remove "Fiction" if we have a more specific genre
-        let has_specific = mapped.iter().any(|g| {
-            !broad_genres.contains(&g.as_str()) && !age_genres.contains(&g.as_str())
-        });
-        if has_specific {
-            mapped.retain(|g| g != "Fiction");
-        }
-    }
+/// Enforce tag policy: max 15 tags, normalized, no duplicates
+pub fn enforce_tag_policy(tags: &[String]) -> Vec<String> {
+    let mut mapped: Vec<String> = tags
+        .iter()
+        .filter_map(|t| map_tag(t))
+        .collect();
+
+    // Remove duplicates while preserving order
+    let mut seen = std::collections::HashSet::new();
+    mapped.retain(|t| seen.insert(t.clone()));
+
+    // Take top 15
+    mapped.truncate(15);
 
     mapped
 }
 
+// =============================================================================
+// DNA Tag Passthrough
+// =============================================================================
+
+/// Check if a tag is a DNA tag (dna: prefix)
+/// DNA tags bypass normal validation and have no limit
+pub fn is_dna_tag(tag: &str) -> bool {
+    tag.starts_with("dna:")
+}
+
+/// Enforce tag policy with DNA tag support
+/// - Standard tags: validated, normalized, limited to 15
+/// - DNA tags: pass through unchanged, no limit
+pub fn enforce_tag_policy_with_dna(tags: &[String]) -> Vec<String> {
+    // Partition into standard and DNA tags
+    let (standard, dna): (Vec<_>, Vec<_>) = tags.iter()
+        .cloned()
+        .partition(|t| !is_dna_tag(t));
+
+    // Apply standard policy to regular tags (15-tag limit)
+    let mut result = enforce_tag_policy(&standard);
+
+    // Add DNA tags without validation or limit
+    result.extend(dna);
+
+    result
+}
+
 /// Split combined genre strings into individual genres
-///
-/// Handles various separators used by different sources:
-/// - Comma-separated: "Suspense, Crime Thrillers, Police Procedurals"
-/// - Slash-separated (Google Books): "Fiction / Thrillers / Suspense"
-/// - Ampersand-separated: "Mystery & Thriller"
-///
-/// Returns a flattened Vec of individual genre strings
 pub fn split_combined_genres(genres: &[String]) -> Vec<String> {
     let mut result = Vec::new();
 
@@ -710,10 +540,359 @@ pub fn split_combined_genres(genres: &[String]) -> Vec<String> {
 }
 
 /// Enforce genre policy with automatic splitting of combined genres
-///
-/// This is an enhanced version that first splits combined genre strings,
-/// then applies the standard genre policy.
 pub fn enforce_genre_policy_with_split(genres: &[String]) -> Vec<String> {
     let split_genres = split_combined_genres(genres);
     enforce_genre_policy_basic(&split_genres)
+}
+
+// =============================================================================
+// Length Tag Detection
+// =============================================================================
+
+/// Get length tag based on duration in minutes
+pub fn get_length_tag(duration_minutes: u32) -> &'static str {
+    match duration_minutes {
+        0..=299 => "under-5-hours",      // < 5 hours
+        300..=599 => "5-10-hours",        // 5-10 hours
+        600..=899 => "10-15-hours",       // 10-15 hours
+        900..=1199 => "15-20-hours",      // 15-20 hours
+        _ => "over-20-hours",             // 20+ hours
+    }
+}
+
+/// Get length tag from duration in seconds
+pub fn get_length_tag_from_seconds(duration_seconds: f64) -> &'static str {
+    get_length_tag((duration_seconds / 60.0) as u32)
+}
+
+// =============================================================================
+// AGE RATING AND CONTENT RATING DETERMINATION
+// =============================================================================
+
+/// Age rating categories
+pub const AGE_RATINGS: &[&str] = &["Childrens", "Teens", "Young Adult", "Adult"];
+
+/// Content rating categories (similar to movie ratings)
+pub const CONTENT_RATINGS: &[&str] = &["G", "PG", "PG-13", "R", "X"];
+
+/// Determine age rating based on genres and other metadata
+/// Returns: "Childrens", "Teens", "Young Adult", or "Adult"
+pub fn determine_age_rating(
+    genres: &[String],
+    title: Option<&str>,
+    series: Option<&str>,
+    description: Option<&str>,
+) -> Option<String> {
+    let genres_lower: Vec<String> = genres.iter().map(|g| g.to_lowercase()).collect();
+
+    // Check for children's age-specific genres first
+    for genre in &genres_lower {
+        // Children's 0-2, 3-5, 6-8, 9-12 all map to "Childrens"
+        if genre.starts_with("children's") || genre.starts_with("childrens") {
+            return Some("Childrens".to_string());
+        }
+        // Teen 13-17 maps to "Teens"
+        if genre.contains("teen 13-17") || genre == "teen" {
+            return Some("Teens".to_string());
+        }
+        // Young Adult
+        if genre.contains("young adult") || genre == "ya" {
+            return Some("Young Adult".to_string());
+        }
+    }
+
+    // Check for keywords in genres
+    for genre in &genres_lower {
+        if genre.contains("picture book") || genre.contains("bedtime") ||
+           genre.contains("nursery") || genre.contains("board book") {
+            return Some("Childrens".to_string());
+        }
+        if genre.contains("middle grade") {
+            return Some("Childrens".to_string());
+        }
+        if genre.contains("new adult") {
+            return Some("Young Adult".to_string());
+        }
+    }
+
+    // Check title and series for children's indicators
+    if let Some(t) = title {
+        let t_lower = t.to_lowercase();
+        if t_lower.contains("for kids") || t_lower.contains("children's") {
+            return Some("Childrens".to_string());
+        }
+    }
+
+    // Check description for age indicators
+    if let Some(desc) = description {
+        let desc_lower = desc.to_lowercase();
+        if desc_lower.contains("picture book") || desc_lower.contains("ages 3-5") ||
+           desc_lower.contains("ages 4-8") || desc_lower.contains("for children") ||
+           desc_lower.contains("bedtime stor") {
+            return Some("Childrens".to_string());
+        }
+        if desc_lower.contains("young readers") || desc_lower.contains("ages 8-12") ||
+           desc_lower.contains("middle grade") {
+            return Some("Childrens".to_string());
+        }
+        if desc_lower.contains("young adult") || desc_lower.contains("ya novel") ||
+           desc_lower.contains("teen readers") {
+            return Some("Teens".to_string());
+        }
+    }
+
+    // Check for adult content indicators in genres
+    for genre in &genres_lower {
+        if genre.contains("erotica") || genre.contains("erotic") {
+            return Some("Adult".to_string());
+        }
+        if genre.contains("romance") || genre.contains("thriller") ||
+           genre.contains("horror") || genre.contains("crime") ||
+           genre.contains("mystery") || genre.contains("suspense") {
+            // These are typically adult genres
+            return Some("Adult".to_string());
+        }
+    }
+
+    // Default to None if we can't determine
+    None
+}
+
+/// Determine content rating based on genres, tags, explicit flag, and description
+/// Returns: "G", "PG", "PG-13", "R", or "X"
+pub fn determine_content_rating(
+    genres: &[String],
+    tags: &[String],
+    explicit: Option<bool>,
+    description: Option<&str>,
+    age_rating: Option<&str>,
+) -> Option<String> {
+    // If explicitly marked, that takes precedence
+    if explicit == Some(true) {
+        return Some("R".to_string());
+    }
+
+    let genres_lower: Vec<String> = genres.iter().map(|g| g.to_lowercase()).collect();
+    let tags_lower: Vec<String> = tags.iter().map(|t| t.to_lowercase().replace(' ', "-")).collect();
+
+    // Check for X-rated content (erotica)
+    for genre in &genres_lower {
+        if genre.contains("erotica") || genre.contains("erotic romance") {
+            return Some("X".to_string());
+        }
+    }
+    for tag in &tags_lower {
+        if tag == "explicit" || tag == "erotica" || tag.contains("adult-content") {
+            return Some("X".to_string());
+        }
+    }
+
+    // Check for R-rated content
+    for tag in &tags_lower {
+        if tag == "steamy" || tag == "spicy" || tag.contains("graphic-violence") ||
+           tag.contains("dark-themes") || tag == "gore" {
+            return Some("R".to_string());
+        }
+    }
+    for genre in &genres_lower {
+        if genre.contains("dark romance") || genre.contains("horror") {
+            return Some("R".to_string());
+        }
+    }
+
+    // Check description for mature content
+    if let Some(desc) = description {
+        let desc_lower = desc.to_lowercase();
+        if desc_lower.contains("explicit") || desc_lower.contains("steamy") ||
+           desc_lower.contains("graphic violence") || desc_lower.contains("adult content") {
+            return Some("R".to_string());
+        }
+        if desc_lower.contains("mature themes") || desc_lower.contains("not for children") {
+            return Some("PG-13".to_string());
+        }
+    }
+
+    // Check for PG-13 content
+    for tag in &tags_lower {
+        if tag == "mild-steam" || tag.contains("some-violence") ||
+           tag == "intense" || tag == "suspenseful" {
+            return Some("PG-13".to_string());
+        }
+    }
+    for genre in &genres_lower {
+        if genre.contains("thriller") || genre.contains("suspense") ||
+           genre.contains("crime") || genre.contains("mystery") {
+            return Some("PG-13".to_string());
+        }
+    }
+
+    // Check for PG content
+    for tag in &tags_lower {
+        if tag == "clean" || tag == "fade-to-black" || tag == "low-violence" ||
+           tag == "family-friendly" {
+            return Some("PG".to_string());
+        }
+    }
+
+    // Based on age rating
+    if let Some(age) = age_rating {
+        match age {
+            "Childrens" => return Some("G".to_string()),
+            "Teens" => return Some("PG".to_string()),
+            "Young Adult" => return Some("PG-13".to_string()),
+            "Adult" => return Some("PG-13".to_string()), // Default for adult, not necessarily R
+            _ => {}
+        }
+    }
+
+    // Check for G-rated (children's content)
+    for genre in &genres_lower {
+        if genre.starts_with("children") || genre.contains("picture book") ||
+           genre.contains("bedtime") {
+            return Some("G".to_string());
+        }
+    }
+
+    // Default: if we have children's genres, G; otherwise None
+    None
+}
+
+/// Get both age_rating and content_rating, also returning them as tags
+pub fn determine_ratings_with_tags(
+    genres: &[String],
+    tags: &[String],
+    explicit: Option<bool>,
+    title: Option<&str>,
+    series: Option<&str>,
+    description: Option<&str>,
+) -> (Option<String>, Option<String>, Vec<String>) {
+    let age_rating = determine_age_rating(genres, title, series, description);
+    let content_rating = determine_content_rating(
+        genres,
+        tags,
+        explicit,
+        description,
+        age_rating.as_deref(),
+    );
+
+    // Build rating tags
+    let mut rating_tags = Vec::new();
+
+    if let Some(ref age) = age_rating {
+        // Add age rating as a tag (lowercase, hyphenated)
+        let age_tag = match age.as_str() {
+            "Childrens" => "age-childrens",
+            "Teens" => "age-teens",
+            "Young Adult" => "age-young-adult",
+            "Adult" => "age-adult",
+            _ => "",
+        };
+        if !age_tag.is_empty() {
+            rating_tags.push(age_tag.to_string());
+        }
+    }
+
+    if let Some(ref rating) = content_rating {
+        // Add content rating as a tag
+        let rating_tag = match rating.as_str() {
+            "G" => "rated-g",
+            "PG" => "rated-pg",
+            "PG-13" => "rated-pg13",
+            "R" => "rated-r",
+            "X" => "rated-x",
+            _ => "",
+        };
+        if !rating_tag.is_empty() {
+            rating_tags.push(rating_tag.to_string());
+        }
+    }
+
+    (age_rating, content_rating, rating_tags)
+}
+
+// =============================================================================
+// Structs for metadata processing (kept for compatibility)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanedMetadata {
+    pub title: Option<String>,
+    pub subtitle: Option<String>,
+    pub author: Option<String>,
+    pub narrator: Option<String>,
+    pub series: Option<String>,
+    pub sequence: Option<String>,
+    pub genre: Option<String>,
+    pub year: Option<String>,
+    pub publisher: Option<String>,
+    pub description: Option<String>,
+    pub language: Option<String>,
+}
+
+// =============================================================================
+// Validation helpers
+// =============================================================================
+
+/// Check if a genre is in the approved list
+pub fn is_approved_genre(genre: &str) -> bool {
+    let normalized = genre.trim().to_lowercase();
+    APPROVED_GENRES.iter().any(|g| g.to_lowercase() == normalized)
+}
+
+/// Check if a tag is in the approved list
+pub fn is_approved_tag(tag: &str) -> bool {
+    let normalized = tag.trim().to_lowercase().replace(' ', "-");
+    APPROVED_TAGS.iter().any(|t| *t == normalized)
+}
+
+/// Get all approved genres as a Vec
+pub fn get_all_genres() -> Vec<String> {
+    APPROVED_GENRES.iter().map(|s| s.to_string()).collect()
+}
+
+/// Get all approved tags as a Vec
+pub fn get_all_tags() -> Vec<String> {
+    APPROVED_TAGS.iter().map(|s| s.to_string()).collect()
+}
+
+/// Required age rating tags (must have ONE of these)
+const AGE_RATING_TAGS: &[&str] = &["age-childrens", "age-middle-grade", "age-teens", "age-young-adult", "age-adult"];
+
+/// Required content rating tags (must have ONE of these)
+const CONTENT_RATING_TAGS: &[&str] = &["rated-g", "rated-pg", "rated-pg13", "rated-r", "rated-x"];
+
+/// Required reading age recommendation tags (must have ONE of these)
+const READING_AGE_TAGS: &[&str] = &[
+    "age-rec-all", "age-rec-4", "age-rec-6", "age-rec-8", "age-rec-10",
+    "age-rec-12", "age-rec-14", "age-rec-16", "age-rec-18"
+];
+
+/// Check if tags are "complete" - have all required rating tags
+/// Returns true if tags include at least one of each:
+/// - Age rating (age-childrens, age-teens, age-young-adult, age-adult)
+/// - Content rating (rated-g, rated-pg, rated-pg13, rated-r, rated-x)
+/// - Reading age recommendation (age-rec-all, age-rec-4, etc.)
+pub fn are_tags_complete(tags: &[String]) -> bool {
+    let has_age_rating = tags.iter().any(|t| AGE_RATING_TAGS.contains(&t.as_str()));
+    let has_content_rating = tags.iter().any(|t| CONTENT_RATING_TAGS.contains(&t.as_str()));
+    let has_reading_age = tags.iter().any(|t| READING_AGE_TAGS.contains(&t.as_str()));
+
+    has_age_rating && has_content_rating && has_reading_age
+}
+
+/// Get a summary of which required tags are missing
+pub fn get_missing_tag_categories(tags: &[String]) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+
+    if !tags.iter().any(|t| AGE_RATING_TAGS.contains(&t.as_str())) {
+        missing.push("age rating");
+    }
+    if !tags.iter().any(|t| CONTENT_RATING_TAGS.contains(&t.as_str())) {
+        missing.push("content rating");
+    }
+    if !tags.iter().any(|t| READING_AGE_TAGS.contains(&t.as_str())) {
+        missing.push("reading age");
+    }
+
+    missing
 }
