@@ -78,6 +78,9 @@ pub struct ResolvedMetadata {
     pub narrators: Vec<String>,
     pub series: Vec<ResolvedSeries>,
     pub genres: Vec<String>,
+    /// Tags in lowercase-hyphenated format (e.g., "enemies-to-lovers", "found-family")
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub description: Option<String>,
     pub publisher: Option<String>,
     pub year: Option<String>,
@@ -116,6 +119,7 @@ impl Default for ResolvedMetadata {
             narrators: vec![],
             series: vec![],
             genres: vec![],
+            tags: vec![],
             description: None,
             publisher: None,
             year: None,

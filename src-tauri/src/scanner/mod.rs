@@ -95,7 +95,7 @@ async fn fetch_covers_for_groups(
 
                 // Check for cached cover or load from folder
                 let cover_cache_key = format!("cover_{}", group.id);
-                let mut has_cached_cover: bool = cache::get::<(Vec<u8>, String)>(&cover_cache_key).is_some();
+                let mut has_cached_cover: bool = cache::has_cover(&cover_cache_key);
 
                 // If no cached cover, try to load from folder first (cover.jpg, cover.png, etc.)
                 if !has_cached_cover {
@@ -106,7 +106,7 @@ async fn fetch_covers_for_groups(
                                 if cover_path.exists() {
                                     if let Ok(data) = std::fs::read(&cover_path) {
                                         let mime = if filename.ends_with(".png") { "image/png" } else { "image/jpeg" };
-                                        let _ = cache::set(&cover_cache_key, &(data, mime.to_string()));
+                                        let _ = cache::set_cover(&cover_cache_key, &data, mime);
                                         group.metadata.cover_url = Some(cover_path.to_string_lossy().to_string());
                                         group.metadata.cover_mime = Some(mime.to_string());
                                         has_cached_cover = true;
@@ -131,7 +131,7 @@ async fn fetch_covers_for_groups(
                     if let Ok(cover) = cover_result {
                         if let Some(ref data) = cover.data {
                             let mime_type = cover.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string());
-                            let _ = cache::set(&cover_cache_key, &(data.clone(), mime_type.clone()));
+                            let _ = cache::set_cover(&cover_cache_key, data, &mime_type);
                             group.metadata.cover_url = cover.url;
                             group.metadata.cover_mime = Some(mime_type);
                             covers_found.fetch_add(1, Ordering::Relaxed);

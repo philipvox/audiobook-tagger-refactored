@@ -27,43 +27,50 @@ pub struct CoverData {
 
 #[tauri::command]
 pub async fn get_cover_for_group(group_id: String, cover_url: Option<String>) -> Result<Option<CoverData>, String> {
-    let cache_key = format!("cover_{}", group_id);
+    eprintln!("🖼️  get_cover_for_group: group_id={}, cover_url={:?}", group_id, cover_url);
 
-    // Check cache first
-    if let Some((cover_data, mime_type)) = crate::cache::get::<(Vec<u8>, String)>(&cache_key) {
-        let size_kb = cover_data.len() / 1024;
+    // Check if this looks like an ABS UUID
+    let is_uuid = group_id.len() == 36 && group_id.chars().filter(|c| *c == '-').count() == 4;
 
-        // Try to get image dimensions
-        let (width, height) = get_image_dimensions(&cover_data);
-
-        // Try to get source from cache
-        let source_key = format!("cover_source_{}", group_id);
-        let source = crate::cache::get::<String>(&source_key);
-
-        return Ok(Some(CoverData {
-            data: cover_data,
-            mime_type,
-            size_kb,
-            width,
-            height,
-            source,
-        }));
-    }
-
-    // If no cache and we have a cover_url (e.g., from ABS), fetch it
-    if let Some(url) = cover_url {
-        if url.contains("/api/items/") && url.contains("/cover") {
-            // This is an ABS URL - needs authentication
-            if let Ok(cover_data) = fetch_abs_cover(&url).await {
-                // Cache it for future use
-                let _ = crate::cache::set(&cache_key, &(cover_data.data.clone(), cover_data.mime_type.clone()));
-                let source_key = format!("cover_source_{}", group_id);
-                let _ = crate::cache::set(&source_key, &"ABS".to_string());
-                return Ok(Some(cover_data));
+    // For ABS items, always try to fetch from ABS first (fastest and most reliable)
+    if is_uuid {
+        eprintln!("🖼️  Detected ABS UUID format, fetching from ABS...");
+        if let Ok(config) = config::load_config() {
+            if !config.abs_base_url.is_empty() && !config.abs_api_token.is_empty() {
+                let abs_cover_url = format!("{}/api/items/{}/cover", config.abs_base_url, group_id);
+                eprintln!("🖼️  Fetching: {}", abs_cover_url);
+                match fetch_abs_cover(&abs_cover_url).await {
+                    Ok(cover_data) => {
+                        eprintln!("🖼️  ✅ Got cover from ABS ({} KB)", cover_data.size_kb);
+                        return Ok(Some(cover_data));
+                    }
+                    Err(e) => {
+                        eprintln!("🖼️  ❌ ABS fetch failed: {}", e);
+                    }
+                }
+            } else {
+                eprintln!("🖼️  ABS not configured");
             }
         }
     }
 
+    // Fallback: try cover_url if provided
+    if let Some(url) = &cover_url {
+        eprintln!("🖼️  Trying cover_url: {}", url);
+        if url.contains("/api/items/") {
+            match fetch_abs_cover(url).await {
+                Ok(cover_data) => {
+                    eprintln!("🖼️  ✅ Got cover from URL");
+                    return Ok(Some(cover_data));
+                }
+                Err(e) => {
+                    eprintln!("🖼️  ❌ URL fetch failed: {}", e);
+                }
+            }
+        }
+    }
+
+    eprintln!("🖼️  No cover found for {}", group_id);
     Ok(None)
 }
 
@@ -425,4 +432,94 @@ pub async fn set_cover_from_data(
         message: format!("Cover set successfully ({}x{}, {} KB)",
             width.unwrap_or(0), height.unwrap_or(0), size_kb),
     })
+}
+
+/// Proxy an external image URL and return as base64
+/// Used for displaying external cover images in the UI
+#[derive(Debug, Serialize)]
+pub struct ProxyImageResult {
+    pub success: bool,
+    pub data_url: Option<String>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn proxy_image(url: String) -> ProxyImageResult {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return ProxyImageResult {
+            success: false,
+            data_url: None,
+            error: Some(e.to_string()),
+        },
+    };
+
+    match client.get(&url).send().await {
+        Ok(response) if response.status().is_success() => {
+            match response.bytes().await {
+                Ok(bytes) => {
+                    let data = bytes.to_vec();
+
+                    // Validate and determine mime type
+                    let is_png = data.len() >= 8
+                        && data[0] == 0x89
+                        && data[1] == 0x50
+                        && data[2] == 0x4E
+                        && data[3] == 0x47;
+                    let is_jpeg = data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8;
+                    let is_webp = data.len() >= 12
+                        && data[0] == 0x52  // R
+                        && data[1] == 0x49  // I
+                        && data[2] == 0x46  // F
+                        && data[3] == 0x46; // F
+
+                    if !is_png && !is_jpeg && !is_webp {
+                        return ProxyImageResult {
+                            success: false,
+                            data_url: None,
+                            error: Some("Not a valid image".to_string()),
+                        };
+                    }
+
+                    let mime = if is_png {
+                        "image/png"
+                    } else if is_webp {
+                        "image/webp"
+                    } else {
+                        "image/jpeg"
+                    };
+
+                    // Convert to base64 data URL
+                    use base64::{Engine as _, engine::general_purpose::STANDARD};
+                    let base64_data = STANDARD.encode(&data);
+                    let data_url = format!("data:{};base64,{}", mime, base64_data);
+
+                    ProxyImageResult {
+                        success: true,
+                        data_url: Some(data_url),
+                        error: None,
+                    }
+                }
+                Err(e) => ProxyImageResult {
+                    success: false,
+                    data_url: None,
+                    error: Some(e.to_string()),
+                },
+            }
+        }
+        Ok(response) => ProxyImageResult {
+            success: false,
+            data_url: None,
+            error: Some(format!("HTTP {}", response.status())),
+        },
+        Err(e) => ProxyImageResult {
+            success: false,
+            data_url: None,
+            error: Some(e.to_string()),
+        },
+    }
 }

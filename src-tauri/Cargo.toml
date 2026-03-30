@@ -42,6 +42,12 @@ natord = "1.0"  # Natural ordering for filenames
 fs2 = "0.4"     # Disk space checking
 rayon = "1.10"  # Parallel iteration for faster metadata loading
 
+# Immersion Sync / Alignment
+zip = "0.6"           # EPUB is a ZIP archive
+quick-xml = "0.37"    # Parse EPUB XML (OPF, NCX, XHTML)
+rusqlite = { version = "0.30", features = ["bundled"] }  # Job queue persistence
+chrono = { version = "0.4", features = ["serde"] }       # Timestamps for alignment
+
 [dev-dependencies]
 serial_test = "3"  # Sequential test execution
 

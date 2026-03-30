@@ -231,19 +231,19 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+      <div className="bg-neutral-900 rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
         {/* Header */}
-        <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-purple-50 to-indigo-50">
+        <div className="p-6 border-b border-neutral-800 bg-gradient-to-r from-purple-50 to-indigo-50">
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+              <h2 className="text-2xl font-bold text-gray-100 flex items-center gap-2">
                 <BookOpen className="w-6 h-6 text-purple-600" />
                 Chapters
               </h2>
-              <p className="text-sm text-gray-600 mt-1">{group?.metadata?.title}</p>
+              <p className="text-sm text-gray-400 mt-1">{group?.metadata?.title}</p>
             </div>
             <button onClick={onClose} className="p-2 hover:bg-purple-100 rounded-lg transition-colors">
-              <X className="w-6 h-6 text-gray-600" />
+              <X className="w-6 h-6 text-gray-400" />
             </button>
           </div>
         </div>
@@ -284,7 +284,7 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
           {loading && (
             <div className="text-center py-12">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto mb-4"></div>
-              <p className="text-gray-600">Loading chapters...</p>
+              <p className="text-gray-400">Loading chapters...</p>
             </div>
           )}
 
@@ -294,11 +294,11 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
               {/* Chapter Info Header */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-4">
-                  <span className="text-sm text-gray-600">
+                  <span className="text-sm text-gray-400">
                     {chapterInfo.chapters.length} chapters found
                     {chapterInfo.has_embedded_chapters ? ' (embedded)' : ' (detected)'}
                   </span>
-                  <span className="text-sm text-gray-500">
+                  <span className="text-sm text-gray-400">
                     <Clock className="w-4 h-4 inline mr-1" />
                     {chapterInfo.total_duration_display}
                   </span>
@@ -307,7 +307,7 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
                   {!chapterInfo.has_embedded_chapters && (
                     <button
                       onClick={() => setShowSettings(!showSettings)}
-                      className="px-3 py-1.5 text-sm bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center gap-1"
+                      className="px-3 py-1.5 text-sm bg-neutral-800 hover:bg-neutral-700 rounded-lg flex items-center gap-1"
                     >
                       <Settings className="w-4 h-4" />
                       Settings
@@ -326,35 +326,35 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
 
               {/* Silence Detection Settings */}
               {showSettings && (
-                <div className="bg-gray-50 rounded-lg p-4 space-y-4">
-                  <h4 className="font-medium text-gray-800">Silence Detection Settings</h4>
+                <div className="bg-neutral-950 rounded-lg p-4 space-y-4">
+                  <h4 className="font-medium text-gray-200">Silence Detection Settings</h4>
                   <div className="grid grid-cols-3 gap-4">
                     <div>
-                      <label className="block text-sm text-gray-600 mb-1">Noise Threshold (dB)</label>
+                      <label className="block text-sm text-gray-400 mb-1">Noise Threshold (dB)</label>
                       <input
                         type="number"
                         value={silenceSettings.noiseThreshold}
                         onChange={(e) => setSilenceSettings(s => ({ ...s, noiseThreshold: parseInt(e.target.value) }))}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                        className="w-full px-3 py-2 border border-neutral-700 rounded-lg text-sm"
                       />
                     </div>
                     <div>
-                      <label className="block text-sm text-gray-600 mb-1">Min Silence (sec)</label>
+                      <label className="block text-sm text-gray-400 mb-1">Min Silence (sec)</label>
                       <input
                         type="number"
                         step="0.1"
                         value={silenceSettings.minSilenceDuration}
                         onChange={(e) => setSilenceSettings(s => ({ ...s, minSilenceDuration: parseFloat(e.target.value) }))}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                        className="w-full px-3 py-2 border border-neutral-700 rounded-lg text-sm"
                       />
                     </div>
                     <div>
-                      <label className="block text-sm text-gray-600 mb-1">Min Chapter (sec)</label>
+                      <label className="block text-sm text-gray-400 mb-1">Min Chapter (sec)</label>
                       <input
                         type="number"
                         value={silenceSettings.minChapterDuration}
                         onChange={(e) => setSilenceSettings(s => ({ ...s, minChapterDuration: parseFloat(e.target.value) }))}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                        className="w-full px-3 py-2 border border-neutral-700 rounded-lg text-sm"
                       />
                     </div>
                   </div>
@@ -376,15 +376,15 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
                 >
                   Deselect All
                 </button>
-                <span className="text-sm text-gray-500 ml-4">
+                <span className="text-sm text-gray-400 ml-4">
                   {selectedChapters.size} selected
                 </span>
               </div>
 
               {/* Chapter Table */}
-              <div className="border border-gray-200 rounded-lg overflow-hidden">
+              <div className="border border-neutral-800 rounded-lg overflow-hidden">
                 <table className="w-full">
-                  <thead className="bg-gray-50 text-sm">
+                  <thead className="bg-neutral-950 text-sm">
                     <tr>
                       <th className="w-12 px-4 py-3 text-left"></th>
                       <th className="w-12 px-4 py-3 text-left">#</th>
@@ -399,17 +399,17 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
                     {chapterInfo.chapters.map((chapter, idx) => (
                       <tr
                         key={chapter.id}
-                        className={`hover:bg-gray-50 ${selectedChapters.has(chapter.id) ? 'bg-purple-50' : ''}`}
+                        className={`hover:bg-neutral-950 ${selectedChapters.has(chapter.id) ? 'bg-purple-50' : ''}`}
                       >
                         <td className="px-4 py-3">
                           <input
                             type="checkbox"
                             checked={selectedChapters.has(chapter.id)}
                             onChange={() => toggleChapterSelection(chapter.id)}
-                            className="w-4 h-4 text-purple-600 rounded border-gray-300"
+                            className="w-4 h-4 text-purple-600 rounded border-neutral-700"
                           />
                         </td>
-                        <td className="px-4 py-3 text-sm text-gray-500">{idx + 1}</td>
+                        <td className="px-4 py-3 text-sm text-gray-400">{idx + 1}</td>
                         <td className="px-4 py-3">
                           {editingChapter === chapter.id ? (
                             <div className="flex items-center gap-2">
@@ -417,7 +417,7 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
                                 type="text"
                                 value={editedTitle}
                                 onChange={(e) => setEditedTitle(e.target.value)}
-                                className="flex-1 px-2 py-1 border border-gray-300 rounded text-sm"
+                                className="flex-1 px-2 py-1 border border-neutral-700 rounded text-sm"
                                 autoFocus
                                 onKeyDown={(e) => {
                                   if (e.key === 'Enter') handleSaveChapterTitle();
@@ -432,19 +432,19 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
                               </button>
                             </div>
                           ) : (
-                            <span className="text-sm font-medium text-gray-900">{chapter.title}</span>
+                            <span className="text-sm font-medium text-gray-100">{chapter.title}</span>
                           )}
                         </td>
-                        <td className="px-4 py-3 text-sm text-gray-600 font-mono">{chapter.start_display}</td>
-                        <td className="px-4 py-3 text-sm text-gray-600 font-mono">{chapter.end_display}</td>
-                        <td className="px-4 py-3 text-sm text-gray-500">
+                        <td className="px-4 py-3 text-sm text-gray-400 font-mono">{chapter.start_display}</td>
+                        <td className="px-4 py-3 text-sm text-gray-400 font-mono">{chapter.end_display}</td>
+                        <td className="px-4 py-3 text-sm text-gray-400">
                           {formatDuration(chapter.duration)}
                         </td>
                         <td className="px-4 py-3">
                           {editingChapter !== chapter.id && (
                             <button
                               onClick={() => handleEditChapter(chapter)}
-                              className="p-1 text-gray-400 hover:text-gray-600"
+                              className="p-1 text-gray-400 hover:text-gray-400"
                               title="Edit title"
                             >
                               <Edit2 className="w-4 h-4" />
@@ -458,22 +458,22 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
               </div>
 
               {/* Split Options */}
-              <div className="border-t border-gray-200 pt-6 space-y-4">
-                <h3 className="font-medium text-gray-900">Split Options</h3>
+              <div className="border-t border-neutral-800 pt-6 space-y-4">
+                <h3 className="font-medium text-gray-100">Split Options</h3>
 
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm text-gray-600 mb-1">Output Directory</label>
+                    <label className="block text-sm text-gray-400 mb-1">Output Directory</label>
                     <div className="flex gap-2">
                       <input
                         type="text"
                         value={outputDir}
                         onChange={(e) => setOutputDir(e.target.value)}
-                        className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                        className="flex-1 px-3 py-2 border border-neutral-700 rounded-lg text-sm"
                       />
                       <button
                         onClick={handleSelectOutputDir}
-                        className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg"
+                        className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 rounded-lg"
                       >
                         <FolderOpen className="w-4 h-4" />
                       </button>
@@ -481,11 +481,11 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
                   </div>
 
                   <div>
-                    <label className="block text-sm text-gray-600 mb-1">Output Format</label>
+                    <label className="block text-sm text-gray-400 mb-1">Output Format</label>
                     <select
                       value={outputFormat}
                       onChange={(e) => setOutputFormat(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                      className="w-full px-3 py-2 border border-neutral-700 rounded-lg text-sm"
                     >
                       <option value="same">Same as Source (Lossless)</option>
                       <option value="m4a">M4A (AAC)</option>
@@ -495,15 +495,15 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
                   </div>
 
                   <div className="col-span-2">
-                    <label className="block text-sm text-gray-600 mb-1">Naming Pattern</label>
+                    <label className="block text-sm text-gray-400 mb-1">Naming Pattern</label>
                     <input
                       type="text"
                       value={namingPattern}
                       onChange={(e) => setNamingPattern(e.target.value)}
                       placeholder="{num} - {title}"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                      className="w-full px-3 py-2 border border-neutral-700 rounded-lg text-sm"
                     />
-                    <p className="text-xs text-gray-500 mt-1">
+                    <p className="text-xs text-gray-400 mt-1">
                       Available: {'{num}'} (track number), {'{title}'} (chapter title)
                     </p>
                   </div>
@@ -543,7 +543,7 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
           {!loading && (!chapterInfo || chapterInfo.chapters.length === 0) && !error && (
             <div className="text-center py-12">
               <BookOpen className="w-16 h-16 text-gray-300 mx-auto mb-4" />
-              <p className="text-gray-600 mb-4">No chapters found in this file</p>
+              <p className="text-gray-400 mb-4">No chapters found in this file</p>
               <button
                 onClick={detectWithSilence}
                 className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium"
@@ -555,10 +555,10 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
         </div>
 
         {/* Footer */}
-        <div className="p-6 border-t border-gray-200 bg-gray-50 flex items-center justify-between">
+        <div className="p-6 border-t border-neutral-800 bg-neutral-950 flex items-center justify-between">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium"
+            className="px-4 py-2 text-gray-400 hover:text-gray-200 font-medium"
           >
             Close
           </button>
@@ -569,7 +569,7 @@ export function ChaptersModal({ isOpen, onClose, group, coverData }) {
               disabled={splitting || selectedChapters.size === 0}
               className={`px-6 py-2 rounded-lg font-medium flex items-center gap-2 ${
                 splitting || selectedChapters.size === 0
-                  ? 'bg-gray-300 cursor-not-allowed text-gray-500'
+                  ? 'bg-gray-600 cursor-not-allowed text-gray-400'
                   : 'bg-purple-600 hover:bg-purple-700 text-white'
               }`}
             >

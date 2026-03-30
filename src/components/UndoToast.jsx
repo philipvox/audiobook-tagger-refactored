@@ -39,9 +39,9 @@ export function UndoToast({ booksCount, ageSeconds, onUndo, onDismiss, undoing }
 
   return (
     <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 fade-in duration-300">
-      <div className="bg-gray-900 text-white rounded-xl shadow-2xl px-5 py-4 flex items-center gap-4 min-w-[320px]">
+      <div className="bg-neutral-950 text-white rounded-xl shadow-2xl px-5 py-4 flex items-center gap-4 min-w-[320px]">
         {/* Icon */}
-        <div className="p-2 bg-blue-500/20 rounded-lg">
+        <div className="p-2 bg-blue-900/300/20 rounded-lg">
           <Undo2 className="w-5 h-5 text-blue-400" />
         </div>
 
@@ -78,7 +78,7 @@ export function UndoToast({ booksCount, ageSeconds, onUndo, onDismiss, undoing }
 
           <button
             onClick={onDismiss}
-            className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+            className="p-2 hover:bg-neutral-900/10 rounded-lg transition-colors"
             title="Dismiss (keeps changes)"
           >
             <X className="w-4 h-4 text-gray-400" />
@@ -87,9 +87,9 @@ export function UndoToast({ booksCount, ageSeconds, onUndo, onDismiss, undoing }
       </div>
 
       {/* Progress bar showing auto-dismiss */}
-      <div className="h-1 bg-gray-700 rounded-b-xl overflow-hidden -mt-1">
+      <div className="h-1 bg-neutral-800 rounded-b-xl overflow-hidden -mt-1">
         <div
-          className="h-full bg-blue-500 transition-all duration-1000 ease-linear"
+          className="h-full bg-blue-900/300 transition-all duration-1000 ease-linear"
           style={{ width: `${(timeRemaining / 3600) * 100}%` }}
         />
       </div>

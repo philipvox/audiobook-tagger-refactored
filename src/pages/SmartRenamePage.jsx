@@ -176,23 +176,23 @@ export function SmartRenamePage() {
       case 'MissingChapterNames':
         return <FileAudio className="w-4 h-4 text-blue-500" />;
       default:
-        return <AlertTriangle className="w-4 h-4 text-gray-500" />;
+        return <AlertTriangle className="w-4 h-4 text-gray-400" />;
     }
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-gray-50">
+    <div className="h-full overflow-y-auto bg-neutral-950">
       <div className="p-6">
         <div className="max-w-6xl mx-auto space-y-6">
           {/* Header */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6">
+          <div className="bg-neutral-900 rounded-xl border border-neutral-800 p-6">
             <div className="flex items-center gap-4">
               <div className="p-3 bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl">
                 <Wand2 className="w-8 h-8 text-white" />
               </div>
               <div>
-                <h2 className="text-2xl font-bold text-gray-900">AI Smart Rename</h2>
-                <p className="text-gray-600">
+                <h2 className="text-2xl font-bold text-gray-100">AI Smart Rename</h2>
+                <p className="text-gray-400">
                   Intelligently rename files and reorganize folders using AI
                 </p>
               </div>
@@ -200,7 +200,7 @@ export function SmartRenamePage() {
           </div>
 
           {/* Folder Selection */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6">
+          <div className="bg-neutral-900 rounded-xl border border-neutral-800 p-6">
             <div className="flex gap-4">
               <div className="flex-1">
                 <input
@@ -208,12 +208,12 @@ export function SmartRenamePage() {
                   value={folderPath}
                   onChange={(e) => setFolderPath(e.target.value)}
                   placeholder="Select folder to analyze..."
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                  className="w-full px-4 py-3 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
                 />
               </div>
               <button
                 onClick={handlePickFolder}
-                className="px-6 py-3 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
+                className="px-6 py-3 bg-neutral-800 text-gray-300 rounded-lg hover:bg-neutral-700 transition-colors"
               >
                 <FolderOpen className="w-5 h-5" />
               </button>
@@ -269,23 +269,23 @@ export function SmartRenamePage() {
             <div className="space-y-6">
               {/* Statistics Cards */}
               <div className="grid grid-cols-4 gap-4">
-                <div className="bg-white p-4 rounded-xl border border-gray-200 text-center">
-                  <div className="text-3xl font-bold text-gray-900">
+                <div className="bg-neutral-900 p-4 rounded-xl border border-neutral-800 text-center">
+                  <div className="text-3xl font-bold text-gray-100">
                     {analysis.detected_books.length}
                   </div>
-                  <div className="text-sm text-gray-500">Books Detected</div>
+                  <div className="text-sm text-gray-400">Books Detected</div>
                 </div>
-                <div className="bg-white p-4 rounded-xl border border-gray-200 text-center">
+                <div className="bg-neutral-900 p-4 rounded-xl border border-neutral-800 text-center">
                   <div className="text-3xl font-bold text-purple-600">
                     {analysis.statistics.files_to_rename}
                   </div>
-                  <div className="text-sm text-gray-500">Files to Rename</div>
+                  <div className="text-sm text-gray-400">Files to Rename</div>
                 </div>
-                <div className="bg-white p-4 rounded-xl border border-gray-200 text-center">
+                <div className="bg-neutral-900 p-4 rounded-xl border border-neutral-800 text-center">
                   <div className="text-3xl font-bold text-pink-600">
                     {analysis.statistics.folders_to_rename}
                   </div>
-                  <div className="text-sm text-gray-500">Folders to Move</div>
+                  <div className="text-sm text-gray-400">Folders to Move</div>
                 </div>
                 <div className="bg-yellow-50 p-4 rounded-xl border border-yellow-200 text-center">
                   <div className="text-3xl font-bold text-yellow-700">
@@ -296,14 +296,14 @@ export function SmartRenamePage() {
               </div>
 
               {/* Tabs */}
-              <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                <div className="flex border-b border-gray-200">
+              <div className="bg-neutral-900 rounded-xl border border-neutral-800 overflow-hidden">
+                <div className="flex border-b border-neutral-800">
                   <button
                     onClick={() => setActiveTab('files')}
                     className={`px-6 py-3 font-medium transition-colors ${
                       activeTab === 'files'
                         ? 'bg-purple-50 text-purple-700 border-b-2 border-purple-600'
-                        : 'text-gray-600 hover:bg-gray-50'
+                        : 'text-gray-400 hover:bg-neutral-950'
                     }`}
                   >
                     <FileEdit className="w-4 h-4 inline mr-2" />
@@ -314,7 +314,7 @@ export function SmartRenamePage() {
                     className={`px-6 py-3 font-medium transition-colors ${
                       activeTab === 'folders'
                         ? 'bg-purple-50 text-purple-700 border-b-2 border-purple-600'
-                        : 'text-gray-600 hover:bg-gray-50'
+                        : 'text-gray-400 hover:bg-neutral-950'
                     }`}
                   >
                     <FolderTree className="w-4 h-4 inline mr-2" />
@@ -325,7 +325,7 @@ export function SmartRenamePage() {
                     className={`px-6 py-3 font-medium transition-colors ${
                       activeTab === 'issues'
                         ? 'bg-purple-50 text-purple-700 border-b-2 border-purple-600'
-                        : 'text-gray-600 hover:bg-gray-50'
+                        : 'text-gray-400 hover:bg-neutral-950'
                     }`}
                   >
                     <AlertTriangle className="w-4 h-4 inline mr-2" />
@@ -335,8 +335,8 @@ export function SmartRenamePage() {
 
                 {/* Select All / None */}
                 {activeTab === 'files' && analysis.file_proposals.length > 0 && (
-                  <div className="px-4 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-4">
-                    <span className="text-sm text-gray-600">
+                  <div className="px-4 py-2 bg-neutral-950 border-b border-neutral-800 flex items-center gap-4">
+                    <span className="text-sm text-gray-400">
                       {selectedFiles.size} of {analysis.file_proposals.length} selected
                     </span>
                     <button
@@ -347,7 +347,7 @@ export function SmartRenamePage() {
                     </button>
                     <button
                       onClick={() => toggleAllFiles(false)}
-                      className="text-sm text-gray-600 hover:text-gray-800"
+                      className="text-sm text-gray-400 hover:text-gray-200"
                     >
                       Select None
                     </button>
@@ -355,8 +355,8 @@ export function SmartRenamePage() {
                 )}
 
                 {activeTab === 'folders' && analysis.folder_proposals.length > 0 && (
-                  <div className="px-4 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-4">
-                    <span className="text-sm text-gray-600">
+                  <div className="px-4 py-2 bg-neutral-950 border-b border-neutral-800 flex items-center gap-4">
+                    <span className="text-sm text-gray-400">
                       {selectedFolders.size} of {analysis.folder_proposals.length} selected
                     </span>
                     <button
@@ -367,7 +367,7 @@ export function SmartRenamePage() {
                     </button>
                     <button
                       onClick={() => toggleAllFolders(false)}
-                      className="text-sm text-gray-600 hover:text-gray-800"
+                      className="text-sm text-gray-400 hover:text-gray-200"
                     >
                       Select None
                     </button>
@@ -385,11 +385,11 @@ export function SmartRenamePage() {
                         if (bookProposals.length === 0) return null;
 
                         return (
-                          <div key={book.id} className="border-b border-gray-100 last:border-b-0">
+                          <div key={book.id} className="border-b border-neutral-800 last:border-b-0">
                             {/* Book Header */}
                             <button
                               onClick={() => toggleBook(book.id)}
-                              className="w-full px-6 py-4 flex items-center gap-3 hover:bg-gray-50 transition-colors"
+                              className="w-full px-6 py-4 flex items-center gap-3 hover:bg-neutral-950 transition-colors"
                             >
                               {expandedBooks.has(book.id) ? (
                                 <ChevronDown className="w-5 h-5 text-gray-400" />
@@ -397,17 +397,17 @@ export function SmartRenamePage() {
                                 <ChevronRight className="w-5 h-5 text-gray-400" />
                               )}
                               <div className="flex-1 text-left">
-                                <div className="font-medium text-gray-900">{book.title}</div>
-                                <div className="text-sm text-gray-500">
+                                <div className="font-medium text-gray-100">{book.title}</div>
+                                <div className="text-sm text-gray-400">
                                   {book.author}
                                   {book.series && ` - ${book.series}`}
                                   {book.sequence && ` #${book.sequence}`}
                                 </div>
                               </div>
                               <span className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${
-                                book.audiobook_type === 'ChapterSplit' ? 'bg-blue-100 text-blue-700' :
+                                book.audiobook_type === 'ChapterSplit' ? 'bg-blue-100 text-blue-300' :
                                 book.audiobook_type === 'MultiPart' ? 'bg-orange-100 text-orange-700' :
-                                'bg-gray-100 text-gray-600'
+                                'bg-neutral-800 text-gray-400'
                               }`}>
                                 {getAudiobookTypeIcon(book.audiobook_type)}
                                 {getAudiobookTypeLabel(book.audiobook_type)}
@@ -419,14 +419,14 @@ export function SmartRenamePage() {
 
                             {/* Expanded Chapter List */}
                             {expandedBooks.has(book.id) && (
-                              <div className="px-6 pb-4 space-y-2 bg-gray-50">
+                              <div className="px-6 pb-4 space-y-2 bg-neutral-950">
                                 {bookProposals.map((proposal) => (
                                   <label
                                     key={proposal.id}
                                     className={`flex items-start gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
                                       selectedFiles.has(proposal.id)
                                         ? 'bg-purple-50 border border-purple-200'
-                                        : 'bg-white border border-gray-200 hover:bg-gray-50'
+                                        : 'bg-neutral-900 border border-neutral-800 hover:bg-neutral-950'
                                     }`}
                                   >
                                     <input
@@ -441,10 +441,10 @@ export function SmartRenamePage() {
                                         }
                                         setSelectedFiles(newSelected);
                                       }}
-                                      className="mt-1 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                                      className="mt-1 rounded border-neutral-700 text-purple-600 focus:ring-purple-500"
                                     />
                                     <div className="flex-1 min-w-0">
-                                      <div className="font-mono text-sm text-gray-600 truncate">
+                                      <div className="font-mono text-sm text-gray-400 truncate">
                                         {proposal.source_path.split('/').pop()}
                                       </div>
                                       <div className="flex items-center gap-2 mt-1">
@@ -462,7 +462,7 @@ export function SmartRenamePage() {
                         );
                       })}
                       {analysis.file_proposals.length === 0 && (
-                        <div className="p-8 text-center text-gray-500">
+                        <div className="p-8 text-center text-gray-400">
                           No file renames needed
                         </div>
                       )}
@@ -478,7 +478,7 @@ export function SmartRenamePage() {
                           className={`flex items-start gap-4 p-4 cursor-pointer transition-colors ${
                             selectedFolders.has(proposal.id)
                               ? 'bg-purple-50'
-                              : 'hover:bg-gray-50'
+                              : 'hover:bg-neutral-950'
                           }`}
                         >
                           <input
@@ -493,10 +493,10 @@ export function SmartRenamePage() {
                               }
                               setSelectedFolders(newSelected);
                             }}
-                            className="mt-1 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                            className="mt-1 rounded border-neutral-700 text-purple-600 focus:ring-purple-500"
                           />
                           <div className="flex-1 min-w-0">
-                            <div className="font-mono text-sm text-gray-600 truncate">
+                            <div className="font-mono text-sm text-gray-400 truncate">
                               {proposal.source_path.replace(folderPath, '.')}
                             </div>
                             <div className="flex items-center gap-2 mt-1">
@@ -505,7 +505,7 @@ export function SmartRenamePage() {
                                 {proposal.proposed_path.replace(folderPath, '.')}
                               </div>
                             </div>
-                            <div className="text-xs text-gray-500 mt-1">
+                            <div className="text-xs text-gray-400 mt-1">
                               {proposal.file_count} files - {proposal.reason}
                             </div>
                           </div>
@@ -515,7 +515,7 @@ export function SmartRenamePage() {
                         </label>
                       ))}
                       {analysis.folder_proposals.length === 0 && (
-                        <div className="p-8 text-center text-gray-500">
+                        <div className="p-8 text-center text-gray-400">
                           No folder moves needed
                         </div>
                       )}
@@ -529,22 +529,22 @@ export function SmartRenamePage() {
                         <div key={idx} className="p-4 flex items-start gap-3">
                           {getIssueIcon(issue.issue_type)}
                           <div className="flex-1">
-                            <div className="font-mono text-xs text-gray-500 truncate">
+                            <div className="font-mono text-xs text-gray-400 truncate">
                               {issue.path.replace(folderPath, '.')}
                             </div>
-                            <div className="text-sm text-gray-700">{issue.description}</div>
+                            <div className="text-sm text-gray-300">{issue.description}</div>
                           </div>
                           <span className={`px-2 py-1 rounded text-xs ${
                             issue.severity >= 3 ? 'bg-red-100 text-red-700' :
                             issue.severity >= 2 ? 'bg-yellow-100 text-yellow-700' :
-                            'bg-blue-100 text-blue-700'
+                            'bg-blue-100 text-blue-300'
                           }`}>
                             {issue.severity >= 3 ? 'High' : issue.severity >= 2 ? 'Medium' : 'Low'}
                           </span>
                         </div>
                       ))}
                       {analysis.issues.length === 0 && (
-                        <div className="p-8 text-center text-gray-500">
+                        <div className="p-8 text-center text-gray-400">
                           No issues found
                         </div>
                       )}
@@ -554,15 +554,15 @@ export function SmartRenamePage() {
               </div>
 
               {/* Action Bar */}
-              <div className="flex justify-between items-center bg-white rounded-xl border border-gray-200 p-4">
-                <div className="text-sm text-gray-600">
+              <div className="flex justify-between items-center bg-neutral-900 rounded-xl border border-neutral-800 p-4">
+                <div className="text-sm text-gray-400">
                   {selectedFiles.size} files, {selectedFolders.size} folders selected
                 </div>
                 <div className="flex gap-3">
                   <button
                     onClick={handleAnalyze}
                     disabled={analyzing}
-                    className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
+                    className="px-4 py-2 border border-neutral-700 rounded-lg hover:bg-neutral-950 transition-colors flex items-center gap-2"
                   >
                     <RefreshCw className={`w-4 h-4 ${analyzing ? 'animate-spin' : ''}`} />
                     Re-analyze
@@ -582,11 +582,11 @@ export function SmartRenamePage() {
 
           {/* Info Box - shown when no analysis */}
           {!analysis && !result && (
-            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+            <div className="bg-blue-900/30 border border-blue-700 rounded-xl p-4">
               <div className="flex gap-3">
                 <Info className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
                 <div>
-                  <h4 className="font-medium text-blue-900">What AI Smart Rename does</h4>
+                  <h4 className="font-medium text-blue-200">What AI Smart Rename does</h4>
                   <ul className="mt-2 space-y-1 text-sm text-blue-800">
                     <li>Detects book title, author, and series from messy filenames</li>
                     <li>Identifies chapter names for split audiobooks (Track01.mp3 becomes proper chapter names)</li>

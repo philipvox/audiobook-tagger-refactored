@@ -72,13 +72,13 @@ export function GlobalProgressBar() {
   const colors = getColors();
 
   return (
-    <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg z-50">
+    <div className="fixed bottom-0 left-0 right-0 bg-neutral-900 border-t border-neutral-800 shadow-lg z-50">
       <div className="px-6 py-4">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
               <RefreshCw className={`w-5 h-5 ${colors.icon} animate-spin`} />
-              <span className="font-semibold text-gray-900">
+              <span className="font-semibold text-gray-100">
                 {message || 'Processing...'}
               </span>
             </div>
@@ -95,18 +95,18 @@ export function GlobalProgressBar() {
 
           <div className="text-right flex items-center gap-4">
             {total > 0 && (
-              <div className="flex items-center gap-2 text-gray-600">
+              <div className="flex items-center gap-2 text-gray-400">
                 <Clock className="w-4 h-4" />
                 <span className="text-sm font-medium">{calculateETA()}</span>
               </div>
             )}
             <div>
               {total > 0 && (
-                <div className="font-semibold text-gray-900">
+                <div className="font-semibold text-gray-100">
                   {current} of {total}
                 </div>
               )}
-              <div className="text-sm text-gray-600">
+              <div className="text-sm text-gray-400">
                 {percentage}% complete
               </div>
             </div>
@@ -114,7 +114,7 @@ export function GlobalProgressBar() {
         </div>
 
         <div className="mb-2">
-          <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+          <div className="w-full bg-gray-600 rounded-full h-3 overflow-hidden">
             <div
               className={`${colors.bar} h-3 rounded-full transition-all duration-300`}
               style={{
@@ -125,7 +125,7 @@ export function GlobalProgressBar() {
         </div>
 
         {globalProgress.detail && (
-          <div className="text-sm text-gray-600 truncate">
+          <div className="text-sm text-gray-400 truncate">
             <span className="font-medium">Current:</span> {globalProgress.detail}
           </div>
         )}

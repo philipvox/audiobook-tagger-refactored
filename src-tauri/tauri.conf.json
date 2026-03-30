@@ -21,10 +21,10 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost blob: data:; connect-src ipc: http://ipc.localhost https://*.vito0912.de https://*.audible.com https://*.audible.co.uk https://itunes.apple.com https://www.googleapis.com https://*.openlibrary.org https://api.openai.com",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": ["$APPDATA/**", "$HOME/Library/Application Support/Audiobook Tagger/**"]
       },
       "capabilities": [
         {
@@ -50,11 +50,13 @@
     "targets": "all",
     "icon": [
       "icons/icon.icns",
+      "icons/icon.ico",
       "icons/icon.png"
     ],
     "macOS": {
       "entitlements": "entitlements.plist",
-      "exceptionDomain": null
+      "exceptionDomain": null,
+      "signingIdentity": "Developer ID Application: Philip Glenn (DX7MCA54J8)"
     }
   }
 }

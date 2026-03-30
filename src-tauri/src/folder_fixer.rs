@@ -27,7 +27,7 @@ async fn call_codex_api(prompt: &str, api_key: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to build client: {}", e))?;
 
     let body = serde_json::json!({
-        "model": "gpt-5-nano",
+        "model": crate::scanner::processor::preferred_model(),
         "input": [
             {
                 "role": "developer",

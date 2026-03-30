@@ -64,24 +64,24 @@ export function RawTagInspector({ isOpen, onClose }) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+      <div className="bg-neutral-900 rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
         {/* Header */}
-        <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-red-50 to-orange-50">
+        <div className="p-6 border-b border-neutral-800 bg-gradient-to-r from-red-50 to-orange-50">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-red-100 rounded-lg">
                 <FileSearch className="w-6 h-6 text-red-600" />
               </div>
               <div>
-                <h2 className="text-2xl font-bold text-gray-900">Raw Tag Inspector</h2>
-                <p className="text-sm text-gray-600">View file metadata without processing</p>
+                <h2 className="text-2xl font-bold text-gray-100">Raw Tag Inspector</h2>
+                <p className="text-sm text-gray-400">View file metadata without processing</p>
               </div>
             </div>
             <button
               onClick={onClose}
               className="p-2 hover:bg-red-100 rounded-lg transition-colors"
             >
-              <X className="w-6 h-6 text-gray-600" />
+              <X className="w-6 h-6 text-gray-400" />
             </button>
           </div>
         </div>
@@ -91,7 +91,7 @@ export function RawTagInspector({ isOpen, onClose }) {
           {!tagData && !loading && (
             <div className="text-center py-16">
               <FileSearch className="w-20 h-20 text-gray-300 mx-auto mb-4" />
-              <p className="text-gray-600 mb-6">Select an audio file to inspect its metadata</p>
+              <p className="text-gray-400 mb-6">Select an audio file to inspect its metadata</p>
               <button
                 onClick={handleSelectFile}
                 className="btn btn-primary inline-flex items-center gap-2"
@@ -105,7 +105,7 @@ export function RawTagInspector({ isOpen, onClose }) {
           {loading && (
             <div className="text-center py-16">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-red-600 mx-auto mb-4"></div>
-              <p className="text-gray-600">Reading file tags...</p>
+              <p className="text-gray-400">Reading file tags...</p>
             </div>
           )}
 
@@ -125,24 +125,24 @@ export function RawTagInspector({ isOpen, onClose }) {
           {tagData && (
             <div className="space-y-6">
               {/* File Info Card */}
-              <div className="bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl p-6 border border-gray-200">
-                <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <div className="bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl p-6 border border-neutral-800">
+                <h3 className="text-lg font-bold text-gray-100 mb-4 flex items-center gap-2">
                   <Music className="w-5 h-5 text-red-600" />
                   File Information
                 </h3>
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="bg-white rounded-lg p-4 border border-gray-200 md:col-span-2 space-y-2">
-                    <div className="text-xs text-gray-500 uppercase tracking-wide">File Path</div>
+                  <div className="bg-neutral-900 rounded-lg p-4 border border-neutral-800 md:col-span-2 space-y-2">
+                    <div className="text-xs text-gray-400 uppercase tracking-wide">File Path</div>
                     <div className="flex flex-col gap-2">
-                      <div className="text-sm font-semibold text-gray-900 break-all">
+                      <div className="text-sm font-semibold text-gray-100 break-all">
                         {tagData.file_path}
                       </div>
-                      <div className="flex items-center gap-2 text-xs text-gray-500">
-                        <span className="px-2 py-1 bg-gray-100 rounded">{getFileName(tagData.file_path)}</span>
+                      <div className="flex items-center gap-2 text-xs text-gray-400">
+                        <span className="px-2 py-1 bg-neutral-800 rounded">{getFileName(tagData.file_path)}</span>
                         <button
                           onClick={() => copyToClipboard(tagData.file_path)}
-                          className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded transition-colors"
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-gray-300 rounded transition-colors"
                           title="Copy full path"
                         >
                           <Copy className="w-3 h-3" />
@@ -152,41 +152,41 @@ export function RawTagInspector({ isOpen, onClose }) {
                     </div>
                   </div>
 
-                  <div className="bg-white rounded-lg p-4 border border-gray-200">
-                    <div className="text-xs text-gray-500 mb-1">Format</div>
-                    <div className="text-sm font-semibold text-gray-900">
+                  <div className="bg-neutral-900 rounded-lg p-4 border border-neutral-800">
+                    <div className="text-xs text-gray-400 mb-1">Format</div>
+                    <div className="text-sm font-semibold text-gray-100">
                       {tagData.file_format}
                     </div>
                   </div>
                   
                   {tagData.duration_seconds && (
-                    <div className="bg-white rounded-lg p-4 border border-gray-200">
-                      <div className="text-xs text-gray-500 mb-1 flex items-center gap-1">
+                    <div className="bg-neutral-900 rounded-lg p-4 border border-neutral-800">
+                      <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
                         <Clock className="w-3 h-3" />
                         Duration
                       </div>
-                      <div className="text-sm font-semibold text-gray-900">
+                      <div className="text-sm font-semibold text-gray-100">
                         {formatDuration(tagData.duration_seconds)}
                       </div>
                     </div>
                   )}
                   
                   {tagData.bitrate && (
-                    <div className="bg-white rounded-lg p-4 border border-gray-200">
-                      <div className="text-xs text-gray-500 mb-1 flex items-center gap-1">
+                    <div className="bg-neutral-900 rounded-lg p-4 border border-neutral-800">
+                      <div className="text-xs text-gray-400 mb-1 flex items-center gap-1">
                         <Activity className="w-3 h-3" />
                         Bitrate
                       </div>
-                      <div className="text-sm font-semibold text-gray-900">
+                      <div className="text-sm font-semibold text-gray-100">
                         {tagData.bitrate} kbps
                       </div>
                     </div>
                   )}
                   
                   {tagData.sample_rate && (
-                    <div className="bg-white rounded-lg p-4 border border-gray-200 col-span-2">
-                      <div className="text-xs text-gray-500 mb-1">Sample Rate</div>
-                      <div className="text-sm font-semibold text-gray-900">
+                    <div className="bg-neutral-900 rounded-lg p-4 border border-neutral-800 col-span-2">
+                      <div className="text-xs text-gray-400 mb-1">Sample Rate</div>
+                      <div className="text-sm font-semibold text-gray-100">
                         {tagData.sample_rate} Hz
                       </div>
                     </div>
@@ -195,7 +195,7 @@ export function RawTagInspector({ isOpen, onClose }) {
               </div>
 
               {/* Tags Table */}
-              <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="bg-neutral-900 rounded-xl border border-neutral-800 overflow-hidden">
                 <div className="bg-gradient-to-r from-red-600 to-orange-600 px-6 py-4">
                   <h3 className="text-lg font-bold text-white flex items-center justify-between">
                     <span>Metadata Tags ({tagData.tags.length})</span>
@@ -207,30 +207,30 @@ export function RawTagInspector({ isOpen, onClose }) {
                 
                 {tagData.tags.length === 0 ? (
                   <div className="p-8 text-center">
-                    <p className="text-gray-500">No tags found in file</p>
+                    <p className="text-gray-400">No tags found in file</p>
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full">
-                      <thead className="bg-gray-50 border-b border-gray-200">
+                      <thead className="bg-neutral-950 border-b border-neutral-800">
                         <tr>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
                             Tag Key
                           </th>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
                             Value
                           </th>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
                             Type
                           </th>
-                          <th className="px-6 py-3 text-right text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                          <th className="px-6 py-3 text-right text-xs font-semibold text-gray-300 uppercase tracking-wider">
                             Actions
                           </th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-200">
                         {tagData.tags.map((tag, idx) => (
-                          <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                          <tr key={idx} className="hover:bg-neutral-950 transition-colors">
                             <td className="px-6 py-4">
                               <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${
                                 tag.key.includes('Genre') 
@@ -245,13 +245,13 @@ export function RawTagInspector({ isOpen, onClose }) {
                               </span>
                             </td>
                             <td className="px-6 py-4">
-                              <div className="text-sm text-gray-900 max-w-md">
+                              <div className="text-sm text-gray-100 max-w-md">
                                 {tag.value.length > 100 ? (
                                   <details className="cursor-pointer">
-                                    <summary className="font-medium text-blue-600 hover:text-blue-700">
+                                    <summary className="font-medium text-blue-600 hover:text-blue-300">
                                       {tag.value.substring(0, 100)}... (click to expand)
                                     </summary>
-                                    <div className="mt-2 p-3 bg-gray-50 rounded border border-gray-200 whitespace-pre-wrap text-xs">
+                                    <div className="mt-2 p-3 bg-neutral-950 rounded border border-neutral-800 whitespace-pre-wrap text-xs">
                                       {tag.value}
                                     </div>
                                   </details>
@@ -261,14 +261,14 @@ export function RawTagInspector({ isOpen, onClose }) {
                               </div>
                             </td>
                             <td className="px-6 py-4">
-                              <span className="text-xs text-gray-500 font-mono">
+                              <span className="text-xs text-gray-400 font-mono">
                                 {tag.tag_type}
                               </span>
                             </td>
                             <td className="px-6 py-4 text-right">
                               <button
                                 onClick={() => copyToClipboard(tag.value)}
-                                className="inline-flex items-center gap-1 px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded transition-colors"
+                                className="inline-flex items-center gap-1 px-3 py-1 text-xs bg-neutral-800 hover:bg-neutral-700 text-gray-300 rounded transition-colors"
                                 title="Copy value"
                               >
                                 <Copy className="w-3 h-3" />

@@ -182,7 +182,7 @@ export function FolderFixerPage() {
       case 'FlatStructure':
         return <FolderInput className="w-4 h-4 text-blue-600" />;
       default:
-        return <AlertTriangle className="w-4 h-4 text-gray-600" />;
+        return <AlertTriangle className="w-4 h-4 text-gray-400" />;
     }
   };
 
@@ -194,18 +194,18 @@ export function FolderFixerPage() {
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-gray-50">
+    <div className="h-full overflow-y-auto bg-neutral-950">
       <div className="p-6">
         <div className="max-w-5xl mx-auto space-y-6">
           {/* Header */}
-          <div className="bg-white rounded-xl border border-gray-200 p-6">
+          <div className="bg-neutral-900 rounded-xl border border-neutral-800 p-6">
             <div className="flex items-center gap-4">
               <div className="p-3 bg-purple-100 rounded-xl">
                 <FolderTree className="w-8 h-8 text-purple-600" />
               </div>
               <div>
-                <h2 className="text-2xl font-bold text-gray-900">Folder Fixer</h2>
-                <p className="text-gray-600">
+                <h2 className="text-2xl font-bold text-gray-100">Folder Fixer</h2>
+                <p className="text-gray-400">
                   AI-powered folder organization for AudiobookShelf
                 </p>
               </div>
@@ -213,15 +213,15 @@ export function FolderFixerPage() {
           </div>
 
           {/* Folder Selection */}
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            <div className="bg-gradient-to-r from-purple-50 to-violet-50 px-6 py-4 border-b border-gray-200">
+          <div className="bg-neutral-900 rounded-xl border border-neutral-800 overflow-hidden">
+            <div className="bg-gradient-to-r from-purple-50 to-violet-50 px-6 py-4 border-b border-neutral-800">
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-purple-100 rounded-lg">
                   <FolderOpen className="w-5 h-5 text-purple-600" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-semibold text-gray-900">Select Folder</h3>
-                  <p className="text-sm text-gray-600">Choose a folder containing audiobooks to organize</p>
+                  <h3 className="text-lg font-semibold text-gray-100">Select Folder</h3>
+                  <p className="text-sm text-gray-400">Choose a folder containing audiobooks to organize</p>
                 </div>
               </div>
             </div>
@@ -234,7 +234,7 @@ export function FolderFixerPage() {
                     value={folderPath}
                     onChange={(e) => setFolderPath(e.target.value)}
                     placeholder="Select or enter folder path..."
-                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 font-mono text-sm"
+                    className="w-full px-4 py-3 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 font-mono text-sm"
                   />
                 </div>
                 <button
@@ -277,7 +277,7 @@ export function FolderFixerPage() {
                 </span>
               </div>
               {result.backupPath && (
-                <p className="text-sm text-gray-600 mt-2">
+                <p className="text-sm text-gray-400 mt-2">
                   Backup created at: <span className="font-mono">{result.backupPath}</span>
                 </p>
               )}
@@ -300,7 +300,7 @@ export function FolderFixerPage() {
               <button
                 onClick={handleRestructure}
                 disabled={restructuring || analyzing || !folderPath}
-                className="p-5 bg-white border-2 border-dashed border-gray-300 rounded-xl hover:border-blue-400 hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="p-5 bg-neutral-900 border-2 border-dashed border-neutral-700 rounded-xl hover:border-blue-400 hover:bg-blue-900/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <div className="flex flex-col items-center gap-2">
                   {restructuring ? (
@@ -308,8 +308,8 @@ export function FolderFixerPage() {
                   ) : (
                     <Wand2 className="w-10 h-10 text-blue-600" />
                   )}
-                  <span className="text-base font-medium text-gray-900">Restructure Library</span>
-                  <span className="text-xs text-gray-500 text-center">
+                  <span className="text-base font-medium text-gray-100">Restructure Library</span>
+                  <span className="text-xs text-gray-400 text-center">
                     AI-powered reorganization to Author/Series/Title format (FAST)
                   </span>
                 </div>
@@ -318,7 +318,7 @@ export function FolderFixerPage() {
               <button
                 onClick={handleAnalyze}
                 disabled={analyzing || restructuring || !folderPath}
-                className="p-5 bg-white border-2 border-dashed border-gray-300 rounded-xl hover:border-purple-400 hover:bg-purple-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="p-5 bg-neutral-900 border-2 border-dashed border-neutral-700 rounded-xl hover:border-purple-400 hover:bg-purple-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <div className="flex flex-col items-center gap-2">
                   {analyzing ? (
@@ -326,8 +326,8 @@ export function FolderFixerPage() {
                   ) : (
                     <RefreshCw className="w-10 h-10 text-purple-600" />
                   )}
-                  <span className="text-base font-medium text-gray-900">Full Analysis</span>
-                  <span className="text-xs text-gray-500 text-center">
+                  <span className="text-base font-medium text-gray-100">Full Analysis</span>
+                  <span className="text-xs text-gray-400 text-center">
                     Detect issues and suggest organization fixes
                   </span>
                 </div>
@@ -336,7 +336,7 @@ export function FolderFixerPage() {
               <button
                 onClick={handleQuickFix}
                 disabled={applying || restructuring || analyzing || !folderPath}
-                className="p-5 bg-white border-2 border-dashed border-gray-300 rounded-xl hover:border-green-400 hover:bg-green-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="p-5 bg-neutral-900 border-2 border-dashed border-neutral-700 rounded-xl hover:border-green-400 hover:bg-green-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <div className="flex flex-col items-center gap-2">
                   {applying ? (
@@ -344,8 +344,8 @@ export function FolderFixerPage() {
                   ) : (
                     <Play className="w-10 h-10 text-green-600" />
                   )}
-                  <span className="text-base font-medium text-gray-900">Quick Fix</span>
-                  <span className="text-xs text-gray-500 text-center">
+                  <span className="text-base font-medium text-gray-100">Quick Fix</span>
+                  <span className="text-xs text-gray-400 text-center">
                     Merge chapter subfolders into parent folders
                   </span>
                 </div>
@@ -355,11 +355,11 @@ export function FolderFixerPage() {
 
           {/* Info Box */}
           {!analysis && !result && (
-            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+            <div className="bg-blue-900/30 border border-blue-700 rounded-xl p-4">
               <div className="flex gap-3">
                 <Info className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
                 <div>
-                  <h4 className="font-medium text-blue-900">What this tool does</h4>
+                  <h4 className="font-medium text-blue-200">What this tool does</h4>
                   <ul className="mt-2 space-y-1 text-sm text-blue-800">
                     <li className="flex items-center gap-2">
                       <span className="w-2 h-2 bg-yellow-500 rounded-full"></span>
@@ -370,7 +370,7 @@ export function FolderFixerPage() {
                       Fix incorrect naming formats for AudiobookShelf
                     </li>
                     <li className="flex items-center gap-2">
-                      <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
+                      <span className="w-2 h-2 bg-blue-900/300 rounded-full"></span>
                       Organize flat structures into Author/Title format
                     </li>
                     <li className="flex items-center gap-2">
@@ -378,7 +378,7 @@ export function FolderFixerPage() {
                       Separate mixed books in the same folder
                     </li>
                   </ul>
-                  <p className="mt-3 text-sm text-blue-700">
+                  <p className="mt-3 text-sm text-blue-300">
                     Target structure: <span className="font-mono">Author / Series / Book Title /</span>
                   </p>
                 </div>
@@ -391,13 +391,13 @@ export function FolderFixerPage() {
             <div className="space-y-6">
               {/* Summary Cards */}
               <div className="grid grid-cols-3 gap-4">
-                <div className="bg-white p-4 rounded-xl border border-gray-200 text-center">
-                  <div className="text-3xl font-bold text-gray-900">{analysis.total_folders}</div>
-                  <div className="text-sm text-gray-500">Folders Scanned</div>
+                <div className="bg-neutral-900 p-4 rounded-xl border border-neutral-800 text-center">
+                  <div className="text-3xl font-bold text-gray-100">{analysis.total_folders}</div>
+                  <div className="text-sm text-gray-400">Folders Scanned</div>
                 </div>
-                <div className="bg-white p-4 rounded-xl border border-gray-200 text-center">
-                  <div className="text-3xl font-bold text-gray-900">{analysis.total_audio_files}</div>
-                  <div className="text-sm text-gray-500">Audio Files</div>
+                <div className="bg-neutral-900 p-4 rounded-xl border border-neutral-800 text-center">
+                  <div className="text-3xl font-bold text-gray-100">{analysis.total_audio_files}</div>
+                  <div className="text-sm text-gray-400">Audio Files</div>
                 </div>
                 <div className="bg-yellow-50 p-4 rounded-xl border border-yellow-200 text-center">
                   <div className="text-3xl font-bold text-yellow-700">{analysis.issues.length}</div>
@@ -407,17 +407,17 @@ export function FolderFixerPage() {
 
               {/* Issues List */}
               {analysis.issues.length > 0 && (
-                <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                  <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
-                    <h3 className="font-semibold text-gray-900">Issues Found</h3>
+                <div className="bg-neutral-900 rounded-xl border border-neutral-800 overflow-hidden">
+                  <div className="px-6 py-4 border-b border-neutral-800 bg-neutral-950">
+                    <h3 className="font-semibold text-gray-100">Issues Found</h3>
                   </div>
                   <div className="divide-y divide-gray-100 max-h-60 overflow-y-auto">
                     {analysis.issues.map((issue, i) => (
-                      <div key={i} className="flex items-start gap-3 p-4 hover:bg-gray-50">
+                      <div key={i} className="flex items-start gap-3 p-4 hover:bg-neutral-950">
                         {getIssueIcon(issue.issue_type)}
                         <div className="flex-1 min-w-0">
-                          <div className="font-mono text-xs text-gray-500 truncate">{issue.path}</div>
-                          <div className="text-sm text-gray-700">{issue.description}</div>
+                          <div className="font-mono text-xs text-gray-400 truncate">{issue.path}</div>
+                          <div className="text-sm text-gray-300">{issue.description}</div>
                         </div>
                       </div>
                     ))}
@@ -427,9 +427,9 @@ export function FolderFixerPage() {
 
               {/* Proposed Changes */}
               {analysis.proposed_changes.length > 0 && (
-                <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                  <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
-                    <h3 className="font-semibold text-gray-900">
+                <div className="bg-neutral-900 rounded-xl border border-neutral-800 overflow-hidden">
+                  <div className="px-6 py-4 border-b border-neutral-800 bg-neutral-950 flex items-center justify-between">
+                    <h3 className="font-semibold text-gray-100">
                       Proposed Changes ({selectedChanges.size}/{analysis.proposed_changes.length})
                     </h3>
                     <div className="flex gap-3">
@@ -441,7 +441,7 @@ export function FolderFixerPage() {
                       </button>
                       <button
                         onClick={selectNone}
-                        className="text-sm text-gray-600 hover:text-gray-800 font-medium"
+                        className="text-sm text-gray-400 hover:text-gray-200 font-medium"
                       >
                         Select None
                       </button>
@@ -454,18 +454,18 @@ export function FolderFixerPage() {
                         className={`flex items-start gap-4 p-4 cursor-pointer transition-colors ${
                           selectedChanges.has(change.id)
                             ? 'bg-purple-50'
-                            : 'hover:bg-gray-50'
+                            : 'hover:bg-neutral-950'
                         }`}
                       >
                         <input
                           type="checkbox"
                           checked={selectedChanges.has(change.id)}
                           onChange={() => toggleChange(change.id)}
-                          className="mt-1 w-5 h-5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                          className="mt-1 w-5 h-5 rounded border-neutral-700 text-purple-600 focus:ring-purple-500"
                         />
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 text-sm">
-                            <span className="font-mono text-gray-600 truncate max-w-[250px]">
+                            <span className="font-mono text-gray-400 truncate max-w-[250px]">
                               {change.source.split('/').pop()}
                             </span>
                             <ArrowRight className="w-4 h-4 text-gray-400 flex-shrink-0" />
@@ -473,8 +473,8 @@ export function FolderFixerPage() {
                               {change.destination}
                             </span>
                           </div>
-                          <div className="text-sm text-gray-600 mt-1">{change.reason}</div>
-                          <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
+                          <div className="text-sm text-gray-400 mt-1">{change.reason}</div>
+                          <div className="flex items-center gap-4 mt-2 text-xs text-gray-400">
                             <span>{change.file_count} files</span>
                             <span className="flex items-center gap-1">
                               Confidence:
@@ -494,10 +494,10 @@ export function FolderFixerPage() {
               )}
 
               {/* Action Bar */}
-              <div className="flex justify-between items-center bg-white rounded-xl border border-gray-200 p-4">
+              <div className="flex justify-between items-center bg-neutral-900 rounded-xl border border-neutral-800 p-4">
                 <button
                   onClick={reset}
-                  className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium"
+                  className="px-4 py-2 text-gray-400 hover:text-gray-200 font-medium"
                 >
                   Reset
                 </button>
@@ -506,7 +506,7 @@ export function FolderFixerPage() {
                   <button
                     onClick={handleAnalyze}
                     disabled={analyzing}
-                    className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors font-medium flex items-center gap-2"
+                    className="px-4 py-2 border border-neutral-700 rounded-lg hover:bg-neutral-800 transition-colors font-medium flex items-center gap-2"
                   >
                     <RefreshCw className={`w-4 h-4 ${analyzing ? 'animate-spin' : ''}`} />
                     Re-analyze

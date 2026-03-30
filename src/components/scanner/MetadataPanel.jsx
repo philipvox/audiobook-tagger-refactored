@@ -1,29 +1,28 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Book, Edit, Upload, RefreshCw, Download, X, Image as ImageIcon, Database, Folder, Bot, FileAudio, Globe, Music, Scissors } from 'lucide-react';
-import { ChaptersModal } from '../ChaptersModal';
+import { Book, Edit, Upload, RefreshCw, Download, X, Image as ImageIcon, Database, Folder, Bot, FileAudio, Globe, Music, Library, FolderOpen } from 'lucide-react';
 
 // Source badge configuration
 const SOURCE_CONFIG = {
-  audible: { label: 'Audible', color: 'bg-orange-100 text-orange-700 border-orange-200', icon: Music },
-  googlebooks: { label: 'Google', color: 'bg-blue-100 text-blue-700 border-blue-200', icon: Globe },
-  itunes: { label: 'iTunes', color: 'bg-pink-100 text-pink-700 border-pink-200', icon: Music },
-  gpt: { label: 'AI', color: 'bg-purple-100 text-purple-700 border-purple-200', icon: Bot },
-  filetag: { label: 'File', color: 'bg-gray-100 text-gray-700 border-gray-200', icon: FileAudio },
-  folder: { label: 'Folder', color: 'bg-green-100 text-green-700 border-green-200', icon: Folder },
-  manual: { label: 'Manual', color: 'bg-teal-100 text-teal-700 border-teal-200', icon: Edit },
-  unknown: { label: '?', color: 'bg-gray-100 text-gray-500 border-gray-200', icon: Database },
+  audible: { label: 'Audible', color: 'bg-orange-500/20 text-orange-400 border-orange-500/30', icon: Music },
+  googlebooks: { label: 'Google', color: 'bg-blue-500/20 text-blue-400 border-blue-500/30', icon: Globe },
+  itunes: { label: 'iTunes', color: 'bg-pink-500/20 text-pink-400 border-pink-500/30', icon: Music },
+  gpt: { label: 'AI', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30', icon: Bot },
+  filetag: { label: 'File', color: 'bg-gray-500/20 text-gray-400 border-gray-500/30', icon: FileAudio },
+  folder: { label: 'Folder', color: 'bg-green-500/20 text-green-400 border-green-500/30', icon: Folder },
+  manual: { label: 'Manual', color: 'bg-teal-500/20 text-teal-400 border-teal-500/30', icon: Edit },
+  unknown: { label: '?', color: 'bg-gray-500/20 text-gray-500 border-gray-500/30', icon: Database },
 };
 
 // Confidence level configuration
 const getConfidenceConfig = (score) => {
-  if (score >= 85) return { label: 'High', color: 'bg-green-500', textColor: 'text-green-700', bgColor: 'bg-green-50', borderColor: 'border-green-200', emoji: '🟢' };
-  if (score >= 60) return { label: 'Medium', color: 'bg-yellow-500', textColor: 'text-yellow-700', bgColor: 'bg-yellow-50', borderColor: 'border-yellow-200', emoji: '🟡' };
-  return { label: 'Low', color: 'bg-red-500', textColor: 'text-red-700', bgColor: 'bg-red-50', borderColor: 'border-red-200', emoji: '🔴' };
+  if (score >= 85) return { label: 'High', color: 'bg-green-500', textColor: 'text-green-400', borderColor: 'border-green-500/30', bgColor: 'bg-green-500/10' };
+  if (score >= 60) return { label: 'Medium', color: 'bg-yellow-500', textColor: 'text-yellow-400', borderColor: 'border-yellow-500/30', bgColor: 'bg-yellow-500/10' };
+  return { label: 'Low', color: 'bg-red-500', textColor: 'text-red-400', borderColor: 'border-red-500/30', bgColor: 'bg-red-500/10' };
 };
 
-// Check if a string looks like a person's name (2-3 words, capitalized)
+// Check if a string looks like a person's name
 const looksLikePersonName = (s) => {
   const words = s.trim().split(/\s+/);
   if (words.length < 2 || words.length > 4) return false;
@@ -40,103 +39,85 @@ const looksLikePersonName = (s) => {
   return true;
 };
 
-// Validate series name - filter out GPT artifacts and placeholder values
+// Validate series name
 const isValidSeries = (series, author = null) => {
   if (!series || typeof series !== 'string') return false;
-
   const s = series.trim();
   if (s.length < 2) return false;
-
   const lower = s.toLowerCase();
-
-  // Reject known bad values from GPT
   const invalidValues = [
-    // Placeholder values
     'null', 'or null', 'none', 'n/a', 'na', 'unknown', 'unknown series',
     'standalone', 'stand-alone', 'stand alone', 'single', 'single book',
     'not a series', 'no series', 'not part of a series', 'no series name',
     'series name', 'series', 'title', 'book', 'audiobook',
     'undefined', 'not applicable', 'not available', 'tbd', 'tba',
-    // Genres that GPT incorrectly returns as series
     'biography', 'autobiography', 'memoir', 'memoirs', 'fiction', 'non-fiction',
     'nonfiction', 'mystery', 'thriller', 'romance', 'fantasy', 'science fiction',
-    'sci-fi', 'horror', 'historical fiction', 'literary fiction', 'self-help',
-    'self help', 'history', 'true crime', 'comedy', 'humor', 'drama',
-    'adventure', 'action', 'suspense', 'classic', 'classics', 'poetry',
-    'essay', 'essays', 'short stories', 'anthology', 'collection',
-    'young adult', 'ya', 'children', 'kids', 'juvenile', 'teen',
-    'business', 'economics', 'psychology', 'philosophy', 'religion',
-    'spirituality', 'health', 'wellness', 'cooking', 'travel', 'science',
-    'technology', 'politics', 'sociology', 'education', 'reference',
   ];
-
   if (invalidValues.includes(lower)) return false;
-
-  // Reject if contains "or null" anywhere
   if (lower.includes('or null') || lower.includes('#or null')) return false;
-
-  // Reject if series matches the author name
   if (author) {
     const authorLower = author.toLowerCase().trim();
     if (lower === authorLower) return false;
     if (authorLower.includes(lower)) return false;
-    const firstAuthor = authorLower.split(',')[0].trim();
-    if (lower === firstAuthor) return false;
   }
-
-  // Reject if it looks like a person's name (2 words, capitalized)
   if (looksLikePersonName(s)) {
     const words = s.trim().split(/\s+/);
     if (words.length === 2) return false;
   }
-
   return true;
 };
 
-// Validate sequence/book number
 const isValidSequence = (seq) => {
   if (!seq || typeof seq !== 'string') return false;
-
   const s = seq.trim();
   if (s.length === 0) return false;
-
   const lower = s.toLowerCase();
   const invalidValues = ['null', 'or null', 'none', 'n/a', 'na', 'unknown', '?', 'tbd'];
   if (invalidValues.includes(lower)) return false;
-
   return true;
 };
 
-// Confidence indicator component
-function ConfidenceIndicator({ confidence }) {
-  if (!confidence) return null;
+// Small badge showing data source
+function SourceBadge({ source }) {
+  if (!source) return null;
+  const config = SOURCE_CONFIG[source.toLowerCase()] || SOURCE_CONFIG.unknown;
+  const Icon = config.icon;
+  return (
+    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded border ${config.color}`}>
+      <Icon className="w-2.5 h-2.5" />
+      {config.label}
+    </span>
+  );
+}
 
+// Confidence card for Details tab
+function ConfidenceCard({ confidence }) {
+  if (!confidence) return null;
   const config = getConfidenceConfig(confidence.overall);
 
   return (
-    <div className={`rounded-xl border ${config.borderColor} ${config.bgColor} p-4`}>
-      <div className="flex items-center justify-between mb-3">
+    <div className={`rounded-xl border ${config.borderColor} ${config.bgColor} p-5`}>
+      <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <span className="text-lg">{config.emoji}</span>
+          <span className={`w-3 h-3 rounded-full ${config.color}`} />
           <span className={`font-semibold ${config.textColor}`}>
             {config.label} Confidence
           </span>
         </div>
-        <span className={`text-2xl font-bold ${config.textColor}`}>
+        <span className={`text-3xl font-bold ${config.textColor}`}>
           {confidence.overall}%
         </span>
       </div>
 
-      {/* Progress bar */}
-      <div className="h-2 bg-gray-200 rounded-full overflow-hidden mb-3">
+      <div className="h-1.5 bg-neutral-800 rounded-full overflow-hidden mb-4">
         <div
           className={`h-full ${config.color} transition-all duration-300`}
           style={{ width: `${confidence.overall}%` }}
         />
       </div>
 
-      {/* Per-field breakdown */}
-      <div className="grid grid-cols-2 gap-2 text-xs">
+      <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-sm">
         <div className="flex items-center justify-between">
           <span className="text-gray-500">Title</span>
           <span className={`font-medium ${getConfidenceConfig(confidence.title).textColor}`}>
@@ -162,43 +143,18 @@ function ConfidenceIndicator({ confidence }) {
           </span>
         </div>
       </div>
-
-      {/* Sources used */}
-      {confidence.sources_used && confidence.sources_used.length > 0 && (
-        <div className="mt-3 pt-3 border-t border-gray-200">
-          <div className="text-xs text-gray-500 mb-1">Sources</div>
-          <div className="flex flex-wrap gap-1">
-            {confidence.sources_used.map((source, idx) => (
-              <span
-                key={idx}
-                className="px-2 py-0.5 bg-white rounded text-xs font-medium text-gray-600 border border-gray-200"
-              >
-                {source}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-// Small badge showing data source
-function SourceBadge({ source }) {
-  if (!source) return null;
+// Helper: check if a field was changed by enrichment
+function isChanged(group, field) {
+  return group?.changedFields?.includes(field);
+}
 
-  const config = SOURCE_CONFIG[source.toLowerCase()] || SOURCE_CONFIG.unknown;
-  const Icon = config.icon;
-
-  return (
-    <span
-      className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded border ${config.color}`}
-      title={`Source: ${config.label}`}
-    >
-      <Icon className="w-2.5 h-2.5" />
-      {config.label}
-    </span>
-  );
+// CSS class for changed field highlight — subtle left border + faint background glow
+function changedClass(group, field) {
+  return isChanged(group, field) ? 'ring-1 ring-amber-500/40 bg-amber-500/5' : '';
 }
 
 export function MetadataPanel({ group, onEdit }) {
@@ -210,12 +166,14 @@ export function MetadataPanel({ group, onEdit }) {
   const [downloadingCover, setDownloadingCover] = useState(false);
   const [selectedUrl, setSelectedUrl] = useState(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const [showChaptersModal, setShowChaptersModal] = useState(false);
-  
-  // Track blob URL for cleanup
+  const [activeTab, setActiveTab] = useState('about');
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const [absChapters, setAbsChapters] = useState([]);
+  const [loadingChapters, setLoadingChapters] = useState(false);
+  const [chaptersError, setChaptersError] = useState(null);
+
   const blobUrlRef = useRef(null);
 
-  // Cleanup blob URL when component unmounts or cover changes
   useEffect(() => {
     return () => {
       if (blobUrlRef.current) {
@@ -225,37 +183,74 @@ export function MetadataPanel({ group, onEdit }) {
     };
   }, []);
 
-  // Load cover when group changes
   useEffect(() => {
     if (group) {
       loadCover();
+      setActiveTab('about');
+      setDescriptionExpanded(false);
+      setAbsChapters([]);
+      setChaptersError(null);
     } else {
-      // Cleanup when no group
       if (blobUrlRef.current) {
         URL.revokeObjectURL(blobUrlRef.current);
         blobUrlRef.current = null;
       }
       setCoverUrl(null);
       setCoverData(null);
+      setAbsChapters([]);
     }
   }, [group?.id, refreshTrigger]);
 
+  // Load chapters when switching to chapters tab
+  useEffect(() => {
+    if (activeTab === 'chapters' && group?.id && absChapters.length === 0 && !loadingChapters) {
+      loadAbsChapters();
+    }
+  }, [activeTab, group?.id]);
+
+  const loadAbsChapters = async () => {
+    if (!group?.id) return;
+
+    setLoadingChapters(true);
+    setChaptersError(null);
+
+    try {
+      const result = await invoke('get_abs_chapters', { absId: group.id });
+      setAbsChapters(result.chapters || []);
+    } catch (error) {
+      console.error('Failed to load chapters:', error);
+      setChaptersError(error.toString());
+    } finally {
+      setLoadingChapters(false);
+    }
+  };
+
+  // Format time from seconds to HH:MM:SS or MM:SS
+  const formatTime = (seconds) => {
+    if (!seconds && seconds !== 0) return '--:--';
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    if (hrs > 0) {
+      return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
   const loadCover = async () => {
-    // Cleanup previous blob URL
     if (blobUrlRef.current) {
       URL.revokeObjectURL(blobUrlRef.current);
       blobUrlRef.current = null;
     }
     setCoverUrl(null);
-    
+
     try {
       const cover = await invoke('get_cover_for_group', {
         groupId: group.id,
         coverUrl: group.metadata?.cover_url || null,
       });
       setCoverData(cover);
-      
-      // Create blob URL only once
+
       if (cover && cover.data) {
         try {
           const blob = new Blob([new Uint8Array(cover.data)], { type: cover.mime_type || 'image/jpeg' });
@@ -276,7 +271,7 @@ export function MetadataPanel({ group, onEdit }) {
     setShowCoverSearch(true);
     setSearchingCovers(true);
     setCoverOptions([]);
-    
+
     try {
       const results = await invoke('search_cover_options', {
         title: group.metadata.title,
@@ -294,7 +289,7 @@ export function MetadataPanel({ group, onEdit }) {
   const handleDownloadCover = async (url) => {
     setDownloadingCover(true);
     setSelectedUrl(url);
-    
+
     try {
       await invoke('download_cover_from_url', {
         groupId: group.id,
@@ -322,14 +317,11 @@ export function MetadataPanel({ group, onEdit }) {
           extensions: ['jpg', 'jpeg', 'png', 'webp']
         }]
       });
-
       if (!selected) return;
-
       await invoke('set_cover_from_file', {
         groupId: group.id,
         imagePath: selected,
       });
-      
       setRefreshTrigger(prev => prev + 1);
       setShowCoverSearch(false);
     } catch (error) {
@@ -340,375 +332,434 @@ export function MetadataPanel({ group, onEdit }) {
 
   if (!group) {
     return (
-      <div className="flex-1 flex items-center justify-center">
+      <div className="flex-1 flex items-center justify-center bg-neutral-950">
         <div className="text-center max-w-md px-6">
-          <div className="bg-white rounded-2xl p-8 border border-gray-200 shadow-sm">
-            <Book className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-            <h3 className="text-lg font-semibold text-gray-900 mb-2">Select a Book</h3>
-            <p className="text-gray-600 text-sm">Choose a book from the list to view its metadata and processing details.</p>
-          </div>
+          <Book className="w-16 h-16 text-neutral-700 mx-auto mb-4" />
+          <h3 className="text-xl font-semibold text-white mb-2">Select a Book</h3>
+          <p className="text-gray-500">Choose a book from the list to view its metadata.</p>
         </div>
       </div>
     );
   }
 
   const metadata = group.metadata;
+  const hasSeries = isValidSeries(metadata.series, metadata.author) || metadata.all_series?.length > 0;
+  const primarySeries = metadata.all_series?.[0] || (hasSeries ? { name: metadata.series, sequence: metadata.sequence } : null);
+
+  // Format duration
+  const formatDuration = (minutes) => {
+    if (!minutes) return null;
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    if (hours > 0) {
+      return `${hours}h ${mins}m`;
+    }
+    return `${mins} min`;
+  };
+
+  const confidence = metadata.confidence;
+  const confidenceConfig = confidence ? getConfidenceConfig(confidence.overall) : null;
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 bg-gradient-to-br from-gray-50 to-white">
-      <div className="max-w-6xl mx-auto">
-        <div className="bg-white rounded-2xl shadow-lg overflow-hidden border border-gray-100">
-          {/* Header with Edit Button */}
-          <div className="px-8 pt-8 pb-6 border-b border-gray-100 bg-gradient-to-r from-blue-50 to-indigo-50">
-            <div className="flex items-start justify-between">
-              <div className="flex-1">
-                <div className="flex items-center gap-2 mb-2">
-                  <h1 className="text-4xl font-bold text-gray-900 leading-tight">
-                    {metadata.title || 'Untitled'}
-                  </h1>
-                  <SourceBadge source={metadata.sources?.title} />
+    <div className="flex-1 overflow-y-auto bg-neutral-950">
+      {/* Header Section */}
+      <div className="p-6 pb-0">
+        <div className="flex gap-6">
+          {/* Cover Art */}
+          <div className="flex-shrink-0 w-48">
+            <div className="aspect-square bg-neutral-900 rounded-lg overflow-hidden relative">
+              {coverUrl ? (
+                <>
+                  <img
+                    src={coverUrl}
+                    alt={`${metadata.title} cover`}
+                    className="w-full h-full object-cover"
+                    onError={(e) => {
+                      e.target.style.display = 'none';
+                    }}
+                  />
+                  {coverData && (
+                    <div className="absolute bottom-2 right-2 px-2 py-0.5 bg-black/70 rounded text-xs text-white font-medium">
+                      {coverData.size_kb}KB
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="w-full h-full flex flex-col items-center justify-center">
+                  <Book className="w-16 h-16 text-neutral-700 mb-2" />
+                  <p className="text-sm text-neutral-600">No Cover</p>
                 </div>
-                {metadata.subtitle && (
-                  <div className="flex items-center gap-2 mt-2">
-                    <p className="text-xl text-gray-600">{metadata.subtitle}</p>
-                    <SourceBadge source={metadata.sources?.subtitle} />
-                  </div>
-                )}
-              </div>
-              <div className="flex items-center gap-2 ml-6">
-                <button
-                  onClick={() => setShowChaptersModal(true)}
-                  className="px-5 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white rounded-xl transition-all font-medium flex items-center gap-2 shadow-sm hover:shadow-md"
-                  title="Manage chapters and split audiobook"
-                >
-                  <Scissors className="w-4 h-4" />
-                  Chapters
-                </button>
-                {onEdit && (
-                  <button
-                    onClick={() => onEdit(group)}
-                    className="px-5 py-2.5 bg-white hover:bg-gray-50 text-gray-700 rounded-xl transition-all font-medium flex items-center gap-2 shadow-sm border border-gray-200 hover:shadow-md"
-                  >
-                    <Edit className="w-4 h-4" />
-                    Edit
-                  </button>
-                )}
-              </div>
+              )}
             </div>
+
+            {/* Cover buttons */}
+            <button
+              onClick={handleSearchCovers}
+              className="w-full mt-3 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors font-medium flex items-center justify-center gap-2 text-sm"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Find Better Cover
+            </button>
+            <button
+              onClick={handleUploadCover}
+              className="w-full mt-2 px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-gray-300 rounded-lg transition-colors font-medium flex items-center justify-center gap-2 text-sm"
+            >
+              <Upload className="w-4 h-4" />
+              Upload Cover
+            </button>
           </div>
 
-          {/* Main Content Area */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 p-8">
-            {/* Left Column - Main Info (2/3 width) */}
-            <div className="lg:col-span-2 space-y-8">
-              {/* Author and Year */}
-              <div className="flex flex-wrap items-center gap-4 text-base">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-gray-500">by </span>
-                  <span className="font-semibold text-gray-900">{metadata.author || 'Unknown Author'}</span>
-                  <SourceBadge source={metadata.sources?.author} />
-                </div>
-                {metadata.year && (
-                  <div className="flex items-center gap-1.5">
-                    <span className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm font-medium">
-                      {metadata.year}
+          {/* Title & Info */}
+          <div className="flex-1 min-w-0">
+            {/* Series Badge */}
+            {primarySeries && (
+              <div className="mb-3">
+                <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium ${isChanged(group, 'series') || isChanged(group, 'sequence') ? 'bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/40' : 'bg-indigo-500/20 text-indigo-400'}`}>
+                  <Library className="w-4 h-4" />
+                  {primarySeries.name}
+                  {isValidSequence(primarySeries.sequence) && (
+                    <span className="px-1.5 py-0.5 bg-indigo-500 text-white text-xs font-bold rounded">
+                      #{primarySeries.sequence}
                     </span>
-                    <SourceBadge source={metadata.sources?.year} />
-                  </div>
-                )}
-                {group && (
-                  <span className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-sm font-medium">
-                    {group.files.length} file{group.files.length === 1 ? '' : 's'}
+                  )}
+                </span>
+              </div>
+            )}
+
+            {/* Title */}
+            <h1 className={`text-3xl font-bold text-white mb-1 leading-tight ${isChanged(group, 'title') ? 'border-l-2 border-amber-500 pl-2' : ''}`}>
+              {metadata.title || 'Untitled'}
+              {isChanged(group, 'title') && <span className="text-amber-500 text-xs ml-2 font-normal align-middle">changed</span>}
+            </h1>
+
+            {/* Subtitle as series reference */}
+            {hasSeries && (
+              <p className="text-lg text-gray-400 mb-3 italic">
+                {primarySeries?.name}{isValidSequence(primarySeries?.sequence) ? `, Book ${primarySeries.sequence}` : ''}
+              </p>
+            )}
+
+            {/* Author & Narrator */}
+            <div className="flex items-center gap-2 text-gray-300 mb-4">
+              <span className={`font-medium ${isChanged(group, 'author') ? 'text-amber-300' : ''}`}>
+                {metadata.author || 'Unknown Author'}
+                {isChanged(group, 'author') && <span className="text-amber-500 text-[10px] ml-1">●</span>}
+              </span>
+              {metadata.narrator && (
+                <>
+                  <span className="text-gray-600">·</span>
+                  <span className={`text-gray-400 ${isChanged(group, 'narrator') ? 'text-amber-300' : ''}`}>
+                    Read by {metadata.narrator}
+                    {isChanged(group, 'narrator') && <span className="text-amber-500 text-[10px] ml-1">●</span>}
                   </span>
-                )}
-              </div>
+                </>
+              )}
+            </div>
 
-              {/* Series - Show all_series if available, otherwise primary series */}
-              {(metadata.all_series?.length > 0 || isValidSeries(metadata.series, metadata.author)) && (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-                      Series
-                      {metadata.all_series?.length > 1 && (
-                        <span className="ml-2 px-1.5 py-0.5 bg-indigo-200 text-indigo-700 rounded text-[10px]">
-                          {metadata.all_series.length}
-                        </span>
-                      )}
-                    </div>
-                    <SourceBadge source={metadata.sources?.series} />
+            {/* Stats Row */}
+            <div className="flex items-center gap-8">
+              {metadata.runtime_minutes && (
+                <div className="text-center">
+                  <div className="text-xl font-semibold text-white">
+                    {formatDuration(metadata.runtime_minutes)}
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    {metadata.all_series?.length > 0 ? (
-                      // Display ALL series from all_series array
-                      metadata.all_series.map((s, idx) => (
-                        <div key={idx} className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl border border-indigo-200">
-                          <Book className="w-4 h-4 text-indigo-600" />
-                          <span className="font-semibold text-gray-900">{s.name}</span>
-                          {isValidSequence(s.sequence) && (
-                            <span className="px-2 py-0.5 bg-indigo-600 text-white text-xs font-bold rounded-full">
-                              #{s.sequence}
-                            </span>
-                          )}
-                        </div>
-                      ))
-                    ) : (
-                      // Fallback to primary series/sequence
-                      <div className="inline-flex items-center gap-2 px-5 py-3 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl border border-indigo-200">
-                        <Book className="w-5 h-5 text-indigo-600" />
-                        <span className="font-semibold text-gray-900 text-lg">{metadata.series}</span>
-                        {isValidSequence(metadata.sequence) && (
-                          <span className="ml-1 px-2.5 py-0.5 bg-indigo-600 text-white text-sm font-bold rounded-full">
-                            #{metadata.sequence}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                  <div className="text-xs text-gray-500 uppercase tracking-wider">Duration</div>
                 </div>
               )}
-
-              {/* Narrator(s) - Support multiple narrators */}
-              {(metadata.narrators?.length > 0 || metadata.narrator) && (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-                      Narrated by
-                      {metadata.narrators?.length > 1 && (
-                        <span className="ml-2 px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded text-[10px]">
-                          {metadata.narrators.length}
-                        </span>
-                      )}
-                    </div>
-                    <SourceBadge source={metadata.sources?.narrator} />
-                  </div>
-                  <p className="text-lg font-medium text-gray-900">
-                    {metadata.narrators?.length > 0
-                      ? metadata.narrators.join(', ')
-                      : metadata.narrator}
-                  </p>
+              {metadata.year && (
+                <div className={`text-center ${isChanged(group, 'year') ? 'ring-1 ring-amber-500/40 rounded-lg px-2 py-1 bg-amber-500/5' : ''}`}>
+                  <div className="text-xl font-semibold text-white">{metadata.year}</div>
+                  <div className="text-xs text-gray-500 uppercase tracking-wider">Published</div>
                 </div>
               )}
-
-              {/* Genres */}
-              {metadata.genres && metadata.genres.length > 0 && (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Genres</div>
-                    <SourceBadge source={metadata.sources?.genres} />
+              {confidence && (
+                <div className="text-center">
+                  <div className={`text-xl font-semibold ${confidenceConfig.textColor}`}>
+                    {confidence.overall}%
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    {metadata.genres.map((genre, idx) => (
-                      <span key={idx} className="inline-flex items-center px-4 py-2 bg-gradient-to-r from-gray-800 to-gray-900 text-white text-sm font-semibold rounded-full shadow-sm hover:shadow-md transition-shadow">
-                        {genre}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Description with Themes & Tropes */}
-              {(metadata.description || metadata.themes?.length > 0 || metadata.tropes?.length > 0) && (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">About</div>
-                    <SourceBadge source={metadata.sources?.description || metadata.themes_source} />
-                  </div>
-
-                  {/* Themes & Tropes - displayed at top of About section */}
-                  {(metadata.themes?.length > 0 || metadata.tropes?.length > 0) && (
-                    <div className="space-y-2 pb-3 border-b border-gray-100">
-                      {metadata.themes?.length > 0 && (
-                        <div className="flex items-start gap-2">
-                          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider flex-shrink-0 pt-0.5 w-14">Themes</span>
-                          <span className="text-sm text-gray-700">
-                            {metadata.themes.join(' · ')}
-                          </span>
-                        </div>
-                      )}
-                      {metadata.tropes?.length > 0 && (
-                        <div className="flex items-start gap-2">
-                          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider flex-shrink-0 pt-0.5 w-14">Tropes</span>
-                          <span className="text-sm text-gray-700">
-                            {metadata.tropes.join(' · ')}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Description text */}
-                  {metadata.description && (
-                    <div className="prose prose-sm max-w-none">
-                      <p className="text-gray-700 leading-relaxed whitespace-pre-wrap">
-                        {metadata.description}
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Publisher & Identifiers Section */}
-              {(metadata.publisher || metadata.isbn || metadata.asin || metadata.language || metadata.runtime_minutes) && (
-                <div className="pt-6 border-t border-gray-200">
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-6">
-                    {metadata.publisher && (
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-1.5">
-                          <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Publisher</div>
-                          <SourceBadge source={metadata.sources?.publisher} />
-                        </div>
-                        <div className="text-gray-900 font-medium">{metadata.publisher}</div>
-                      </div>
-                    )}
-                    {metadata.isbn && (
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-1.5">
-                          <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">ISBN</div>
-                          <SourceBadge source={metadata.sources?.isbn} />
-                        </div>
-                        <div className="text-gray-900 font-mono text-sm">{metadata.isbn}</div>
-                      </div>
-                    )}
-                    {metadata.asin && (
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-1.5">
-                          <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">ASIN</div>
-                          <SourceBadge source={metadata.sources?.asin} />
-                        </div>
-                        <div className="text-gray-900 font-mono text-sm">{metadata.asin}</div>
-                      </div>
-                    )}
-                    {metadata.language && (
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-1.5">
-                          <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Language</div>
-                          <SourceBadge source={metadata.sources?.language} />
-                        </div>
-                        <div className="text-gray-900 font-medium uppercase">{metadata.language}</div>
-                      </div>
-                    )}
-                    {metadata.runtime_minutes && (
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-1.5">
-                          <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Runtime</div>
-                          <SourceBadge source={metadata.sources?.runtime} />
-                        </div>
-                        <div className="text-gray-900 font-medium">
-                          {Math.floor(metadata.runtime_minutes / 60)}h {metadata.runtime_minutes % 60}m
-                        </div>
-                      </div>
-                    )}
-                    {metadata.abridged !== null && metadata.abridged !== undefined && (
-                      <div className="space-y-1">
-                        <div className="text-xs font-bold text-gray-500 uppercase tracking-wider">Format</div>
-                        <div className={`font-medium ${metadata.abridged ? 'text-orange-600' : 'text-green-600'}`}>
-                          {metadata.abridged ? 'Abridged' : 'Unabridged'}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* File Details - Shows chapter order for ABS */}
-              {group && group.files && group.files.length > 0 && (
-                <div className="pt-6 border-t border-gray-200">
-                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">
-                    Chapter Order ({group.files.length} files)
-                  </div>
-                  <div className="space-y-1">
-                    {group.files.map((file, idx) => (
-                      <div key={idx} className="text-sm text-gray-600 truncate font-mono bg-gray-50 px-3 py-2 rounded-lg border border-gray-100 flex items-center gap-2">
-                        <span className="flex-shrink-0 w-8 h-6 bg-purple-100 text-purple-700 rounded text-xs font-bold flex items-center justify-center">
-                          {idx + 1}
-                        </span>
-                        <span className="truncate">{file.filename}</span>
-                      </div>
-                    ))}
-                  </div>
+                  <div className="text-xs text-gray-500 uppercase tracking-wider">Confidence</div>
                 </div>
               )}
             </div>
 
-            {/* Right Column - Cover Art & Confidence */}
-            <div className="lg:col-span-1">
-              <div className="sticky top-6 space-y-4">
-                {/* Confidence Indicator */}
-                <ConfidenceIndicator confidence={metadata.confidence} />
-
-                <div className="aspect-square bg-gradient-to-br from-gray-100 to-gray-200 rounded-2xl shadow-xl overflow-hidden border-4 border-white ring-1 ring-gray-200 relative flex items-center justify-center">
-                  {coverUrl ? (
-                    <>
-                      <img
-                        src={coverUrl}
-                        alt={`${metadata.title} cover`}
-                        className="max-w-full max-h-full object-contain"
-                        onError={(e) => {
-                          console.error('Failed to load cover image');
-                          e.target.style.display = 'none';
-                        }}
-                      />
-                      {coverData && (
-                        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent text-white text-xs px-3 py-2">
-                          <div className="flex justify-between items-center">
-                            <span className="font-medium">{coverData.size_kb} KB</span>
-                            {coverData.width && coverData.height && (
-                              <span className="text-white/80">{coverData.width}×{coverData.height}</span>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <div className="flex flex-col items-center justify-center p-6">
-                      <Book className="w-20 h-20 text-gray-400 mb-4" />
-                      <p className="text-center text-sm text-gray-500 font-medium">No Cover Available</p>
-                    </div>
-                  )}
-                </div>
-
-                {/* Cover Management Buttons */}
-                <div className="space-y-2">
-                  <button
-                    onClick={handleSearchCovers}
-                    className="w-full px-4 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl transition-all font-medium flex items-center justify-center gap-2 shadow-sm hover:shadow-md"
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                    Find Better Cover
-                  </button>
-                  
-                  <button
-                    onClick={handleUploadCover}
-                    className="w-full px-4 py-2.5 bg-white hover:bg-gray-50 text-gray-700 rounded-xl transition-all font-medium flex items-center justify-center gap-2 shadow-sm border border-gray-200 hover:shadow-md"
-                  >
-                    <Upload className="w-4 h-4" />
-                    Upload Custom Cover
-                  </button>
-                </div>
-              </div>
-            </div>
+            {/* Edit Button */}
+            {onEdit && (
+              <button
+                onClick={() => onEdit(group)}
+                className="mt-4 px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-white rounded-lg transition-colors font-medium flex items-center gap-2 text-sm"
+              >
+                <Edit className="w-4 h-4" />
+                Edit
+              </button>
+            )}
           </div>
         </div>
       </div>
 
+      {/* Tabs */}
+      <div className="px-6 mt-6 border-b border-neutral-800">
+        <div className="flex gap-6">
+          {['about', 'chapters', 'details'].map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`pb-3 text-sm font-medium transition-colors relative ${
+                activeTab === tab
+                  ? 'text-white'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              {activeTab === tab && (
+                <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-white" />
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tab Content */}
+      <div className="p-6">
+        {activeTab === 'about' && (
+          <div className="space-y-6">
+            {/* Description with Drop Cap */}
+            {metadata.description && (
+              <div className={`${isChanged(group, 'description') ? 'border-l-2 border-amber-500 pl-4' : ''}`}>
+                {isChanged(group, 'description') && (
+                  <div className="text-[10px] uppercase tracking-wider text-amber-500 font-semibold mb-2">Updated by enrichment</div>
+                )}
+                <div className="text-gray-300 leading-relaxed">
+                  <span className="float-left text-6xl font-serif text-white mr-3 mt-1 leading-none">
+                    {metadata.description.charAt(0).toUpperCase()}
+                  </span>
+                  <span>
+                    {descriptionExpanded
+                      ? metadata.description.slice(1)
+                      : metadata.description.slice(1, 300) + (metadata.description.length > 300 ? '...' : '')
+                    }
+                  </span>
+                </div>
+                {metadata.description.length > 300 && (
+                  <button
+                    onClick={() => setDescriptionExpanded(!descriptionExpanded)}
+                    className="text-blue-400 hover:text-blue-300 text-sm mt-2"
+                  >
+                    {descriptionExpanded ? 'Show less' : 'Read more'}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Genres */}
+            {metadata.genres && metadata.genres.length > 0 && (
+              <div className={`${isChanged(group, 'genres') ? 'border-l-2 border-amber-500 pl-4' : ''}`}>
+                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
+                  Genres {isChanged(group, 'genres') && <span className="text-amber-500">● updated</span>}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {metadata.genres.map((genre, idx) => (
+                    <span
+                      key={idx}
+                      className="px-4 py-2 bg-neutral-800 text-white text-sm font-medium rounded-full"
+                    >
+                      {genre}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Tags */}
+            {metadata.tags && metadata.tags.length > 0 && (
+              <div className={`${isChanged(group, 'tags') ? 'border-l-2 border-amber-500 pl-4' : ''}`}>
+                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
+                  Tags {isChanged(group, 'tags') && <span className="text-amber-500">● updated</span>}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {metadata.tags.map((tag, idx) => (
+                    <span
+                      key={idx}
+                      className="px-3 py-1.5 border border-amber-600/50 text-amber-500 text-sm rounded-full"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'chapters' && (
+          <div className="space-y-4">
+            {loadingChapters ? (
+              <div className="text-center py-8">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500 mx-auto mb-3"></div>
+                <p className="text-gray-500">Loading chapters...</p>
+              </div>
+            ) : chaptersError ? (
+              <div className="text-center py-8">
+                <p className="text-red-400 mb-2">Failed to load chapters</p>
+                <p className="text-gray-500 text-sm">{chaptersError}</p>
+                <button
+                  onClick={loadAbsChapters}
+                  className="mt-4 px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-white rounded-lg text-sm"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : absChapters.length > 0 ? (
+              <>
+                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
+                  Chapters ({absChapters.length})
+                </div>
+                <div className="space-y-1">
+                  {absChapters.map((chapter, idx) => (
+                    <div
+                      key={chapter.id}
+                      className="flex items-center gap-3 p-3 bg-neutral-900 rounded-lg border border-neutral-800 hover:border-neutral-700 transition-colors"
+                    >
+                      <span className="w-8 h-8 flex-shrink-0 flex items-center justify-center bg-indigo-500/20 text-indigo-400 rounded text-sm font-bold">
+                        {idx + 1}
+                      </span>
+                      <span className="text-gray-300 text-sm flex-1 truncate">
+                        {chapter.title}
+                      </span>
+                      <span className="text-gray-500 text-xs font-mono flex-shrink-0">
+                        {formatTime(chapter.start)}
+                      </span>
+                      <span className="text-gray-600 text-xs">-</span>
+                      <span className="text-gray-500 text-xs font-mono flex-shrink-0">
+                        {formatTime(chapter.end)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
+                  Files ({group.files?.length || 0})
+                </div>
+                {group.files && group.files.length > 0 ? (
+                  <div className="space-y-1">
+                    {group.files.map((file, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center gap-3 p-3 bg-neutral-900 rounded-lg border border-neutral-800"
+                      >
+                        <span className="w-8 h-8 flex items-center justify-center bg-indigo-500/20 text-indigo-400 rounded text-sm font-bold">
+                          {idx + 1}
+                        </span>
+                        <span className="text-gray-300 text-sm font-mono truncate flex-1">
+                          {file.filename}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-8 text-gray-500">
+                    No chapters or files available
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'details' && (
+          <div className="space-y-6">
+            {/* Detail Cards Grid */}
+            <div className="grid grid-cols-2 gap-4">
+              {metadata.isbn && (
+                <div className={`p-4 bg-neutral-900 rounded-xl border ${isChanged(group, 'isbn') ? 'border-amber-500/50 ring-1 ring-amber-500/20' : 'border-neutral-800'}`}>
+                  <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                    ISBN {isChanged(group, 'isbn') && <span className="text-amber-500">●</span>}
+                  </div>
+                  <div className="text-white font-mono">{metadata.isbn}</div>
+                </div>
+              )}
+              {metadata.asin && (
+                <div className={`p-4 bg-neutral-900 rounded-xl border ${isChanged(group, 'asin') ? 'border-amber-500/50 ring-1 ring-amber-500/20' : 'border-neutral-800'}`}>
+                  <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                    ASIN {isChanged(group, 'asin') && <span className="text-amber-500">●</span>}
+                  </div>
+                  <div className="text-white font-mono">{metadata.asin}</div>
+                </div>
+              )}
+              {metadata.year && (
+                <div className={`p-4 bg-neutral-900 rounded-xl border ${isChanged(group, 'year') ? 'border-amber-500/50 ring-1 ring-amber-500/20' : 'border-neutral-800'}`}>
+                  <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                    Year {isChanged(group, 'year') && <span className="text-amber-500">●</span>}
+                  </div>
+                  <div className="text-white text-xl font-semibold">{metadata.year}</div>
+                </div>
+              )}
+              {metadata.runtime_minutes && (
+                <div className="p-4 bg-neutral-900 rounded-xl border border-neutral-800">
+                  <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                    Duration
+                  </div>
+                  <div className="text-white text-xl font-semibold">
+                    {formatDuration(metadata.runtime_minutes)}
+                  </div>
+                </div>
+              )}
+              {metadata.publisher && (
+                <div className="p-4 bg-neutral-900 rounded-xl border border-neutral-800">
+                  <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                    Publisher
+                  </div>
+                  <div className="text-white">{metadata.publisher}</div>
+                </div>
+              )}
+              {metadata.language && (
+                <div className="p-4 bg-neutral-900 rounded-xl border border-neutral-800">
+                  <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                    Language
+                  </div>
+                  <div className="text-white uppercase">{metadata.language}</div>
+                </div>
+              )}
+            </div>
+
+            {/* File Location */}
+            {group.files && group.files[0]?.path && (
+              <div className="p-4 bg-neutral-900 rounded-xl border border-neutral-800">
+                <div className="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                  <FolderOpen className="w-4 h-4" />
+                  File Location
+                </div>
+                <div className="text-gray-400 font-mono text-sm break-all">
+                  {group.files[0].path.replace(/\/[^/]+$/, '')}
+                </div>
+              </div>
+            )}
+
+            {/* Confidence Card */}
+            <ConfidenceCard confidence={confidence} />
+          </div>
+        )}
+      </div>
+
       {/* Cover Search Modal */}
       {showCoverSearch && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-            <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50">
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-neutral-900 rounded-xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col border border-neutral-800">
+            <div className="p-6 border-b border-neutral-800">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-2xl font-bold text-gray-900">Find Better Cover</h2>
-                  <p className="text-sm text-gray-600 mt-1">{metadata.title}</p>
+                  <h2 className="text-2xl font-bold text-white">Find Better Cover</h2>
+                  <p className="text-sm text-gray-400 mt-1">{metadata.title}</p>
                 </div>
                 <button
                   onClick={() => {
                     setShowCoverSearch(false);
                     setCoverOptions([]);
                   }}
-                  className="p-2 hover:bg-blue-100 rounded-lg transition-colors"
+                  className="p-2 hover:bg-neutral-800 rounded-lg transition-colors"
                 >
-                  <X className="w-6 h-6 text-gray-600" />
+                  <X className="w-6 h-6 text-gray-400" />
                 </button>
               </div>
             </div>
@@ -716,16 +767,16 @@ export function MetadataPanel({ group, onEdit }) {
             <div className="flex-1 overflow-y-auto p-6">
               {searchingCovers ? (
                 <div className="text-center py-12">
-                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-                  <p className="text-gray-600">Searching for covers...</p>
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-500 mx-auto mb-4"></div>
+                  <p className="text-gray-400">Searching for covers...</p>
                 </div>
               ) : coverOptions.length === 0 ? (
                 <div className="text-center py-12">
-                  <ImageIcon className="w-16 h-16 text-gray-300 mx-auto mb-4" />
-                  <p className="text-gray-600 mb-4">No covers found from online sources</p>
+                  <ImageIcon className="w-16 h-16 text-neutral-700 mx-auto mb-4" />
+                  <p className="text-gray-400 mb-4">No covers found from online sources</p>
                   <button
                     onClick={handleUploadCover}
-                    className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors flex items-center gap-2 mx-auto"
+                    className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium transition-colors flex items-center gap-2 mx-auto"
                   >
                     <Upload className="w-4 h-4" />
                     Upload Custom Cover
@@ -737,19 +788,15 @@ export function MetadataPanel({ group, onEdit }) {
                     {coverOptions.map((option, idx) => (
                       <div
                         key={idx}
-                        className="group border border-gray-200 rounded-lg overflow-hidden hover:shadow-xl hover:border-blue-300 transition-all bg-white"
+                        className="group border border-neutral-800 rounded-lg overflow-hidden hover:border-indigo-500 transition-all bg-neutral-900"
                       >
-                        <div className="aspect-square bg-gray-100 relative overflow-hidden flex items-center justify-center">
+                        <div className="aspect-square bg-neutral-800 relative overflow-hidden flex items-center justify-center">
                           <img
                             src={option.url}
                             alt="Cover preview"
                             className="max-w-full max-h-full object-contain group-hover:scale-105 transition-transform duration-300"
                             loading="lazy"
-                            onError={(e) => {
-                              e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="200"%3E%3Crect fill="%23ddd" width="200" height="200"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%23999" font-size="14"%3ENo Image%3C/text%3E%3C/svg%3E';
-                            }}
                           />
-
                           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center p-3">
                             <button
                               onClick={() => handleDownloadCover(option.url)}
@@ -770,10 +817,9 @@ export function MetadataPanel({ group, onEdit }) {
                             </button>
                           </div>
                         </div>
-
-                        <div className="p-3 bg-white">
+                        <div className="p-3">
                           <div className="flex items-center justify-between mb-1">
-                            <span className="text-xs font-semibold text-gray-900 truncate">
+                            <span className="text-xs font-semibold text-white truncate">
                               {option.source}
                             </span>
                             {option.width > 0 && (
@@ -782,18 +828,17 @@ export function MetadataPanel({ group, onEdit }) {
                               </span>
                             )}
                           </div>
-                          <div className="text-xs text-gray-600">
+                          <div className="text-xs text-gray-500">
                             {option.size_estimate}
                           </div>
                         </div>
                       </div>
                     ))}
                   </div>
-
-                  <div className="border-t border-gray-200 pt-6 mt-6">
+                  <div className="border-t border-neutral-800 pt-6 mt-6">
                     <button
                       onClick={handleUploadCover}
-                      className="w-full px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+                      className="w-full px-4 py-3 bg-neutral-800 hover:bg-neutral-700 text-gray-300 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
                     >
                       <Upload className="w-4 h-4" />
                       Upload Custom Cover Instead
@@ -804,16 +849,6 @@ export function MetadataPanel({ group, onEdit }) {
             </div>
           </div>
         </div>
-      )}
-
-      {/* Chapters Modal */}
-      {showChaptersModal && group && (
-        <ChaptersModal
-          isOpen={showChaptersModal}
-          onClose={() => setShowChaptersModal(false)}
-          group={group}
-          coverData={coverData}
-        />
       )}
     </div>
   );

@@ -267,6 +267,8 @@ fn load_metadata_json(folder_path: &str) -> (Option<BookMetadata>, bool) {
         runtime_minutes: None,
         explicit: None,
         publish_date: None,
+        age_rating: None,
+        content_rating: None,
         sources: None,
         // Collection fields - detected later in processing
         is_collection: false,
@@ -277,6 +279,10 @@ fn load_metadata_json(folder_path: &str) -> (Option<BookMetadata>, bool) {
         tropes: vec![],
         themes_source: None,
         tropes_source: None,
+        tags: vec![],
+        source_path: None,
+        added_at: None,
+        updated_at: None,
     }), true)
 }
 
@@ -496,6 +502,8 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                     runtime_minutes: None,
                     explicit: None,
                     publish_date: None,
+                    age_rating: None,
+                    content_rating: None,
                     sources: None,
                     // Collection fields - detected later in processing
                     is_collection: false,
@@ -506,6 +514,10 @@ fn group_files_by_book(files: Vec<RawFileData>) -> Vec<BookGroup> {
                     tropes: vec![],
                     themes_source: None,
                     tropes_source: None,
+                    tags: vec![],
+                    source_path: None,
+                    added_at: None,
+                    updated_at: None,
                 }, ScanStatus::NotScanned)
             };
 

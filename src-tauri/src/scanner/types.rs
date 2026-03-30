@@ -171,6 +171,10 @@ pub struct MetadataSources {
     pub language: Option<MetadataSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_rating: Option<MetadataSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_rating: Option<MetadataSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -424,6 +428,14 @@ pub struct BookMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_date: Option<String>,
 
+    // AGE & CONTENT RATINGS
+    /// Age appropriateness category: "Childrens", "Teens", "Young Adult", "Adult"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_rating: Option<String>,
+    /// Content rating similar to movie ratings: "G", "PG", "PG-13", "R", "X"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_rating: Option<String>,
+
     /// Source tracking - where each metadata field came from
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sources: Option<MetadataSources>,
@@ -456,6 +468,36 @@ pub struct BookMetadata {
     /// Source of tropes data: "gpt", "api", or "manual"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tropes_source: Option<String>,
+
+    /// Tags for ABS (mood, pacing, tropes, length, etc.)
+    /// These are separate from genres - tags are more granular categorization
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+
+    /// Source path - for ABS imports this is the server path, for local scans this is the folder path
+    /// Used as context for title resolution when files array is empty
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+
+    /// Timestamp when the book was added to ABS (milliseconds since epoch)
+    /// Used for sorting by "date added"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<i64>,
+
+    /// Timestamp when the book was last updated in ABS (milliseconds since epoch)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+}
+
+impl BookMetadata {
+    /// Create a new BookMetadata with required fields, defaults for the rest
+    pub fn new(title: String, author: String) -> Self {
+        Self {
+            title,
+            author,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

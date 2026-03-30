@@ -277,10 +277,10 @@ export function ConvertPage() {
   // FFmpeg not available
   if (ffmpegChecking) {
     return (
-      <div className="h-full flex items-center justify-center bg-gray-50">
+      <div className="h-full flex items-center justify-center bg-neutral-950">
         <div className="text-center">
           <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto mb-4" />
-          <p className="text-gray-600">Checking FFmpeg availability...</p>
+          <p className="text-gray-400">Checking FFmpeg availability...</p>
         </div>
       </div>
     );
@@ -288,23 +288,23 @@ export function ConvertPage() {
 
   if (!ffmpegInfo?.available) {
     return (
-      <div className="h-full flex items-center justify-center bg-gray-50 p-8">
-        <div className="max-w-md bg-white rounded-xl shadow-lg p-8 text-center">
+      <div className="h-full flex items-center justify-center bg-neutral-950 p-8">
+        <div className="max-w-md bg-neutral-900 rounded-xl shadow-lg p-8 text-center">
           <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-4" />
-          <h2 className="text-xl font-semibold text-gray-900 mb-2">FFmpeg Required</h2>
-          <p className="text-gray-600 mb-6">
+          <h2 className="text-xl font-semibold text-gray-100 mb-2">FFmpeg Required</h2>
+          <p className="text-gray-400 mb-6">
             FFmpeg is required for audio conversion but was not found on your system.
           </p>
-          <div className="bg-gray-50 rounded-lg p-4 text-left text-sm">
-            <p className="font-medium text-gray-800 mb-2">Install FFmpeg:</p>
-            <p className="text-gray-600 mb-2">
-              <strong>macOS:</strong> <code className="bg-gray-200 px-1 rounded">brew install ffmpeg</code>
+          <div className="bg-neutral-950 rounded-lg p-4 text-left text-sm">
+            <p className="font-medium text-gray-200 mb-2">Install FFmpeg:</p>
+            <p className="text-gray-400 mb-2">
+              <strong>macOS:</strong> <code className="bg-gray-600 px-1 rounded">brew install ffmpeg</code>
             </p>
-            <p className="text-gray-600 mb-2">
+            <p className="text-gray-400 mb-2">
               <strong>Windows:</strong> Download from ffmpeg.org
             </p>
-            <p className="text-gray-600">
-              <strong>Linux:</strong> <code className="bg-gray-200 px-1 rounded">apt install ffmpeg</code>
+            <p className="text-gray-400">
+              <strong>Linux:</strong> <code className="bg-gray-600 px-1 rounded">apt install ffmpeg</code>
             </p>
           </div>
           <button
@@ -319,17 +319,17 @@ export function ConvertPage() {
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-gray-50 p-6">
+    <div className="h-full overflow-y-auto bg-neutral-950 p-6">
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Header */}
-        <div className="bg-white rounded-xl shadow-sm p-6">
+        <div className="bg-neutral-900 rounded-xl shadow-sm p-6">
           <div className="flex items-center gap-3 mb-2">
             <div className="p-2 bg-purple-100 rounded-lg">
               <Disc3 className="w-6 h-6 text-purple-600" />
             </div>
-            <h1 className="text-2xl font-bold text-gray-900">MP3 to M4B Conversion</h1>
+            <h1 className="text-2xl font-bold text-gray-100">MP3 to M4B Conversion</h1>
           </div>
-          <p className="text-gray-600">
+          <p className="text-gray-400">
             Convert your MP3 audiobook files into a single M4B file with chapters, metadata, and cover art.
           </p>
           {ffmpegInfo?.has_libfdk_aac && (
@@ -341,33 +341,33 @@ export function ConvertPage() {
         </div>
 
         {/* Source Selection */}
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <FolderOpen className="w-5 h-5 text-gray-600" />
+        <div className="bg-neutral-900 rounded-xl shadow-sm p-6">
+          <h2 className="text-lg font-semibold text-gray-100 mb-4 flex items-center gap-2">
+            <FolderOpen className="w-5 h-5 text-gray-400" />
             Source Audiobook
           </h2>
 
           <button
             onClick={selectFolder}
             disabled={analyzing || converting}
-            className="w-full p-4 border-2 border-dashed border-gray-300 rounded-lg hover:border-blue-500 hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full p-4 border-2 border-dashed border-neutral-700 rounded-lg hover:border-blue-500 hover:bg-blue-900/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {analyzing ? (
-              <div className="flex items-center justify-center gap-2 text-gray-600">
+              <div className="flex items-center justify-center gap-2 text-gray-400">
                 <Loader2 className="w-5 h-5 animate-spin" />
                 Analyzing files...
               </div>
             ) : sourcePath ? (
               <div className="text-left">
-                <p className="font-medium text-gray-900 truncate">{sourcePath}</p>
+                <p className="font-medium text-gray-100 truncate">{sourcePath}</p>
                 {analysis && (
-                  <p className="text-sm text-gray-600 mt-1">
+                  <p className="text-sm text-gray-400 mt-1">
                     {analysis.files.length} files ({formatDuration(analysis.total_duration_ms)}) - {formatBytes(analysis.total_size_bytes)}
                   </p>
                 )}
               </div>
             ) : (
-              <div className="text-center text-gray-600">
+              <div className="text-center text-gray-400">
                 <FolderOpen className="w-8 h-8 mx-auto mb-2 text-gray-400" />
                 Click to select audiobook folder
               </div>
@@ -379,7 +379,7 @@ export function ConvertPage() {
             <div className="mt-4">
               <button
                 onClick={() => setShowChapterPreview(true)}
-                className="text-sm text-blue-600 hover:text-blue-700 flex items-center gap-1"
+                className="text-sm text-blue-600 hover:text-blue-300 flex items-center gap-1"
               >
                 <List className="w-4 h-4" />
                 Preview {analysis.detected_chapters.length} chapters
@@ -390,9 +390,9 @@ export function ConvertPage() {
 
         {/* Quality Settings */}
         {analysis && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <Settings className="w-5 h-5 text-gray-600" />
+          <div className="bg-neutral-900 rounded-xl shadow-sm p-6">
+            <h2 className="text-lg font-semibold text-gray-100 mb-4 flex items-center gap-2">
+              <Settings className="w-5 h-5 text-gray-400" />
               Quality Settings
             </h2>
 
@@ -408,40 +408,40 @@ export function ConvertPage() {
                   className={`p-4 rounded-lg border-2 text-left transition-all ${
                     qualityPreset === preset.id
                       ? 'border-purple-500 bg-purple-50'
-                      : 'border-gray-200 hover:border-gray-300'
+                      : 'border-neutral-800 hover:border-neutral-700'
                   }`}
                 >
-                  <div className="font-medium text-gray-900">{preset.name}</div>
-                  <div className="text-sm text-gray-600">{preset.desc}</div>
-                  <div className="text-xs text-gray-500 mt-1">{preset.size}</div>
+                  <div className="font-medium text-gray-100">{preset.name}</div>
+                  <div className="text-sm text-gray-400">{preset.desc}</div>
+                  <div className="text-xs text-gray-400 mt-1">{preset.size}</div>
                 </button>
               ))}
             </div>
 
             {/* Size Estimate */}
             {estimatedSize && (
-              <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+              <div className="mt-4 p-4 bg-neutral-950 rounded-lg">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-gray-600">
+                  <div className="flex items-center gap-2 text-gray-400">
                     <HardDrive className="w-4 h-4" />
                     <span>Estimated output:</span>
                   </div>
                   <div className="text-right">
-                    <span className="font-semibold text-gray-900">{estimatedSize.output_formatted}</span>
+                    <span className="font-semibold text-gray-100">{estimatedSize.output_formatted}</span>
                     <span className="text-sm text-green-600 ml-2">
                       ({estimatedSize.savings_percent.toFixed(0)}% smaller)
                     </span>
                   </div>
                 </div>
-                <div className="text-xs text-gray-500 mt-1">
+                <div className="text-xs text-gray-400 mt-1">
                   Original: {estimatedSize.input_formatted}
                 </div>
               </div>
             )}
 
             {/* Speed Preset */}
-            <div className="mt-6 pt-6 border-t border-gray-200">
-              <h3 className="text-sm font-medium text-gray-900 mb-3 flex items-center gap-2">
+            <div className="mt-6 pt-6 border-t border-neutral-800">
+              <h3 className="text-sm font-medium text-gray-100 mb-3 flex items-center gap-2">
                 <Zap className="w-4 h-4 text-yellow-500" />
                 Conversion Speed
               </h3>
@@ -460,19 +460,19 @@ export function ConvertPage() {
                       speedPreset === preset.id
                         ? 'border-yellow-500 bg-yellow-50'
                         : preset.id === 'turbo' && !analysis?.can_stream_copy
-                          ? 'border-gray-200 opacity-50 cursor-not-allowed'
-                          : 'border-gray-200 hover:border-gray-300'
+                          ? 'border-neutral-800 opacity-50 cursor-not-allowed'
+                          : 'border-neutral-800 hover:border-neutral-700'
                     }`}
                     disabled={preset.id === 'turbo' && !analysis?.can_stream_copy}
                     title={preset.id === 'turbo' && !analysis?.can_stream_copy ? 'Turbo requires AAC source files (M4A/M4B)' : ''}
                   >
                     <div className="text-lg mb-1">{preset.icon}</div>
-                    <div className="text-xs font-medium text-gray-900">{preset.name}</div>
-                    <div className="text-xs text-gray-500 mt-0.5">{preset.desc}</div>
+                    <div className="text-xs font-medium text-gray-100">{preset.name}</div>
+                    <div className="text-xs text-gray-400 mt-0.5">{preset.desc}</div>
                   </button>
                 ))}
               </div>
-              <p className="text-xs text-gray-500 mt-2">
+              <p className="text-xs text-gray-400 mt-2">
                 {speedPreset === 'max_quality' && 'Single-threaded with highest quality encoder settings. Best for archival.'}
                 {speedPreset === 'balanced' && 'Good balance of speed and quality. Recommended for most users.'}
                 {speedPreset === 'fast' && 'Parallel file decoding with up to 4 CPU cores. Slight quality tradeoff.'}
@@ -490,9 +490,9 @@ export function ConvertPage() {
 
         {/* Chapter Options */}
         {analysis && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <BookOpen className="w-5 h-5 text-gray-600" />
+          <div className="bg-neutral-900 rounded-xl shadow-sm p-6">
+            <h2 className="text-lg font-semibold text-gray-100 mb-4 flex items-center gap-2">
+              <BookOpen className="w-5 h-5 text-gray-400" />
               Chapter Options
             </h2>
 
@@ -507,7 +507,7 @@ export function ConvertPage() {
                   className={`flex items-center p-3 rounded-lg border cursor-pointer transition-colors ${
                     chapterMode === mode.id
                       ? 'border-purple-500 bg-purple-50'
-                      : 'border-gray-200 hover:border-gray-300'
+                      : 'border-neutral-800 hover:border-neutral-700'
                   }`}
                 >
                   <input
@@ -519,15 +519,15 @@ export function ConvertPage() {
                     className="sr-only"
                   />
                   <div className={`w-4 h-4 rounded-full border-2 mr-3 flex items-center justify-center ${
-                    chapterMode === mode.id ? 'border-purple-500' : 'border-gray-300'
+                    chapterMode === mode.id ? 'border-purple-500' : 'border-neutral-700'
                   }`}>
                     {chapterMode === mode.id && (
                       <div className="w-2 h-2 rounded-full bg-purple-500" />
                     )}
                   </div>
                   <div>
-                    <div className="font-medium text-gray-900">{mode.name}</div>
-                    <div className="text-sm text-gray-600">{mode.desc}</div>
+                    <div className="font-medium text-gray-100">{mode.name}</div>
+                    <div className="text-sm text-gray-400">{mode.desc}</div>
                   </div>
                 </label>
               ))}
@@ -537,15 +537,15 @@ export function ConvertPage() {
 
         {/* Metadata */}
         {analysis && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <Music className="w-5 h-5 text-gray-600" />
+          <div className="bg-neutral-900 rounded-xl shadow-sm p-6">
+            <h2 className="text-lg font-semibold text-gray-100 mb-4 flex items-center gap-2">
+              <Music className="w-5 h-5 text-gray-400" />
               Metadata
             </h2>
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-300 mb-1">
                   <BookOpen className="w-4 h-4 inline mr-1" />
                   Title *
                 </label>
@@ -553,13 +553,13 @@ export function ConvertPage() {
                   type="text"
                   value={metadata.title}
                   onChange={(e) => setMetadata(prev => ({ ...prev, title: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                   placeholder="Book title"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-300 mb-1">
                   <User className="w-4 h-4 inline mr-1" />
                   Author
                 </label>
@@ -567,13 +567,13 @@ export function ConvertPage() {
                   type="text"
                   value={metadata.author}
                   onChange={(e) => setMetadata(prev => ({ ...prev, author: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                   placeholder="Author name"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-300 mb-1">
                   <Mic className="w-4 h-4 inline mr-1" />
                   Narrator
                 </label>
@@ -581,13 +581,13 @@ export function ConvertPage() {
                   type="text"
                   value={metadata.narrator || ''}
                   onChange={(e) => setMetadata(prev => ({ ...prev, narrator: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                   placeholder="Narrator name"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-300 mb-1">
                   Series
                 </label>
                 <div className="flex gap-2">
@@ -595,14 +595,14 @@ export function ConvertPage() {
                     type="text"
                     value={metadata.series || ''}
                     onChange={(e) => setMetadata(prev => ({ ...prev, series: e.target.value }))}
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    className="flex-1 px-3 py-2 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                     placeholder="Series name"
                   />
                   <input
                     type="text"
                     value={metadata.series_part || ''}
                     onChange={(e) => setMetadata(prev => ({ ...prev, series_part: e.target.value }))}
-                    className="w-16 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    className="w-16 px-3 py-2 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                     placeholder="#"
                   />
                 </div>
@@ -611,7 +611,7 @@ export function ConvertPage() {
 
             {/* Cover Art */}
             <div className="mt-4">
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-sm font-medium text-gray-300 mb-1">
                 <Image className="w-4 h-4 inline mr-1" />
                 Cover Art
               </label>
@@ -622,7 +622,7 @@ export function ConvertPage() {
                     Cover found: {analysis.cover_source?.split('/').pop()}
                   </div>
                 ) : (
-                  <div className="text-sm text-gray-500">No cover art detected</div>
+                  <div className="text-sm text-gray-400">No cover art detected</div>
                 )}
               </div>
             </div>
@@ -630,43 +630,43 @@ export function ConvertPage() {
             {/* Advanced Options Toggle */}
             <button
               onClick={() => setShowAdvanced(!showAdvanced)}
-              className="mt-4 flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900"
+              className="mt-4 flex items-center gap-1 text-sm text-gray-400 hover:text-gray-100"
             >
               {showAdvanced ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
               Advanced options
             </button>
 
             {showAdvanced && (
-              <div className="mt-4 pt-4 border-t border-gray-200 space-y-4">
+              <div className="mt-4 pt-4 border-t border-neutral-800 space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Year</label>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">Year</label>
                   <input
                     type="text"
                     value={metadata.year || ''}
                     onChange={(e) => setMetadata(prev => ({ ...prev, year: e.target.value }))}
-                    className="w-32 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    className="w-32 px-3 py-2 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                     placeholder="2024"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Publisher</label>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">Publisher</label>
                   <input
                     type="text"
                     value={metadata.publisher || ''}
                     onChange={(e) => setMetadata(prev => ({ ...prev, publisher: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    className="w-full px-3 py-2 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                     placeholder="Publisher name"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">Description</label>
                   <textarea
                     value={metadata.description || ''}
                     onChange={(e) => setMetadata(prev => ({ ...prev, description: e.target.value }))}
                     rows={3}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    className="w-full px-3 py-2 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                     placeholder="Book description..."
                   />
                 </div>
@@ -677,14 +677,14 @@ export function ConvertPage() {
 
         {/* Output Options */}
         {analysis && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Output Options</h2>
+          <div className="bg-neutral-900 rounded-xl shadow-sm p-6">
+            <h2 className="text-lg font-semibold text-gray-100 mb-4">Output Options</h2>
 
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <div className="font-medium text-gray-900">Output filename</div>
-                  <div className="text-sm text-gray-600">
+                  <div className="font-medium text-gray-100">Output filename</div>
+                  <div className="text-sm text-gray-400">
                     {metadata.title || 'Untitled'}.m4b
                   </div>
                 </div>
@@ -695,11 +695,11 @@ export function ConvertPage() {
                   type="checkbox"
                   checked={verifyOutput}
                   onChange={(e) => setVerifyOutput(e.target.checked)}
-                  className="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-500"
+                  className="w-4 h-4 text-purple-600 border-neutral-700 rounded focus:ring-purple-500"
                 />
                 <div>
-                  <div className="font-medium text-gray-900">Verify output</div>
-                  <div className="text-sm text-gray-600">Check duration and chapters match</div>
+                  <div className="font-medium text-gray-100">Verify output</div>
+                  <div className="text-sm text-gray-400">Check duration and chapters match</div>
                 </div>
               </label>
 
@@ -708,14 +708,14 @@ export function ConvertPage() {
                   type="checkbox"
                   checked={deleteSource}
                   onChange={(e) => setDeleteSource(e.target.checked)}
-                  className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
+                  className="w-4 h-4 text-red-600 border-neutral-700 rounded focus:ring-red-500"
                 />
                 <div>
-                  <div className="font-medium text-gray-900 flex items-center gap-2">
+                  <div className="font-medium text-gray-100 flex items-center gap-2">
                     <Trash2 className="w-4 h-4 text-red-500" />
                     Delete source files after conversion
                   </div>
-                  <div className="text-sm text-gray-600">Permanently remove original MP3 files</div>
+                  <div className="text-sm text-gray-400">Permanently remove original MP3 files</div>
                 </div>
               </label>
             </div>
@@ -724,9 +724,9 @@ export function ConvertPage() {
 
         {/* Progress */}
         {converting && progress && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
+          <div className="bg-neutral-900 rounded-xl shadow-sm p-6">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-gray-900">Converting...</h2>
+              <h2 className="text-lg font-semibold text-gray-100">Converting...</h2>
               <button
                 onClick={cancelConversion}
                 className="px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors"
@@ -736,11 +736,11 @@ export function ConvertPage() {
             </div>
 
             <div className="mb-4">
-              <div className="flex items-center justify-between text-sm text-gray-600 mb-2">
+              <div className="flex items-center justify-between text-sm text-gray-400 mb-2">
                 <span>{progress.message || progress.phase}</span>
                 <span>{progress.percent?.toFixed(1)}%</span>
               </div>
-              <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
+              <div className="h-3 bg-gray-600 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-purple-600 transition-all duration-300"
                   style={{ width: `${progress.percent || 0}%` }}
@@ -749,7 +749,7 @@ export function ConvertPage() {
             </div>
 
             {progress.elapsed_seconds > 0 && (
-              <div className="flex items-center gap-4 text-sm text-gray-600">
+              <div className="flex items-center gap-4 text-sm text-gray-400">
                 <div className="flex items-center gap-1">
                   <Clock className="w-4 h-4" />
                   Elapsed: {formatDuration(progress.elapsed_seconds * 1000)}
@@ -813,7 +813,7 @@ export function ConvertPage() {
           <div className="flex justify-end gap-3">
             <button
               onClick={() => setShowChapterPreview(true)}
-              className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+              className="px-4 py-2 text-gray-300 bg-neutral-900 border border-neutral-700 rounded-lg hover:bg-neutral-950 transition-colors"
             >
               Preview Chapters
             </button>

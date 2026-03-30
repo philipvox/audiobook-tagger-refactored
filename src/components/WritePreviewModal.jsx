@@ -87,27 +87,27 @@ export function WritePreviewModal({
       author: 'bg-purple-100 text-purple-800', 
       narrator: 'bg-green-100 text-green-800',
       genre: 'bg-orange-100 text-orange-800',
-      year: 'bg-gray-100 text-gray-800',
+      year: 'bg-neutral-800 text-gray-200',
       series: 'bg-indigo-100 text-indigo-800',
       publisher: 'bg-pink-100 text-pink-800'
     };
-    return colors[field] || 'bg-gray-100 text-gray-800';
+    return colors[field] || 'bg-neutral-800 text-gray-200';
   };
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden">
+      <div className="bg-neutral-900 rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden">
         {/* Header */}
-        <div className="p-6 pb-4 border-b border-gray-200">
+        <div className="p-6 pb-4 border-b border-neutral-800">
           <div className="flex items-start gap-4">
             <div className="p-2 rounded-lg bg-yellow-100 flex-shrink-0">
               <AlertTriangle className="w-6 h-6 text-yellow-600" />
             </div>
             <div className="flex-1 min-w-0">
-              <h3 className="text-xl font-semibold text-gray-900 mb-2">
+              <h3 className="text-xl font-semibold text-gray-100 mb-2">
                 Write Tags Preview
               </h3>
-              <p className="text-gray-600 text-sm">
+              <p className="text-gray-400 text-sm">
                 Review the changes that will be written to {previewData.length} file{previewData.length === 1 ? '' : 's'} 
                 ({totalChanges} total changes)
               </p>
@@ -131,7 +131,7 @@ export function WritePreviewModal({
             </div>
             <button
               onClick={onClose}
-              className="p-1 hover:bg-gray-100 rounded-lg transition-colors"
+              className="p-1 hover:bg-neutral-800 rounded-lg transition-colors"
             >
               <X className="w-5 h-5 text-gray-400" />
             </button>
@@ -142,13 +142,13 @@ export function WritePreviewModal({
         <div className="overflow-y-auto max-h-96 p-6">
           <div className="space-y-6">
             {previewData.map((file, fileIndex) => (
-              <div key={fileIndex} className="border border-gray-200 rounded-lg overflow-hidden">
+              <div key={fileIndex} className="border border-neutral-800 rounded-lg overflow-hidden">
                 {/* File Header */}
-                <div className="bg-gray-50 px-4 py-3 border-b border-gray-200">
+                <div className="bg-neutral-950 px-4 py-3 border-b border-neutral-800">
                   <div className="flex items-center gap-3">
                     <button
                       onClick={() => toggleAllForFile(file.fileId, file.changes)}
-                      className="p-1 hover:bg-gray-200 rounded transition-colors"
+                      className="p-1 hover:bg-neutral-700 rounded transition-colors"
                       title={isFileFullyExcluded(file.fileId, file.changes) ? "Include all changes" : "Exclude all changes"}
                     >
                       {isFileFullyExcluded(file.fileId, file.changes) ? (
@@ -157,11 +157,11 @@ export function WritePreviewModal({
                         <CheckSquare className="w-4 h-4 text-green-600" />
                       )}
                     </button>
-                    <FileAudio className="w-4 h-4 text-gray-500" />
-                    <span className={`font-medium text-sm ${isFileFullyExcluded(file.fileId, file.changes) ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                    <FileAudio className="w-4 h-4 text-gray-400" />
+                    <span className={`font-medium text-sm ${isFileFullyExcluded(file.fileId, file.changes) ? 'text-gray-400 line-through' : 'text-gray-100'}`}>
                       {file.filename}
                     </span>
-                    <span className="text-xs text-gray-500 bg-white px-2 py-1 rounded-full">
+                    <span className="text-xs text-gray-400 bg-neutral-900 px-2 py-1 rounded-full">
                       {Object.keys(file.changes).filter(f => !excludedChanges.has(`${file.fileId}:${f}`)).length} / {Object.keys(file.changes).length} changes
                     </span>
                   </div>
@@ -172,12 +172,12 @@ export function WritePreviewModal({
                   {Object.entries(file.changes).map(([field, change], changeIndex) => {
                     const isExcluded = excludedChanges.has(`${file.fileId}:${field}`);
                     return (
-                      <div key={changeIndex} className={`p-4 transition-opacity ${isExcluded ? 'opacity-50 bg-gray-50' : ''}`}>
+                      <div key={changeIndex} className={`p-4 transition-opacity ${isExcluded ? 'opacity-50 bg-neutral-950' : ''}`}>
                         <div className="flex items-start gap-4">
                           {/* Checkbox */}
                           <button
                             onClick={() => toggleChange(file.fileId, field)}
-                            className="p-1 hover:bg-gray-100 rounded transition-colors flex-shrink-0 mt-0.5"
+                            className="p-1 hover:bg-neutral-800 rounded transition-colors flex-shrink-0 mt-0.5"
                             title={isExcluded ? "Include this change" : "Exclude this change"}
                           >
                             {isExcluded ? (
@@ -209,7 +209,7 @@ export function WritePreviewModal({
                             </div>
 
                             {isExcluded && (
-                              <div className="text-xs text-gray-500 italic">This change will be skipped</div>
+                              <div className="text-xs text-gray-400 italic">This change will be skipped</div>
                             )}
                           </div>
                         </div>
@@ -223,14 +223,14 @@ export function WritePreviewModal({
         </div>
 
         {/* Footer */}
-        <div className="px-6 pb-6 flex flex-col gap-4 border-t border-gray-200 pt-4">
+        <div className="px-6 pb-6 flex flex-col gap-4 border-t border-neutral-800 pt-4">
           {/* ✅ NEW: Skip Backup Toggle */}
           <div className="flex items-center justify-between p-4 bg-gradient-to-r from-orange-50 to-amber-50 rounded-lg border border-orange-200">
             <div className="flex items-center gap-3">
               <Zap className="w-5 h-5 text-orange-600" />
               <div>
-                <div className="font-medium text-gray-900">Fast Mode (Skip Backups)</div>
-                <div className="text-sm text-gray-600">
+                <div className="font-medium text-gray-100">Fast Mode (Skip Backups)</div>
+                <div className="text-sm text-gray-400">
                   ~30% faster, but no backup files created
                 </div>
               </div>
@@ -242,13 +242,13 @@ export function WritePreviewModal({
                 onChange={(e) => setSkipBackup(e.target.checked)}
                 className="sr-only peer"
               />
-              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-orange-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-600"></div>
+              <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-orange-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-neutral-900 after:border-neutral-700 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-600"></div>
             </label>
           </div>
 
           {/* Summary of approved changes */}
           {excludedChanges.size > 0 && (
-            <div className="text-sm text-gray-600 text-center">
+            <div className="text-sm text-gray-400 text-center">
               <span className="font-medium">{approvedChanges}</span> of <span className="font-medium">{totalChanges}</span> changes will be written
               <span className="text-gray-400 ml-2">({excludedChanges.size} excluded)</span>
             </div>
@@ -258,7 +258,7 @@ export function WritePreviewModal({
           <div className="flex gap-3 justify-end">
             <button
               onClick={onClose}
-              className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors font-medium"
+              className="px-4 py-2 text-gray-300 bg-neutral-900 border border-neutral-700 rounded-lg hover:bg-neutral-950 transition-colors font-medium"
             >
               Cancel
             </button>
@@ -267,7 +267,7 @@ export function WritePreviewModal({
               disabled={approvedChanges === 0}
               className={`px-4 py-2 rounded-lg transition-colors font-medium flex items-center gap-2 ${
                 approvedChanges === 0
-                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
                   : 'bg-yellow-600 hover:bg-yellow-700 text-white'
               }`}
             >

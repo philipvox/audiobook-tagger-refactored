@@ -21,10 +21,10 @@ function DuplicateGroupCard({
   formatDuration,
 }) {
   return (
-    <div className="bg-white rounded-lg border border-gray-200 mb-3">
+    <div className="bg-neutral-900 rounded-lg border border-neutral-800 mb-3">
       {/* Group Header */}
       <div
-        className="p-4 cursor-pointer hover:bg-gray-50 flex items-center gap-3"
+        className="p-4 cursor-pointer hover:bg-neutral-950 flex items-center gap-3"
         onClick={() => toggleGroup(group.id)}
       >
         {expandedGroups.has(group.id) ? (
@@ -35,11 +35,11 @@ function DuplicateGroupCard({
 
         <div className="flex-1">
           <div className="flex items-center gap-2">
-            <span className="font-medium text-gray-900">
+            <span className="font-medium text-gray-100">
               {group.books[0]?.title || 'Unknown Title'}
             </span>
-            <span className="text-gray-500">by</span>
-            <span className="text-gray-700">
+            <span className="text-gray-400">by</span>
+            <span className="text-gray-300">
               {group.books[0]?.author || 'Unknown Author'}
             </span>
           </div>
@@ -54,7 +54,7 @@ function DuplicateGroupCard({
             }`}>
               {Math.round(group.confidence * 100)}% match
             </span>
-            <span className="text-xs text-gray-500">
+            <span className="text-xs text-gray-400">
               {group.books.length} copies
             </span>
           </div>
@@ -65,7 +65,7 @@ function DuplicateGroupCard({
 
       {/* Expanded Details */}
       {expandedGroups.has(group.id) && (
-        <div className="border-t border-gray-200 p-4 space-y-3">
+        <div className="border-t border-neutral-800 p-4 space-y-3">
           {group.books.map((book) => {
             const isRecommended = book.folder_path === group.recommended_keep;
             const isSelected = selectedForDeletion.has(book.folder_path);
@@ -78,7 +78,7 @@ function DuplicateGroupCard({
                     ? 'border-green-300 bg-green-50'
                     : isSelected
                     ? 'border-red-300 bg-red-50'
-                    : 'border-gray-200 bg-gray-50'
+                    : 'border-neutral-800 bg-neutral-950'
                 }`}
               >
                 <div className="flex items-start gap-3">
@@ -100,7 +100,7 @@ function DuplicateGroupCard({
                   )}
 
                   {/* Cover image - Square */}
-                  <div className="w-16 h-16 flex-shrink-0 rounded overflow-hidden bg-gray-200 flex items-center justify-center">
+                  <div className="w-16 h-16 flex-shrink-0 rounded overflow-hidden bg-gray-600 flex items-center justify-center">
                     {book.cover_path ? (
                       <img
                         src={convertFileSrc(book.cover_path)}
@@ -119,7 +119,7 @@ function DuplicateGroupCard({
 
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1 flex-wrap">
-                      <span className="font-medium text-gray-900 truncate">
+                      <span className="font-medium text-gray-100 truncate">
                         {book.title}
                       </span>
                       {isRecommended && (
@@ -128,7 +128,7 @@ function DuplicateGroupCard({
                             ★ Keep This One
                           </span>
                           {/* Show reasons for recommendation */}
-                          <span className="text-xs text-gray-500">
+                          <span className="text-xs text-gray-400">
                             ({[
                               book.in_correct_folder && 'correct folder',
                               book.has_metadata_file && 'has metadata',
@@ -141,12 +141,12 @@ function DuplicateGroupCard({
                       )}
                     </div>
 
-                    <div className="text-sm text-gray-600 truncate mb-2">
+                    <div className="text-sm text-gray-400 truncate mb-2">
                       <FolderOpen className="w-3 h-3 inline mr-1" />
                       {book.folder_path}
                     </div>
 
-                    <div className="flex flex-wrap gap-3 text-xs text-gray-500">
+                    <div className="flex flex-wrap gap-3 text-xs text-gray-400">
                       <span className="flex items-center gap-1">
                         <HardDrive className="w-3 h-3" />
                         {formatBytes(book.total_size_bytes)}
@@ -156,7 +156,7 @@ function DuplicateGroupCard({
                         {book.file_count} files
                       </span>
                       {book.audio_format && (
-                        <span className="px-1.5 py-0.5 bg-gray-200 rounded">
+                        <span className="px-1.5 py-0.5 bg-gray-600 rounded">
                           {book.audio_format.toUpperCase()}
                         </span>
                       )}
@@ -473,7 +473,7 @@ export function DuplicateFinderPage() {
       case 'DurationAndTitle':
         return 'bg-yellow-100 text-yellow-800';
       default:
-        return 'bg-gray-100 text-gray-800';
+        return 'bg-neutral-800 text-gray-200';
     }
   };
 
@@ -482,27 +482,27 @@ export function DuplicateFinderPage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h2 className="text-xl font-bold text-gray-900">Duplicate Finder</h2>
-          <p className="text-sm text-gray-600">Find and remove duplicate audiobooks from your library</p>
+          <h2 className="text-xl font-bold text-gray-100">Duplicate Finder</h2>
+          <p className="text-sm text-gray-400">Find and remove duplicate audiobooks from your library</p>
         </div>
       </div>
 
       {/* Controls */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 mb-4">
+      <div className="bg-neutral-900 rounded-lg border border-neutral-800 p-4 mb-4">
         <div className="flex gap-4 items-end">
           <div className="flex-1">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Library Folder</label>
+            <label className="block text-sm font-medium text-gray-300 mb-1">Library Folder</label>
             <div className="flex gap-2">
               <button
                 onClick={handleBrowse}
-                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 flex items-center gap-2 border border-gray-300"
+                className="px-4 py-2 bg-neutral-800 text-gray-300 rounded-lg hover:bg-neutral-700 flex items-center gap-2 border border-neutral-700"
               >
                 <Folder className="w-4 h-4" />
                 Browse...
               </button>
               {libraryPath && (
-                <div className="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-gray-700 truncate flex items-center gap-2">
-                  <FolderOpen className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                <div className="flex-1 px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-gray-300 truncate flex items-center gap-2">
+                  <FolderOpen className="w-4 h-4 text-gray-400 flex-shrink-0" />
                   <span className="truncate">{libraryPath}</span>
                 </div>
               )}
@@ -581,31 +581,31 @@ export function DuplicateFinderPage() {
 
       {/* Results Summary */}
       {scanResult && (
-        <div className="bg-white rounded-lg border border-gray-200 p-4 mb-4">
+        <div className="bg-neutral-900 rounded-lg border border-neutral-800 p-4 mb-4">
           <div className="flex items-center justify-between">
             <div className="flex gap-6">
               <div>
-                <span className="text-2xl font-bold text-gray-900">{scanResult.total_books_scanned}</span>
-                <span className="text-sm text-gray-600 ml-2">books scanned</span>
+                <span className="text-2xl font-bold text-gray-100">{scanResult.total_books_scanned}</span>
+                <span className="text-sm text-gray-400 ml-2">books scanned</span>
               </div>
               <div>
                 <span className="text-2xl font-bold text-red-600">{scanResult.duplicate_groups.length}</span>
-                <span className="text-sm text-gray-600 ml-2">duplicate groups</span>
+                <span className="text-sm text-gray-400 ml-2">duplicate groups</span>
               </div>
               <div>
                 <span className="text-2xl font-bold text-orange-600">{scanResult.total_duplicates_found}</span>
-                <span className="text-sm text-gray-600 ml-2">total duplicates</span>
+                <span className="text-sm text-gray-400 ml-2">total duplicates</span>
               </div>
               <div>
                 <span className="text-2xl font-bold text-green-600">{formatBytes(scanResult.potential_space_savings_bytes)}</span>
-                <span className="text-sm text-gray-600 ml-2">potential savings</span>
+                <span className="text-sm text-gray-400 ml-2">potential savings</span>
               </div>
             </div>
 
             <div className="flex gap-2 flex-wrap items-center">
               {/* Confidence filter */}
               <div className="flex items-center gap-1 mr-2">
-                <span className="text-xs text-gray-500">Min confidence:</span>
+                <span className="text-xs text-gray-400">Min confidence:</span>
                 {[0, 50, 75, 85, 95, 100].map(conf => (
                   <button
                     key={conf}
@@ -613,7 +613,7 @@ export function DuplicateFinderPage() {
                     className={`px-2 py-1 text-xs rounded ${
                       minConfidence === conf
                         ? 'bg-blue-600 text-white'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                        : 'bg-neutral-800 text-gray-400 hover:bg-neutral-700'
                     }`}
                   >
                     {conf}%
@@ -624,44 +624,44 @@ export function DuplicateFinderPage() {
               {/* Selection dropdown */}
               <div className="relative group">
                 <button
-                  className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm flex items-center gap-2"
+                  className="px-4 py-2 bg-neutral-800 text-gray-300 rounded-lg hover:bg-neutral-700 text-sm flex items-center gap-2"
                 >
                   Select...
                   <ChevronDown className="w-3 h-3" />
                 </button>
-                <div className="absolute right-0 mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-50 hidden group-hover:block">
+                <div className="absolute right-0 mt-1 w-48 bg-neutral-900 border border-neutral-800 rounded-lg shadow-lg z-50 hidden group-hover:block">
                   <button
                     onClick={selectRecommendedDeletions}
-                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50 flex items-center gap-2"
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-neutral-950 flex items-center gap-2"
                   >
                     <Star className="w-4 h-4 text-yellow-500" />
                     Recommended
                   </button>
                   <button
                     onClick={selectWrongFolders}
-                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50 flex items-center gap-2"
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-neutral-950 flex items-center gap-2"
                   >
                     <AlertTriangle className="w-4 h-4 text-orange-500" />
                     Wrong Folders
                   </button>
                   <button
                     onClick={selectLowQuality}
-                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50 flex items-center gap-2"
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-neutral-950 flex items-center gap-2"
                   >
                     <X className="w-4 h-4 text-red-500" />
                     Low Quality
                   </button>
                   <button
                     onClick={selectAllDuplicates}
-                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50 flex items-center gap-2 border-t"
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-neutral-950 flex items-center gap-2 border-t"
                   >
-                    <Check className="w-4 h-4 text-gray-500" />
+                    <Check className="w-4 h-4 text-gray-400" />
                     All Duplicates
                   </button>
                   {selectedForDeletion.size > 0 && (
                     <button
                       onClick={clearSelection}
-                      className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50 flex items-center gap-2 border-t text-gray-500"
+                      className="w-full px-4 py-2 text-left text-sm hover:bg-neutral-950 flex items-center gap-2 border-t text-gray-400"
                     >
                       <X className="w-4 h-4" />
                       Clear Selection
@@ -674,7 +674,7 @@ export function DuplicateFinderPage() {
                 <>
                   <button
                     onClick={clearSelection}
-                    className="px-3 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 text-sm"
+                    className="px-3 py-2 bg-neutral-800 text-gray-400 rounded-lg hover:bg-neutral-700 text-sm"
                   >
                     Clear
                   </button>
@@ -725,11 +725,11 @@ export function DuplicateFinderPage() {
         {/* Separator between selected and unselected */}
         {selectedGroups.length > 0 && unselectedGroups.length > 0 && (
           <div className="flex items-center gap-2 my-4 px-1">
-            <div className="flex items-center gap-2 text-sm font-medium text-gray-500">
+            <div className="flex items-center gap-2 text-sm font-medium text-gray-400">
               <CheckCircle className="w-4 h-4" />
               Not Selected ({unselectedGroups.length} groups)
             </div>
-            <div className="flex-1 h-px bg-gray-300" />
+            <div className="flex-1 h-px bg-gray-600" />
           </div>
         )}
 
@@ -750,7 +750,7 @@ export function DuplicateFinderPage() {
         ))}
 
         {scanResult && selectedGroups.length === 0 && unselectedGroups.length === 0 && (
-          <div className="text-center py-12 text-gray-500">
+          <div className="text-center py-12 text-gray-400">
             <CheckCircle className="w-12 h-12 mx-auto mb-4 text-green-500" />
             <p className="text-lg font-medium">
               {minConfidence > 0 ? 'No duplicates at this confidence level' : 'No duplicates found!'}
@@ -765,7 +765,7 @@ export function DuplicateFinderPage() {
         )}
 
         {!scanResult && !scanning && (
-          <div className="text-center py-12 text-gray-500">
+          <div className="text-center py-12 text-gray-400">
             <Search className="w-12 h-12 mx-auto mb-4 opacity-50" />
             <p className="text-lg font-medium">Ready to scan</p>
             <p className="text-sm">Enter your library path and click "Scan for Duplicates"</p>

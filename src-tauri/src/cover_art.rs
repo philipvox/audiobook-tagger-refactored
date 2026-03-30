@@ -13,6 +13,7 @@ pub struct CoverArt {
 #[serde(rename_all = "lowercase")]
 pub enum CoverSource {
     ITunes,
+    AudibleUK,
     Audible,
     Amazon,
     GoogleBooks,
@@ -28,6 +29,7 @@ impl std::fmt::Display for CoverSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CoverSource::ITunes => write!(f, "iTunes"),
+            CoverSource::AudibleUK => write!(f, "Audible UK"),
             CoverSource::Audible => write!(f, "Audible"),
             CoverSource::Amazon => write!(f, "Amazon"),
             CoverSource::GoogleBooks => write!(f, "Google Books"),
@@ -77,49 +79,54 @@ impl CoverCandidate {
     }
 
     /// Calculate quality score based on resolution, source trust, and aspect ratio
+    /// Priority: Square covers > iTunes > Audible UK > Audible US > Others
     pub fn calculate_score(&mut self) {
-        let mut score = 0u8;
+        let mut score = 0u16; // Use u16 to avoid overflow, will clamp to u8
 
-        // Resolution scoring (max 50 points)
-        let min_dim = self.width.min(self.height);
-        score += match min_dim {
-            2000.. => 50,
-            1500..=1999 => 45,
-            1000..=1499 => 40,
-            500..=999 => 30,
-            300..=499 => 20,
-            _ => 10,
-        };
-
-        // Source trust scoring (max 30 points)
-        score += match self.source {
-            CoverSource::ITunes => 30,       // Most reliable
-            CoverSource::Audible => 28,
-            CoverSource::Abs => 28,          // Same as Audible (proxied provider)
-            CoverSource::Amazon => 25,
-            CoverSource::GoogleBooks => 20,
-            CoverSource::LibraryThing => 15,
-            CoverSource::UserProvided => 30, // Trust user
-            CoverSource::Embedded => 25,     // Already in file
-            CoverSource::Unknown => 5,
-        };
-
-        // Aspect ratio scoring (max 20 points)
-        // Audiobook covers should be ~1:1 (square) or ~1:1.5 (portrait)
+        // ASPECT RATIO - HIGHEST PRIORITY (max 50 points)
+        // Square covers are strongly preferred for audiobooks
         if self.width > 0 && self.height > 0 {
             let ratio = self.height as f32 / self.width as f32;
-            score += if (0.9..=1.1).contains(&ratio) {
-                20 // Square (very common for audiobooks)
+            score += if (0.95..=1.05).contains(&ratio) {
+                50 // Perfect square - highest priority
+            } else if (0.9..=1.1).contains(&ratio) {
+                45 // Nearly square
             } else if (1.3..=1.7).contains(&ratio) {
-                18 // Portrait book ratio
-            } else if (0.6..=1.4).contains(&ratio) {
-                10 // Acceptable
+                25 // Portrait book ratio
+            } else if (0.7..=1.3).contains(&ratio) {
+                15 // Acceptable
             } else {
                 5 // Weird ratio
             };
         }
 
-        self.quality_score = score.min(100);
+        // Source trust scoring (max 40 points)
+        // Priority: iTunes > Audible UK > Audible US > others
+        score += match self.source {
+            CoverSource::ITunes => 40,       // Best source
+            CoverSource::AudibleUK => 38,    // UK second
+            CoverSource::Audible => 35,      // US third
+            CoverSource::Abs => 35,          // Same as Audible US
+            CoverSource::Amazon => 30,
+            CoverSource::GoogleBooks => 25,
+            CoverSource::LibraryThing => 20,
+            CoverSource::UserProvided => 40, // Trust user
+            CoverSource::Embedded => 30,     // Already in file
+            CoverSource::Unknown => 5,
+        };
+
+        // Resolution scoring (max 30 points)
+        let min_dim = self.width.min(self.height);
+        score += match min_dim {
+            1500.. => 30,
+            1000..=1499 => 25,
+            500..=999 => 20,
+            300..=499 => 15,
+            _ => 10,
+        };
+
+        // Clamp to u8 (max 120 points possible, but we cap at 100)
+        self.quality_score = score.min(100) as u8;
     }
 }
 
@@ -903,25 +910,25 @@ pub fn cover_cache_key_asin(asin: &str) -> String {
 /// Get cached cover by ISBN
 pub fn get_cached_cover_by_isbn(isbn: &str) -> Option<(Vec<u8>, String)> {
     let key = cover_cache_key_isbn(isbn);
-    crate::cache::get::<(Vec<u8>, String)>(&key)
+    crate::cache::get_cover(&key)
 }
 
 /// Get cached cover by ASIN
 pub fn get_cached_cover_by_asin(asin: &str) -> Option<(Vec<u8>, String)> {
     let key = cover_cache_key_asin(asin);
-    crate::cache::get::<(Vec<u8>, String)>(&key)
+    crate::cache::get_cover(&key)
 }
 
 /// Cache cover by ISBN
 pub fn cache_cover_by_isbn(isbn: &str, data: &[u8], mime_type: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let key = cover_cache_key_isbn(isbn);
-    crate::cache::set(&key, &(data.to_vec(), mime_type.to_string()))
+    crate::cache::set_cover(&key, data, mime_type)
 }
 
 /// Cache cover by ASIN
 pub fn cache_cover_by_asin(asin: &str, data: &[u8], mime_type: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let key = cover_cache_key_asin(asin);
-    crate::cache::set(&key, &(data.to_vec(), mime_type.to_string()))
+    crate::cache::set_cover(&key, data, mime_type)
 }
 
 /// Try to get cover from cache first, then download if not found
@@ -1032,12 +1039,13 @@ pub async fn fetch_google_books_cover(title: &str, author: &str) -> Option<Cover
 
     let query = format!("intitle:{} inauthor:{}", title, author);
     let url = format!(
-        "https://www.googleapis.com/books/v1/volumes?q={}&maxResults=1",
+        "https://www.googleapis.com/books/v1/volumes?q={}&maxResults=3",
         urlencoding::encode(&query)
     );
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
         .build()
         .ok()?;
 
@@ -1051,41 +1059,53 @@ pub async fn fetch_google_books_cover(title: &str, author: &str) -> Option<Cover
     let json: serde_json::Value = response.json().await.ok()?;
 
     let items = json["items"].as_array()?;
-    let first_item = items.first()?;
-    let volume_info = &first_item["volumeInfo"];
-    let image_links = &volume_info["imageLinks"];
 
-    // Try to get the best available image
-    let cover_url = image_links["extraLarge"]
-        .as_str()
-        .or_else(|| image_links["large"].as_str())
-        .or_else(|| image_links["medium"].as_str())
-        .or_else(|| image_links["small"].as_str())
-        .or_else(|| image_links["thumbnail"].as_str())?;
+    // Try multiple results to find one with a working image
+    for item in items.iter().take(3) {
+        let volume_info = &item["volumeInfo"];
+        let image_links = &volume_info["imageLinks"];
 
-    let enhanced_url = enhance_google_books_cover_url(cover_url);
-    let book_title = volume_info["title"].as_str().map(|s| s.to_string());
+        // Try to get the best available image
+        let cover_url = image_links["extraLarge"]
+            .as_str()
+            .or_else(|| image_links["large"].as_str())
+            .or_else(|| image_links["medium"].as_str())
+            .or_else(|| image_links["small"].as_str())
+            .or_else(|| image_links["thumbnail"].as_str());
 
-    // Estimate dimensions based on which size we got
-    let (width, height) = if image_links["extraLarge"].is_string() {
-        (800, 1200)
-    } else if image_links["large"].is_string() {
-        (600, 900)
-    } else if image_links["medium"].is_string() {
-        (400, 600)
-    } else {
-        (200, 300)
-    };
+        if let Some(cover_url) = cover_url {
+            let enhanced_url = enhance_google_books_cover_url(cover_url);
 
-    let mut candidate = CoverCandidate::new(enhanced_url, CoverSource::GoogleBooks)
-        .with_dimensions(width, height);
-    if let Some(title) = book_title {
-        candidate = candidate.with_title(title);
+            // Validate the URL works
+            if validate_image_url(&client, &enhanced_url).await {
+                let book_title = volume_info["title"].as_str().map(|s| s.to_string());
+
+                // Estimate dimensions based on which size we got
+                let (width, height) = if image_links["extraLarge"].is_string() {
+                    (800, 1200)
+                } else if image_links["large"].is_string() {
+                    (600, 900)
+                } else if image_links["medium"].is_string() {
+                    (400, 600)
+                } else {
+                    (200, 300)
+                };
+
+                let mut candidate = CoverCandidate::new(enhanced_url, CoverSource::GoogleBooks)
+                    .with_dimensions(width, height);
+                if let Some(title) = book_title {
+                    candidate = candidate.with_title(title);
+                }
+                candidate.calculate_score();
+
+                println!("   ✅ Google Books cover found and validated");
+                return Some(candidate);
+            }
+        }
     }
-    candidate.calculate_score();
 
-    println!("   ✅ Google Books cover found");
-    Some(candidate)
+    println!("   ⚠️  No valid Google Books covers found");
+    None
 }
 
 /// Multi-source cover search - searches all sources and returns ranked candidates
@@ -1104,6 +1124,7 @@ pub async fn search_all_cover_sources(
 }
 
 /// Multi-source cover search with explicit LibraryThing key
+/// Priority: Square covers > iTunes > Audible UK > Audible US > Others
 pub async fn search_all_cover_sources_with_key(
     title: &str,
     author: &str,
@@ -1111,33 +1132,47 @@ pub async fn search_all_cover_sources_with_key(
     asin: Option<&str>,
     librarything_key: Option<&str>,
 ) -> CoverSearchResult {
-    println!("   🖼️  Searching all cover sources...");
+    println!("   🖼️  Searching cover sources...");
 
     let mut candidates = Vec::new();
 
-    // Use tokio::join! for parallel fetching
-    let (itunes_result, audible_result, google_result, librarything_result) = tokio::join!(
-        fetch_itunes_candidates(title, author),
-        async {
-            if let Some(asin_str) = asin {
-                fetch_audible_candidates(asin_str).await
-            } else {
-                Vec::new()
-            }
-        },
-        fetch_google_books_cover(title, author),
-        async {
-            if let (Some(isbn_str), Some(key)) = (isbn, librarything_key) {
-                fetch_librarything_cover(isbn_str, key).await
-            } else {
-                None
-            }
-        }
-    );
+    // Search sources sequentially to avoid rate limits (429 errors)
+    // iTunes first (best quality)
+    let itunes_result = fetch_itunes_candidates(title, author).await;
 
-    // Collect all candidates
+    // Small delay to avoid rate limits
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Audible UK (if ASIN available)
+    let audible_uk_result = if let Some(asin_str) = asin {
+        fetch_audible_uk_candidates(asin_str).await
+    } else {
+        Vec::new()
+    };
+
+    // Audible US (if ASIN available)
+    let audible_us_result = if let Some(asin_str) = asin {
+        fetch_audible_candidates(asin_str).await
+    } else {
+        Vec::new()
+    };
+
+    // Google Books (fallback)
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let google_result = fetch_google_books_cover(title, author).await;
+
+    // LibraryThing (if configured)
+    let librarything_result = if let (Some(isbn_str), Some(key)) = (isbn, librarything_key) {
+        fetch_librarything_cover(isbn_str, key).await
+    } else {
+        None
+    };
+
+    // Collect all candidates - scoring will sort by priority
+    // (square + iTunes highest, then Audible UK, then Audible US, then others)
     candidates.extend(itunes_result);
-    candidates.extend(audible_result);
+    candidates.extend(audible_uk_result);
+    candidates.extend(audible_us_result);
     if let Some(google) = google_result {
         candidates.push(google);
     }
@@ -1145,10 +1180,8 @@ pub async fn search_all_cover_sources_with_key(
         candidates.push(librarything);
     }
 
-    // Add Amazon direct URLs if we have ASIN
-    if let Some(asin_str) = asin {
-        candidates.extend(build_amazon_image_urls(asin_str));
-    }
+    // Note: Removed build_amazon_image_urls - it uses ASIN as image ID which doesn't work
+    // Amazon image IDs are different from ASINs and must be scraped from Audible page
 
     // Sort by quality score (highest first)
     candidates.sort_by(|a, b| b.quality_score.cmp(&a.quality_score));
@@ -1175,14 +1208,26 @@ async fn fetch_itunes_candidates(title: &str, author: &str) -> Vec<CoverCandidat
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .build() {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
 
-    let response = match client.get(&search_url).send().await {
+    let response = match client
+        .get(&search_url)
+        .header("Accept", "application/json")
+        .send()
+        .await {
         Ok(r) if r.status().is_success() => r,
-        _ => return Vec::new(),
+        Ok(r) => {
+            println!("   ⚠️  iTunes API returned: {}", r.status());
+            return Vec::new();
+        }
+        Err(e) => {
+            println!("   ⚠️  iTunes API error: {}", e);
+            return Vec::new();
+        }
     };
 
     let json: serde_json::Value = match response.json().await {
@@ -1199,28 +1244,52 @@ async fn fetch_itunes_candidates(title: &str, author: &str) -> Vec<CoverCandidat
 
     for result in results.iter().take(5) {
         if let Some(artwork_url) = result["artworkUrl100"].as_str() {
+            // Use 600x600 instead of 2048x2048 - more reliable
             let high_res_url = artwork_url
-                .replace("100x100", "2048x2048")
-                .replace("100x100bb", "2048x2048bb");
+                .replace("100x100bb", "600x600bb")
+                .replace("100x100", "600x600");
 
             let book_name = result["collectionName"]
                 .as_str()
                 .unwrap_or("Unknown")
                 .to_string();
 
-            let mut candidate = CoverCandidate::new(high_res_url, CoverSource::ITunes)
-                .with_dimensions(2048, 2048)
-                .with_title(book_name);
-            candidate.calculate_score();
-            candidates.push(candidate);
+            // Validate the URL actually returns an image
+            if validate_image_url(&client, &high_res_url).await {
+                let mut candidate = CoverCandidate::new(high_res_url, CoverSource::ITunes)
+                    .with_dimensions(600, 600)
+                    .with_title(book_name);
+                candidate.calculate_score();
+                candidates.push(candidate);
+            }
         }
     }
 
     if !candidates.is_empty() {
-        println!("   ✅ Found {} iTunes covers", candidates.len());
+        println!("   ✅ Found {} valid iTunes covers", candidates.len());
     }
 
     candidates
+}
+
+/// Quick validation that a URL returns a valid image (HEAD request)
+async fn validate_image_url(client: &reqwest::Client, url: &str) -> bool {
+    match client
+        .head(url)
+        .header("Accept", "image/*")
+        .send()
+        .await {
+        Ok(r) => {
+            let is_ok = r.status().is_success();
+            let is_image = r.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(|ct| ct.starts_with("image/"))
+                .unwrap_or(false);
+            is_ok && is_image
+        }
+        Err(_) => false,
+    }
 }
 
 /// Fetch cover candidates from Audible
@@ -1231,7 +1300,7 @@ async fn fetch_audible_candidates(asin: &str) -> Vec<CoverCandidate> {
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .build() {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -1255,20 +1324,22 @@ async fn fetch_audible_candidates(asin: &str) -> Vec<CoverCandidate> {
         if let Some(end) = substr.find(".jpg") {
             let base_url = &substr[..end];
 
-            // Extract the image ID (removing any size suffix)
+            // Extract the image ID (removing any size suffix like _SL500_)
             let image_id = base_url
                 .replace("https://m.media-amazon.com/images/I/", "")
                 .split('.')
                 .next()
                 .unwrap_or("")
+                .split('_')
+                .next()
+                .unwrap_or("")
                 .to_string();
 
             if !image_id.is_empty() {
-                // Create candidates with different sizes
+                // Create candidates with different sizes - validate each one
                 let sizes = [
-                    ("_SL2400_", 2400u32),
-                    ("_SL1500_", 1500u32),
                     ("_SL500_", 500u32),
+                    ("_SL1500_", 1500u32),
                 ];
 
                 for (suffix, size) in sizes {
@@ -1277,17 +1348,99 @@ async fn fetch_audible_candidates(asin: &str) -> Vec<CoverCandidate> {
                         image_id, suffix
                     );
 
-                    let mut candidate = CoverCandidate::new(url, CoverSource::Audible)
-                        .with_dimensions(size, size);
-                    candidate.calculate_score();
-                    candidates.push(candidate);
+                    // Validate the URL works
+                    if validate_image_url(&client, &url).await {
+                        let mut candidate = CoverCandidate::new(url, CoverSource::Audible)
+                            .with_dimensions(size, size);
+                        candidate.calculate_score();
+                        candidates.push(candidate);
+                        // Only need one working URL
+                        break;
+                    }
                 }
             }
         }
     }
 
     if !candidates.is_empty() {
-        println!("   ✅ Found {} Audible covers", candidates.len());
+        println!("   ✅ Found {} valid Audible US covers", candidates.len());
+    }
+
+    candidates
+}
+
+/// Fetch cover candidates from Audible UK
+async fn fetch_audible_uk_candidates(asin: &str) -> Vec<CoverCandidate> {
+    println!("   🇬🇧 Searching Audible UK (ASIN: {})...", asin);
+
+    let product_url = format!("https://www.audible.co.uk/pd/{}", asin);
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .build() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let response = match client.get(&product_url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+
+    let html = match response.text().await {
+        Ok(h) => h,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut candidates = Vec::new();
+
+    // Look for the cover image URL in the page
+    if let Some(start) = html.find("https://m.media-amazon.com/images/I/") {
+        let substr = &html[start..];
+        if let Some(end) = substr.find(".jpg") {
+            let base_url = &substr[..end];
+
+            // Extract the image ID (removing any size suffix like _SL500_)
+            let image_id = base_url
+                .replace("https://m.media-amazon.com/images/I/", "")
+                .split('.')
+                .next()
+                .unwrap_or("")
+                .split('_')
+                .next()
+                .unwrap_or("")
+                .to_string();
+
+            if !image_id.is_empty() {
+                // Create candidates with different sizes - validate each one
+                let sizes = [
+                    ("_SL500_", 500u32),
+                    ("_SL1500_", 1500u32),
+                ];
+
+                for (suffix, size) in sizes {
+                    let url = format!(
+                        "https://m.media-amazon.com/images/I/{}{}.jpg",
+                        image_id, suffix
+                    );
+
+                    // Validate the URL works
+                    if validate_image_url(&client, &url).await {
+                        let mut candidate = CoverCandidate::new(url, CoverSource::AudibleUK)
+                            .with_dimensions(size, size);
+                        candidate.calculate_score();
+                        candidates.push(candidate);
+                        // Only need one working URL
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if !candidates.is_empty() {
+        println!("   ✅ Found {} valid Audible UK covers", candidates.len());
     }
 
     candidates

@@ -36,26 +36,26 @@ export function ChapterPreviewModal({ chapters, totalDuration, onClose }) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-hidden">
+      <div className="bg-neutral-900 rounded-xl shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-hidden">
         {/* Header */}
-        <div className="p-6 border-b border-gray-200">
+        <div className="p-6 border-b border-neutral-800">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-purple-100 rounded-lg">
                 <List className="w-5 h-5 text-purple-600" />
               </div>
               <div>
-                <h2 className="text-lg font-semibold text-gray-900">Chapter Preview</h2>
-                <p className="text-sm text-gray-600">
+                <h2 className="text-lg font-semibold text-gray-100">Chapter Preview</h2>
+                <p className="text-sm text-gray-400">
                   {chapters.length} chapters detected
                 </p>
               </div>
             </div>
             <button
               onClick={onClose}
-              className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              className="p-2 hover:bg-neutral-800 rounded-lg transition-colors"
             >
-              <X className="w-5 h-5 text-gray-500" />
+              <X className="w-5 h-5 text-gray-400" />
             </button>
           </div>
         </div>
@@ -63,18 +63,18 @@ export function ChapterPreviewModal({ chapters, totalDuration, onClose }) {
         {/* Chapter List */}
         <div className="overflow-y-auto max-h-[50vh]">
           <table className="w-full">
-            <thead className="bg-gray-50 sticky top-0">
+            <thead className="bg-neutral-950 sticky top-0">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-12">
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-12">
                   #
                 </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">
                   Chapter Name
                 </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-28">
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider w-28">
                   Start
                 </th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-24">
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider w-24">
                   Duration
                 </th>
               </tr>
@@ -85,20 +85,20 @@ export function ChapterPreviewModal({ chapters, totalDuration, onClose }) {
                 return (
                   <tr
                     key={index}
-                    className="hover:bg-gray-50 transition-colors"
+                    className="hover:bg-neutral-950 transition-colors"
                   >
-                    <td className="px-4 py-3 text-sm text-gray-500 font-mono">
+                    <td className="px-4 py-3 text-sm text-gray-400 font-mono">
                       {index + 1}
                     </td>
                     <td className="px-4 py-3">
-                      <span className="text-sm font-medium text-gray-900">
+                      <span className="text-sm font-medium text-gray-100">
                         {chapter.title}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-600 font-mono">
+                    <td className="px-4 py-3 text-sm text-gray-400 font-mono">
                       {formatTimestamp(chapter.start_ms)}
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-600 text-right font-mono">
+                    <td className="px-4 py-3 text-sm text-gray-400 text-right font-mono">
                       {formatDuration(duration)}
                     </td>
                   </tr>
@@ -109,9 +109,9 @@ export function ChapterPreviewModal({ chapters, totalDuration, onClose }) {
         </div>
 
         {/* Footer */}
-        <div className="p-6 border-t border-gray-200 bg-gray-50">
+        <div className="p-6 border-t border-neutral-800 bg-neutral-950">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4 text-sm text-gray-600">
+            <div className="flex items-center gap-4 text-sm text-gray-400">
               <div className="flex items-center gap-1.5">
                 <Clock className="w-4 h-4" />
                 Total: {formatTotalDuration(totalDuration)}

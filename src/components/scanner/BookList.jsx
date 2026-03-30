@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Upload, CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, Filter, X, Download, FolderPlus, Sparkles, FileJson, Zap, Cloud, Tag, ArrowRight } from 'lucide-react';
+import { CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, X, Sparkles, FileJson, Cloud, ArrowRight, ArrowUpDown, ArrowUp, ArrowDown, AlertTriangle, AlertCircle, Filter } from 'lucide-react';
 
-// Virtualized item height (approximate)
-const ITEM_HEIGHT = 140;
+// Virtualized item height (approximate) - more compact
+const ITEM_HEIGHT = 80;
 const BUFFER_SIZE = 10;
 
 // Check if a string looks like a person's name (2-3 words, capitalized)
@@ -126,32 +126,32 @@ function ChangePreviewTooltip({ group, position }) {
   if (changeEntries.length === 0) return null;
 
   const fieldColors = {
-    title: 'text-blue-600',
-    author: 'text-purple-600',
-    narrator: 'text-green-600',
-    genre: 'text-orange-600',
-    year: 'text-gray-600',
-    series: 'text-indigo-600',
-    publisher: 'text-pink-600',
+    title: 'text-blue-400',
+    author: 'text-purple-400',
+    narrator: 'text-green-400',
+    genre: 'text-orange-400',
+    year: 'text-gray-400',
+    series: 'text-indigo-400',
+    publisher: 'text-pink-400',
   };
 
   return (
     <div
-      className="absolute z-50 bg-white border border-gray-200 rounded-lg shadow-xl p-3 w-72 pointer-events-none"
+      className="absolute z-50 bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl p-3 w-72 pointer-events-none"
       style={{
         left: position.x,
         top: position.y,
         transform: 'translateX(-50%)',
       }}
     >
-      <div className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
+      <div className="text-xs font-semibold text-gray-300 mb-2 flex items-center gap-1.5">
         <span className="w-2 h-2 bg-amber-400 rounded-full"></span>
         Pending Changes Preview
       </div>
       <div className="space-y-2 max-h-48 overflow-y-auto">
         {changeEntries.slice(0, 5).map(([field, change]) => (
           <div key={field} className="text-xs">
-            <span className={`font-semibold capitalize ${fieldColors[field] || 'text-gray-600'}`}>
+            <span className={`font-semibold capitalize ${fieldColors[field] || 'text-gray-400'}`}>
               {field}:
             </span>
             <div className="flex items-start gap-1 mt-0.5 pl-2">
@@ -166,12 +166,12 @@ function ChangePreviewTooltip({ group, position }) {
           </div>
         ))}
         {changeEntries.length > 5 && (
-          <div className="text-[10px] text-gray-500 italic pt-1 border-t border-gray-100">
+          <div className="text-[10px] text-gray-400 italic pt-1 border-t border-neutral-800">
             +{changeEntries.length - 5} more changes...
           </div>
         )}
       </div>
-      <div className="text-[10px] text-gray-400 mt-2 pt-2 border-t border-gray-100">
+      <div className="text-[10px] text-gray-400 mt-2 pt-2 border-t border-neutral-800">
         Click to view full details
       </div>
     </div>
@@ -186,18 +186,16 @@ export function BookList({
   selectedGroupIds,
   expandedGroups,
   fileStatuses,
-  onGroupClick,
   onToggleGroup,
-  onSelectGroup,
   onSelectFile,
-  onScan,
-  onImport,
-  onImportFromAbs,
-  onCleanupAllGenres,
   scanning,
   onSelectAll,
+  onSelectFiltered,
   onClearSelection,
-  onExport
+  validationResults = {}, // { bookId: { issues, errorCount, warningCount } }
+  hasAbsConnection = false,
+  onImportFromAbs,
+  onNavigateToSettings,
 }) {
   const [coverCache, setCoverCache] = useState({});
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 30 });
@@ -209,122 +207,265 @@ export function BookList({
   const [hoverPreview, setHoverPreview] = useState({ group: null, position: { x: 0, y: 0 } });
   const hoverTimeoutRef = useRef(null);
 
-  // Search and filter state
+  // Search state
   const [searchQuery, setSearchQuery] = useState('');
-  const [showFilters, setShowFilters] = useState(false);
-  const [filters, setFilters] = useState({
-    hasCover: null,    // null = all, true = with cover, false = without
-    hasSeries: null,   // null = all, true = in series, false = standalone
-    hasChanges: null,  // null = all, true = has changes, false = no changes
-    genre: '',         // empty = all, or specific genre
-    scanStatus: '',    // empty = all, 'new_scan' = freshly scanned, 'loaded_from_file' = loaded from metadata.json
-    confidenceLevel: '', // empty = all, 'low' = <60%, 'medium' = 60-84%, 'high' = 85%+
-  });
+  // Sort state: 'title', 'author', 'date_added' (default), 'year'
+  const [sortBy, setSortBy] = useState('date_added');
+  const [sortOrder, setSortOrder] = useState('desc'); // 'asc' or 'desc'
+  // Validation filter: 'all', 'errors', 'warnings', 'clean'
+  const [validationFilter, setValidationFilter] = useState('all');
+  const [issueTypeFilter, setIssueTypeFilter] = useState('all');
+  // Edit status filter: 'all', 'edited', 'unedited'
+  const [editFilter, setEditFilter] = useState('all');
+  // Processed status filter: 'all', 'processed', 'unprocessed'
+  const [processedFilter, setProcessedFilter] = useState('all');
+  // Missing metadata filter: 'all', 'dna', 'genres', 'description', 'narrator'
+  const [missingFilter, setMissingFilter] = useState('all');
+  const [showMissingDropdown, setShowMissingDropdown] = useState(false);
+  const missingDropdownRef = useRef(null);
+  // Active view: 'all', 'recent', 'edited'
+  const [activeView, setActiveView] = useState('all');
 
-  // Calculate confidence statistics for triage view
-  const confidenceStats = useMemo(() => {
-    let low = 0, medium = 0, high = 0, noConfidence = 0;
-    groups.forEach(group => {
-      const confidence = group.metadata?.confidence?.overall;
-      if (confidence === undefined || confidence === null) {
-        noConfidence++;
-      } else if (confidence < 60) {
-        low++;
-      } else if (confidence < 85) {
-        medium++;
-      } else {
-        high++;
+  // Compute active filter label for the dropdown button
+  const activeFilterLabel = useMemo(() => {
+    if (missingFilter !== 'all') {
+      return `No ${({ dna: 'DNA', genres: 'Genres', description: 'Desc', narrator: 'Narrator' })[missingFilter]}`;
+    }
+    if (editFilter === 'edited') return 'Edited';
+    if (editFilter === 'unedited') return 'Unedited';
+    if (processedFilter === 'processed') return 'Processed';
+    if (processedFilter === 'unprocessed') return 'Unprocessed';
+    if (validationFilter === 'issues') return 'Issues';
+    if (activeView === 'recent') return 'Recent';
+    return 'All';
+  }, [missingFilter, editFilter, processedFilter, validationFilter, activeView]);
+
+  // Close missing dropdown on click outside
+  useEffect(() => {
+    if (!showMissingDropdown) return;
+    const handler = (e) => {
+      if (missingDropdownRef.current && !missingDropdownRef.current.contains(e.target)) {
+        setShowMissingDropdown(false);
       }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showMissingDropdown]);
+
+  // Check if validation data exists
+  const hasValidationData = Object.keys(validationResults).length > 0;
+
+  // Collect unique issue types for filtering
+  const uniqueIssueTypes = useMemo(() => {
+    if (!hasValidationData) return [];
+    const types = new Set();
+    Object.values(validationResults).forEach(validation => {
+      validation?.issues?.forEach(issue => {
+        if (issue.issue_type) {
+          types.add(issue.issue_type);
+        }
+      });
     });
-    return { low, medium, high, noConfidence, total: groups.length };
-  }, [groups]);
+    return Array.from(types).sort();
+  }, [validationResults, hasValidationData]);
 
-  // Get unique genres from all groups
-  const availableGenres = useMemo(() => {
-    const genreSet = new Set();
-    groups.forEach(group => {
-      group.metadata?.genres?.forEach(g => genreSet.add(g));
-    });
-    return Array.from(genreSet).sort();
-  }, [groups]);
+  // Clear filters helper
+  const clearFilters = useCallback(() => {
+    setSearchQuery('');
+    setValidationFilter('all');
+    setIssueTypeFilter('all');
+    setEditFilter('all');
+    setProcessedFilter('all');
+    setMissingFilter('all');
+    setActiveView('all');
+  }, []);
 
-  // Filter groups based on search and filters
-  const filteredGroups = useMemo(() => {
-    return groups.filter(group => {
-      const metadata = group.metadata;
-      const searchLower = searchQuery.toLowerCase().trim();
+  // Simple fuzzy matching - checks if query words are present (not necessarily contiguous)
+  const fuzzyMatch = useCallback((text, query) => {
+    if (!text || !query) return false;
+    const textLower = text.toLowerCase();
+    const queryLower = query.toLowerCase().trim();
 
-      // Search filter
-      if (searchLower) {
-        const matchesTitle = metadata.title?.toLowerCase().includes(searchLower);
-        const matchesAuthor = metadata.author?.toLowerCase().includes(searchLower);
-        const matchesSeries = metadata.series?.toLowerCase().includes(searchLower) ||
-                             metadata.all_series?.some(s => s.name?.toLowerCase().includes(searchLower));
-        const matchesNarrator = metadata.narrator?.toLowerCase().includes(searchLower) ||
-                               metadata.narrators?.some(n => n.toLowerCase().includes(searchLower));
+    // Exact substring match
+    if (textLower.includes(queryLower)) return true;
 
-        if (!matchesTitle && !matchesAuthor && !matchesSeries && !matchesNarrator) {
-          return false;
+    // Word-based fuzzy: all query words must be present
+    const queryWords = queryLower.split(/\s+/).filter(w => w.length > 1);
+    if (queryWords.length > 1) {
+      return queryWords.every(word => textLower.includes(word));
+    }
+
+    return false;
+  }, []);
+
+  // Find "did you mean" suggestions when no results
+  const getSuggestions = useCallback((query, allGroups) => {
+    if (!query || query.length < 3 || allGroups.length === 0) return [];
+
+    const queryLower = query.toLowerCase().trim();
+    const suggestions = new Set();
+
+    // Check for partial matches in titles and authors
+    allGroups.forEach(group => {
+      const meta = group.metadata || {};
+      const title = meta.title?.toLowerCase() || '';
+      const author = meta.author?.toLowerCase() || '';
+
+      // Check if query is a partial match (typo tolerance)
+      if (title && title.length > 3) {
+        // Check if first few chars match
+        if (title.startsWith(queryLower.slice(0, 3)) ||
+            queryLower.startsWith(title.slice(0, 3))) {
+          suggestions.add(meta.title);
         }
       }
-
-      // Cover filter (check both local cache and ABS cover_url)
-      if (filters.hasCover !== null) {
-        const hasCover = !!coverCache[group.id] || !!metadata.cover_url;
-        if (filters.hasCover !== hasCover) return false;
+      if (author && author.length > 3) {
+        if (author.startsWith(queryLower.slice(0, 3)) ||
+            queryLower.startsWith(author.slice(0, 3))) {
+          suggestions.add(meta.author);
+        }
       }
+    });
 
-      // Series filter - check all_series first, then fallback to primary series
-      if (filters.hasSeries !== null) {
-        const hasSeries = metadata.all_series?.length > 0 || isValidSeries(metadata.series, metadata.author);
-        if (filters.hasSeries !== hasSeries) return false;
-      }
+    return Array.from(suggestions).slice(0, 3);
+  }, []);
 
-      // Changes filter
-      if (filters.hasChanges !== null) {
+  // Filter and sort groups
+  const { filteredGroups, suggestions } = useMemo(() => {
+    let result = groups;
+
+    // Apply validation filter first (if validation data exists)
+    if (hasValidationData && validationFilter !== 'all') {
+      result = result.filter(group => {
+        const validation = validationResults[group.id];
+        switch (validationFilter) {
+          case 'errors':
+            return validation?.errorCount > 0;
+          case 'warnings':
+            return validation?.warningCount > 0 && (validation?.errorCount || 0) === 0;
+          case 'issues':
+            return validation?.errorCount > 0 || validation?.warningCount > 0;
+          case 'clean':
+            return !validation || (validation.errorCount === 0 && validation.warningCount === 0);
+          default:
+            return true;
+        }
+      });
+    }
+
+    // Apply issue type filter (if set)
+    if (hasValidationData && issueTypeFilter !== 'all') {
+      result = result.filter(group => {
+        const validation = validationResults[group.id];
+        if (!validation?.issues) return false;
+        return validation.issues.some(issue => issue.issue_type === issueTypeFilter);
+      });
+    }
+
+    // Apply edit filter
+    if (editFilter !== 'all') {
+      result = result.filter(group => {
         const hasChanges = group.total_changes > 0;
-        if (filters.hasChanges !== hasChanges) return false;
+        if (editFilter === 'edited') return hasChanges;
+        if (editFilter === 'unedited') return !hasChanges;
+        return true;
+      });
+    }
+
+    // Apply processed filter (checks DNA tags + metadata completeness)
+    if (processedFilter !== 'all') {
+      result = result.filter(group => {
+        const meta = group.metadata || {};
+        const hasDna = meta.tags?.some(t => t.startsWith('dna:'));
+        const hasGenres = meta.genres?.length > 0;
+        const hasDescription = !!meta.description;
+        const hasNarrator = !!meta.narrator || meta.narrators?.length > 0;
+        const isProcessed = hasDna && hasGenres && hasDescription && hasNarrator;
+        return processedFilter === 'processed' ? isProcessed : !isProcessed;
+      });
+    }
+
+    // Apply missing metadata filter
+    if (missingFilter !== 'all') {
+      result = result.filter(group => {
+        const meta = group.metadata || {};
+        switch (missingFilter) {
+          case 'dna': return !meta.tags?.some(t => t.startsWith('dna:'));
+          case 'genres': return !meta.genres?.length;
+          case 'description': return !meta.description;
+          case 'narrator': return !meta.narrator && !meta.narrators?.length;
+          default: return true;
+        }
+      });
+    }
+
+    // Apply search filter with fuzzy matching
+    if (searchQuery.trim()) {
+      const searchLower = searchQuery.toLowerCase().trim();
+      result = result.filter(group => {
+        const metadata = group.metadata || {};
+        const matchesTitle = fuzzyMatch(metadata.title, searchQuery);
+        const matchesAuthor = fuzzyMatch(metadata.author, searchQuery);
+        const matchesSeries = fuzzyMatch(metadata.series, searchQuery) ||
+                             metadata.all_series?.some(s => fuzzyMatch(s?.name, searchQuery));
+        const matchesNarrator = fuzzyMatch(metadata.narrator, searchQuery) ||
+                               metadata.narrators?.some(n => fuzzyMatch(n, searchQuery));
+        const matchesGroupName = fuzzyMatch(group.group_name, searchQuery);
+        const matchesGenres = metadata.genres?.some(g => fuzzyMatch(g, searchQuery));
+        const matchesTags = metadata.tags?.some(t => fuzzyMatch(t, searchQuery));
+        return matchesTitle || matchesAuthor || matchesSeries || matchesNarrator || matchesGroupName || matchesGenres || matchesTags;
+      });
+    }
+
+    // Get suggestions if no results
+    const didYouMean = result.length === 0 && searchQuery.trim()
+      ? getSuggestions(searchQuery, groups)
+      : [];
+
+    // Apply sorting
+    result = [...result].sort((a, b) => {
+      let comparison = 0;
+      const metaA = a.metadata || {};
+      const metaB = b.metadata || {};
+
+      switch (sortBy) {
+        case 'title':
+          comparison = (metaA.title || '').localeCompare(metaB.title || '');
+          break;
+        case 'author':
+          comparison = (metaA.author || '').localeCompare(metaB.author || '');
+          break;
+        case 'year':
+          const yearA = parseInt(metaA.year) || 0;
+          const yearB = parseInt(metaB.year) || 0;
+          comparison = yearA - yearB;
+          break;
+        case 'missing_count': {
+          const countMissing = (meta, id) => {
+            let n = 0;
+            if (!meta.tags?.some(t => t.startsWith('dna:'))) n++;
+            if (!meta.genres?.length) n++;
+            if (!meta.description) n++;
+            if (!meta.narrator && !meta.narrators?.length) n++;
+            return n;
+          };
+          comparison = countMissing(metaA, a.id) - countMissing(metaB, b.id);
+          break;
+        }
+        case 'date_added':
+        default:
+          // Use added_at timestamp from ABS
+          const addedA = metaA.added_at || 0;
+          const addedB = metaB.added_at || 0;
+          comparison = addedA - addedB;
+          break;
       }
 
-      // Genre filter
-      if (filters.genre) {
-        const hasGenre = metadata.genres?.includes(filters.genre);
-        if (!hasGenre) return false;
-      }
-
-      // Scan status filter
-      if (filters.scanStatus) {
-        if (filters.scanStatus !== group.scan_status) return false;
-      }
-
-      // Confidence level filter
-      if (filters.confidenceLevel) {
-        const confidence = metadata.confidence?.overall;
-        if (filters.confidenceLevel === 'low' && (confidence === undefined || confidence >= 60)) return false;
-        if (filters.confidenceLevel === 'medium' && (confidence === undefined || confidence < 60 || confidence >= 85)) return false;
-        if (filters.confidenceLevel === 'high' && (confidence === undefined || confidence < 85)) return false;
-      }
-
-      return true;
+      return sortOrder === 'desc' ? -comparison : comparison;
     });
-  }, [groups, searchQuery, filters, coverCache]);
 
-  // Reset filters
-  const clearFilters = () => {
-    setSearchQuery('');
-    setFilters({
-      hasCover: null,
-      hasSeries: null,
-      hasChanges: null,
-      genre: '',
-      scanStatus: '',
-      confidenceLevel: '',
-    });
-  };
-
-  const hasActiveFilters = searchQuery || filters.hasCover !== null ||
-    filters.hasSeries !== null || filters.hasChanges !== null || filters.genre ||
-    filters.scanStatus || filters.confidenceLevel;
+    return { filteredGroups: result, suggestions: didYouMean };
+  }, [groups, searchQuery, sortBy, sortOrder, fuzzyMatch, getSuggestions, validationFilter, issueTypeFilter, editFilter, processedFilter, missingFilter, hasValidationData, validationResults]);
 
   // Hover preview handlers
   const handleChangesBadgeHover = useCallback((group, event) => {
@@ -470,60 +611,56 @@ export function BookList({
 
   if (groups.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center p-8 bg-white">
+      <div className="flex-1 flex items-center justify-center p-8 bg-neutral-950">
         <div className="text-center max-w-md">
-          <div className="bg-gradient-to-br from-blue-50 to-indigo-100 rounded-2xl p-8 border border-blue-200">
-            <Upload className="w-12 h-12 text-blue-400 mx-auto mb-4" />
-            <h3 className="text-lg font-semibold text-gray-900 mb-2">No Files Scanned</h3>
-            <p className="text-gray-600 mb-6 text-sm">Select a folder to scan for audiobook files and view metadata</p>
-            <div className="flex flex-col gap-3">
-              {/* Quick Scan - default */}
+          {hasAbsConnection ? (
+            <>
+              <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-orange-500 flex items-center justify-center">
+                <Cloud className="w-10 h-10 text-white" />
+              </div>
+              <h2 className="text-2xl font-bold text-white mb-3">Load Your Library</h2>
+              <p className="text-gray-400 mb-6">
+                Connect to AudiobookShelf to import your audiobook library and start enriching metadata.
+              </p>
               <button
-                onClick={() => onScan('normal')}
+                onClick={onImportFromAbs}
                 disabled={scanning}
-                className="w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:opacity-50 flex items-center justify-center gap-2"
+                className="w-full px-6 py-4 bg-orange-500 hover:bg-orange-600 text-white rounded-xl font-semibold text-lg transition-all shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3"
               >
-                <Zap className="w-4 h-4" />
-                {scanning ? 'Scanning...' : 'Quick Scan'}
+                {scanning ? (
+                  <>
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                    Loading...
+                  </>
+                ) : (
+                  <>
+                    <Cloud className="w-5 h-5" />
+                    Load from AudiobookShelf
+                  </>
+                )}
               </button>
-
-              {/* Standard Scan - secondary */}
+            </>
+          ) : (
+            <>
+              <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
+                <AlertTriangle className="w-10 h-10 text-white" />
+              </div>
+              <h2 className="text-2xl font-bold text-white mb-3">Connect to AudiobookShelf</h2>
+              <p className="text-gray-400 mb-6">
+                Configure your AudiobookShelf server connection to import your library and start enriching metadata.
+              </p>
               <button
-                onClick={() => onScan('force_fresh')}
-                disabled={scanning}
-                className="w-full px-4 py-2.5 bg-white border border-blue-300 text-blue-700 rounded-lg hover:bg-blue-50 transition-colors font-medium disabled:opacity-50 flex items-center justify-center gap-2 text-sm"
+                onClick={onNavigateToSettings}
+                className="w-full px-6 py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl font-semibold text-lg transition-all shadow-lg hover:shadow-xl flex items-center justify-center gap-3"
               >
-                <Sparkles className="w-4 h-4" />
-                Standard Scan (Fresh Data)
+                <ArrowRight className="w-5 h-5" />
+                Go to Settings
               </button>
-
-              {onImport && (
-                <button
-                  onClick={onImport}
-                  disabled={scanning}
-                  className="w-full px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium disabled:opacity-50 text-sm flex items-center justify-center gap-2"
-                >
-                  <FolderPlus className="w-4 h-4" />
-                  Import Without Scanning
-                </button>
-              )}
-              {onImportFromAbs && (
-                <button
-                  onClick={() => onImportFromAbs()}
-                  disabled={scanning}
-                  className="w-full px-4 py-2 bg-gradient-to-r from-purple-500 to-indigo-500 text-white rounded-lg hover:from-purple-600 hover:to-indigo-600 transition-colors font-medium disabled:opacity-50 text-sm flex items-center justify-center gap-2"
-                >
-                  <Cloud className="w-4 h-4" />
-                  Pull from ABS Library
-                </button>
-              )}
-            </div>
-            <div className="mt-4 text-xs text-gray-500 space-y-1">
-              <p><strong>Quick:</strong> Skip books with complete metadata</p>
-              <p><strong>Standard:</strong> Fresh data from all enabled sources</p>
-              <p><strong>Pull from ABS:</strong> Import books from AudiobookShelf</p>
-            </div>
-          </div>
+              <p className="text-gray-500 text-sm mt-4">
+                You'll need your server URL and API token
+              </p>
+            </>
+          )}
         </div>
       </div>
     );
@@ -534,245 +671,163 @@ export function BookList({
   const offsetY = visibleRange.start * ITEM_HEIGHT;
 
   return (
-    <div className="w-2/5 border-r border-gray-200 overflow-hidden bg-white flex flex-col">
-      {/* Search & Filter Header */}
-      <div className="border-b border-gray-200 bg-gray-50 flex-shrink-0">
-        {/* Search Bar */}
-        <div className="p-3 pb-2">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+    <div className="w-2/5 overflow-hidden bg-neutral-950 flex flex-col">
+      {/* Header - Minimal Filter Bar */}
+      <div className="px-4 py-3 flex-shrink-0">
+        {/* Filter Bar: Search + Filter Dropdown */}
+        <div className="flex items-center gap-2">
+          {/* Search */}
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search title, author, series..."
-              className="w-full pl-9 pr-8 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="Search..."
+              className="w-full pl-9 pr-8 py-2 text-sm bg-neutral-900 border border-neutral-800 rounded-lg focus:outline-none focus:border-neutral-700 text-gray-100 placeholder-gray-600"
             />
             {searchQuery && (
-              <button
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-gray-200 rounded"
-              >
-                <X className="w-3 h-3 text-gray-500" />
+              <button onClick={() => setSearchQuery('')} className="absolute right-3 top-1/2 -translate-y-1/2">
+                <X className="w-4 h-4 text-gray-500 hover:text-gray-300" />
               </button>
             )}
           </div>
-        </div>
 
-        {/* Triage Quick Filters */}
-        {(confidenceStats.low > 0 || confidenceStats.medium > 0 || confidenceStats.high > 0) && (
-          <div className="px-3 pb-2 flex items-center gap-2">
-            <span className="text-[10px] text-gray-500 uppercase font-semibold">Triage:</span>
+          {/* Filter dropdown */}
+          <div className="relative" ref={missingDropdownRef}>
             <button
-              onClick={() => setFilters(f => ({ ...f, confidenceLevel: f.confidenceLevel === 'low' ? '' : 'low' }))}
-              className={`px-2 py-1 text-xs rounded-md transition-all flex items-center gap-1.5 ${
-                filters.confidenceLevel === 'low'
-                  ? 'bg-red-100 text-red-700 border border-red-300 shadow-sm'
-                  : 'bg-white border border-gray-200 text-gray-600 hover:bg-red-50 hover:border-red-200'
-              }`}
-              title="Show low confidence books that need review"
-            >
-              <span>🔴</span>
-              <span>Needs Review</span>
-              {confidenceStats.low > 0 && (
-                <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
-                  filters.confidenceLevel === 'low' ? 'bg-red-200 text-red-800' : 'bg-gray-100 text-gray-600'
-                }`}>
-                  {confidenceStats.low}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => setFilters(f => ({ ...f, confidenceLevel: f.confidenceLevel === 'medium' ? '' : 'medium' }))}
-              className={`px-2 py-1 text-xs rounded-md transition-all flex items-center gap-1.5 ${
-                filters.confidenceLevel === 'medium'
-                  ? 'bg-yellow-100 text-yellow-700 border border-yellow-300 shadow-sm'
-                  : 'bg-white border border-gray-200 text-gray-600 hover:bg-yellow-50 hover:border-yellow-200'
-              }`}
-              title="Show medium confidence books to verify"
-            >
-              <span>🟡</span>
-              <span>Verify</span>
-              {confidenceStats.medium > 0 && (
-                <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
-                  filters.confidenceLevel === 'medium' ? 'bg-yellow-200 text-yellow-800' : 'bg-gray-100 text-gray-600'
-                }`}>
-                  {confidenceStats.medium}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => setFilters(f => ({ ...f, confidenceLevel: f.confidenceLevel === 'high' ? '' : 'high' }))}
-              className={`px-2 py-1 text-xs rounded-md transition-all flex items-center gap-1.5 ${
-                filters.confidenceLevel === 'high'
-                  ? 'bg-green-100 text-green-700 border border-green-300 shadow-sm'
-                  : 'bg-white border border-gray-200 text-gray-600 hover:bg-green-50 hover:border-green-200'
-              }`}
-              title="Show high confidence books ready to write"
-            >
-              <span>🟢</span>
-              <span>Ready</span>
-              {confidenceStats.high > 0 && (
-                <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
-                  filters.confidenceLevel === 'high' ? 'bg-green-200 text-green-800' : 'bg-gray-100 text-gray-600'
-                }`}>
-                  {confidenceStats.high}
-                </span>
-              )}
-            </button>
-          </div>
-        )}
-
-        {/* Filter Toggle & Stats */}
-        <div className="px-3 pb-3 flex items-center justify-between">
-          <div className="flex items-center gap-3 text-xs">
-            <span className="font-semibold text-gray-900">
-              {filteredGroups.length}{filteredGroups.length !== stats.totalBooks && ` / ${stats.totalBooks}`} books
-            </span>
-            <span className="text-gray-500">
-              {stats.totalFiles} files
-            </span>
-            {stats.totalChanges > 0 && (
-              <span className="text-amber-600">
-                {stats.totalChanges} changes
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowFilters(!showFilters)}
-              className={`px-2 py-1 text-xs rounded-md transition-colors flex items-center gap-1 ${
-                showFilters || hasActiveFilters
-                  ? 'bg-blue-100 text-blue-700 border border-blue-200'
-                  : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50'
+              onClick={() => setShowMissingDropdown(v => !v)}
+              className={`flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg border transition-colors ${
+                activeFilterLabel !== 'All'
+                  ? 'border-neutral-600 text-white bg-neutral-800'
+                  : 'border-neutral-800 text-gray-400 hover:text-gray-300 hover:border-neutral-700'
               }`}
             >
-              <Filter className="w-3 h-3" />
-              Filters
-              {hasActiveFilters && <span className="w-1.5 h-1.5 bg-blue-600 rounded-full" />}
+              <Filter className="w-3.5 h-3.5" />
+              {activeFilterLabel}
+              <ChevronDown className="w-3 h-3" />
             </button>
-            {onImport && (
-              <button
-                onClick={onImport}
-                disabled={scanning}
-                className="px-2 py-1 text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-md transition-colors flex items-center gap-1 disabled:opacity-50"
-                title="Import folders without metadata scanning"
-              >
-                <FolderPlus className="w-3 h-3" />
-                Import
-              </button>
-            )}
-            {onImportFromAbs && (
-              <button
-                onClick={onImportFromAbs}
-                disabled={scanning}
-                className="px-2 py-1 text-xs bg-purple-600 hover:bg-purple-700 text-white rounded-md transition-colors flex items-center gap-1 disabled:opacity-50"
-                title="Import books from AudiobookShelf library"
-              >
-                <Cloud className="w-3 h-3" />
-                ABS
-              </button>
-            )}
-            {onCleanupAllGenres && groups.length > 0 && (
-              <button
-                onClick={onCleanupAllGenres}
-                disabled={scanning}
-                className="px-2 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded-md transition-colors flex items-center gap-1 disabled:opacity-50"
-                title="Clean all genres and push to ABS"
-              >
-                <Tag className="w-3 h-3" />
-                Clean & Push
-              </button>
-            )}
-            {onExport && (
-              <button
-                onClick={onExport}
-                className="px-2 py-1 text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-md transition-colors flex items-center gap-1"
-              >
-                <Download className="w-3 h-3" />
-                Export
-              </button>
-            )}
-            <button
-              onClick={onSelectAll}
-              className="px-2 py-1 text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-md transition-colors"
-            >
-              Select All
-            </button>
-            <button
-              onClick={onClearSelection}
-              className="px-2 py-1 text-xs bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-md transition-colors"
-            >
-              Clear
-            </button>
-          </div>
-        </div>
-
-        {/* Filter Panel */}
-        {showFilters && (
-          <div className="px-3 pb-3 border-t border-gray-200 pt-3 bg-white">
-            <div className="flex flex-wrap gap-3">
-              {/* Genre Filter */}
-              <select
-                value={filters.genre}
-                onChange={(e) => setFilters(f => ({ ...f, genre: e.target.value }))}
-                className="text-xs px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500"
-              >
-                <option value="">All Genres</option>
-                {availableGenres.map(genre => (
-                  <option key={genre} value={genre}>{genre}</option>
+            {showMissingDropdown && (
+              <div className="absolute top-full right-0 mt-1 bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl z-50 py-1 min-w-[200px]">
+                {/* Status filters */}
+                <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-gray-600 font-semibold">Status</div>
+                {[
+                  { label: 'All Books', active: activeView === 'all' && editFilter === 'all' && processedFilter === 'all' && missingFilter === 'all' && validationFilter === 'all', color: 'bg-white',
+                    action: () => { clearFilters(); setActiveView('all'); } },
+                  { label: 'Recent', active: activeView === 'recent', color: null, icon: true,
+                    action: () => { setActiveView('recent'); setSortBy('date_added'); setSortOrder('desc'); setEditFilter('all'); setValidationFilter('all'); setProcessedFilter('all'); setMissingFilter('all'); } },
+                  { label: `Edited${groups.filter(g => g.total_changes > 0).length > 0 ? ` (${groups.filter(g => g.total_changes > 0).length})` : ''}`, active: editFilter === 'edited', color: 'bg-amber-500',
+                    action: () => { setActiveView('edited'); setEditFilter('edited'); setValidationFilter('all'); setProcessedFilter('all'); setMissingFilter('all'); } },
+                  { label: 'Unedited', active: editFilter === 'unedited', color: 'bg-green-500',
+                    action: () => { setActiveView('unedited'); setEditFilter('unedited'); setValidationFilter('all'); setProcessedFilter('all'); setMissingFilter('all'); } },
+                  { label: 'Processed', active: processedFilter === 'processed', color: 'bg-emerald-500',
+                    action: () => { setActiveView('processed'); setProcessedFilter('processed'); setEditFilter('all'); setValidationFilter('all'); setMissingFilter('all'); } },
+                  { label: 'Unprocessed', active: processedFilter === 'unprocessed', color: 'bg-rose-500',
+                    action: () => { setActiveView('unprocessed'); setProcessedFilter('unprocessed'); setEditFilter('all'); setValidationFilter('all'); setMissingFilter('all'); } },
+                  ...(hasValidationData ? [{
+                    label: `Issues${Object.values(validationResults).filter(v => v?.errorCount > 0 || v?.warningCount > 0).length > 0 ? ` (${Object.values(validationResults).filter(v => v?.errorCount > 0 || v?.warningCount > 0).length})` : ''}`,
+                    active: validationFilter === 'issues', color: 'bg-red-500',
+                    action: () => { setActiveView('issues'); setValidationFilter('issues'); setEditFilter('all'); setProcessedFilter('all'); setMissingFilter('all'); }
+                  }] : []),
+                ].map((item, i) => (
+                  <button
+                    key={i}
+                    onClick={() => { item.action(); setShowMissingDropdown(false); }}
+                    className={`w-full px-3 py-1.5 text-left text-sm flex items-center gap-2 transition-colors ${
+                      item.active ? 'text-white bg-neutral-800' : 'text-gray-400 hover:bg-neutral-800 hover:text-white'
+                    }`}
+                  >
+                    {item.icon
+                      ? <ArrowUpDown className="w-3 h-3" />
+                      : <span className={`w-1.5 h-1.5 rounded-full ${item.active ? item.color : 'bg-gray-600'}`} />
+                    }
+                    {item.label}
+                  </button>
                 ))}
-              </select>
 
-              {/* Series Filter */}
-              <select
-                value={filters.hasSeries === null ? '' : filters.hasSeries.toString()}
-                onChange={(e) => setFilters(f => ({
-                  ...f,
-                  hasSeries: e.target.value === '' ? null : e.target.value === 'true'
-                }))}
-                className="text-xs px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500"
+                {/* Missing metadata section */}
+                <div className="border-t border-neutral-800 mt-1 pt-1">
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-gray-600 font-semibold">Missing</div>
+                  {[
+                    { key: 'dna', label: 'DNA Tags', color: 'bg-purple-400' },
+                    { key: 'genres', label: 'Genres', color: 'bg-blue-400' },
+                    { key: 'description', label: 'Description', color: 'bg-cyan-400' },
+                    { key: 'narrator', label: 'Narrator', color: 'bg-orange-400' },
+                  ].map(f => (
+                    <button
+                      key={f.key}
+                      onClick={() => {
+                        setActiveView(f.key);
+                        setMissingFilter(f.key);
+                        setEditFilter('all');
+                        setValidationFilter('all');
+                        setProcessedFilter('all');
+                        setSortBy('missing_count');
+                        setSortOrder('desc');
+                        setShowMissingDropdown(false);
+                      }}
+                      className={`w-full px-3 py-1.5 text-left text-sm flex items-center gap-2 transition-colors ${
+                        missingFilter === f.key ? 'text-white bg-neutral-800' : 'text-gray-400 hover:bg-neutral-800 hover:text-white'
+                      }`}
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full ${missingFilter === f.key ? f.color : 'bg-gray-600'}`} />
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Sort section */}
+                <div className="border-t border-neutral-800 mt-1 pt-1">
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-gray-600 font-semibold">Sort By</div>
+                  {[
+                    { key: 'date_added', label: 'Date Added' },
+                    { key: 'title', label: 'Title' },
+                    { key: 'author', label: 'Author' },
+                    { key: 'year', label: 'Year' },
+                    { key: 'missing_count', label: 'Most Incomplete' },
+                  ].map(s => (
+                    <button
+                      key={s.key}
+                      onClick={() => {
+                        if (sortBy === s.key) {
+                          setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+                        } else {
+                          setSortBy(s.key);
+                          setSortOrder(s.key === 'title' || s.key === 'author' ? 'asc' : 'desc');
+                        }
+                        setShowMissingDropdown(false);
+                      }}
+                      className={`w-full px-3 py-1.5 text-left text-sm flex items-center gap-2 transition-colors ${
+                        sortBy === s.key ? 'text-white bg-neutral-800' : 'text-gray-400 hover:bg-neutral-800 hover:text-white'
+                      }`}
+                    >
+                      {sortBy === s.key
+                        ? (sortOrder === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)
+                        : <span className="w-3" />
+                      }
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Results count - shows when filtering */}
+        {(editFilter !== 'all' || validationFilter !== 'all' || processedFilter !== 'all' || missingFilter !== 'all' || searchQuery) && (
+          <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
+            <span>
+              Showing {filteredGroups.length} of {groups.length} books
+            </span>
+            {(editFilter !== 'all' || validationFilter !== 'all' || processedFilter !== 'all' || missingFilter !== 'all') && (
+              <button
+                onClick={clearFilters}
+                className="text-gray-400 hover:text-white transition-colors"
               >
-                <option value="">All Books</option>
-                <option value="true">In Series</option>
-                <option value="false">Standalone</option>
-              </select>
-
-              {/* Changes Filter */}
-              <select
-                value={filters.hasChanges === null ? '' : filters.hasChanges.toString()}
-                onChange={(e) => setFilters(f => ({
-                  ...f,
-                  hasChanges: e.target.value === '' ? null : e.target.value === 'true'
-                }))}
-                className="text-xs px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500"
-              >
-                <option value="">Any Status</option>
-                <option value="true">Has Changes</option>
-                <option value="false">No Changes</option>
-              </select>
-
-              {/* Scan Status Filter */}
-              <select
-                value={filters.scanStatus}
-                onChange={(e) => setFilters(f => ({ ...f, scanStatus: e.target.value }))}
-                className="text-xs px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500"
-              >
-                <option value="">All Sources</option>
-                <option value="new_scan">New Scans</option>
-                <option value="loaded_from_file">From metadata.json</option>
-                <option value="not_scanned">Not Scanned</option>
-              </select>
-
-              {hasActiveFilters && (
-                <button
-                  onClick={clearFilters}
-                  className="text-xs px-2 py-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 rounded-md transition-colors"
-                >
-                  Clear All
-                </button>
-              )}
-            </div>
+                Clear filters
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -794,14 +849,12 @@ export function BookList({
         {filteredGroups.length === 0 && groups.length > 0 && (
           <div className="flex items-center justify-center p-8">
             <div className="text-center">
-              <Search className="w-10 h-10 text-gray-300 mx-auto mb-3" />
-              <p className="text-gray-600 font-medium mb-1">No books found</p>
-              <p className="text-gray-500 text-sm mb-3">Try adjusting your search or filters</p>
+              <p className="text-gray-500 text-sm mb-3">No books found</p>
               <button
                 onClick={clearFilters}
-                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                className="text-sm text-gray-400 hover:text-white transition-colors"
               >
-                Clear Filters
+                Clear filters
               </button>
             </div>
           </div>
@@ -817,217 +870,162 @@ export function BookList({
               const isSingleSelected = selectedGroup?.id === group.id;
               const isSelected = isInMultiSelect || isSingleSelected;
               const metadata = group.metadata;
-              
+
+              // Format duration from seconds to "Xh" or "Xm"
+              const formatDuration = (seconds) => {
+                if (!seconds) return null;
+                const hours = Math.floor(seconds / 3600);
+                const mins = Math.floor((seconds % 3600) / 60);
+                if (hours > 0) return `${hours}h`;
+                return `${mins}m`;
+              };
+
+              const duration = formatDuration(metadata.duration);
+
+              // Get series display text
+              const getSeriesText = () => {
+                if (metadata.all_series?.length > 0) {
+                  const s = metadata.all_series[0];
+                  const seq = isValidSequence(s.sequence) ? ` #${s.sequence}` : '';
+                  return `${s.name}${seq}`;
+                }
+                if (isValidSeries(metadata.series, metadata.author)) {
+                  const seq = isValidSequence(metadata.sequence) ? ` #${metadata.sequence}` : '';
+                  return `${metadata.series}${seq}`;
+                }
+                return metadata.author;
+              };
+
+              const hasIssues = validationResults[group.id]?.errorCount > 0 || validationResults[group.id]?.warningCount > 0;
+              const hasChanges = group.total_changes > 0;
+
               return (
-                <div 
-                  key={group.id} 
-                  className={`border-b border-gray-100 transition-colors cursor-pointer ${
-                    isSelected 
-                      ? 'bg-blue-50 border-l-4 border-l-blue-600' 
-                      : 'hover:bg-gray-50 border-l-4 border-l-transparent'
+                <div
+                  key={group.id}
+                  className={`border-b border-neutral-800/50 transition-colors cursor-pointer ${
+                    isSelected
+                      ? 'bg-neutral-800/50'
+                      : 'hover:bg-neutral-900/50'
                   }`}
-                  style={{ minHeight: ITEM_HEIGHT }}
+                  style={{ height: ITEM_HEIGHT }}
                   onClick={(e) => {
-                    // Pass filteredGroups so ScannerPage can do proper range selection
                     onSelectFile(group, actualIndex, e, filteredGroups);
                   }}
                 >
-                  <div className="p-4">
-                    <div className="flex items-start gap-3">
-                      {/* Thumbnail - Square */}
-                      <div className="flex-shrink-0 w-20 h-20 bg-gradient-to-br from-gray-100 to-gray-200 rounded shadow-sm overflow-hidden relative flex items-center justify-center">
-                        {coverCache[group.id] ? (
-                          <img
-                            src={coverCache[group.id]}
-                            alt={metadata.title}
-                            className="max-w-full max-h-full object-contain"
-                            loading="lazy"
-                            onError={(e) => {
-                              e.target.style.display = 'none';
-                            }}
-                          />
-                        ) : (
-                          <Book className="w-6 h-6 text-gray-400" />
-                        )}
-                      </div>
+                  <div className="h-full flex items-center gap-4 px-4">
+                    {/* Cover thumbnail */}
+                    <div className="flex-shrink-0 w-12 h-12 bg-neutral-800 rounded-lg overflow-hidden flex items-center justify-center">
+                      {coverCache[group.id] ? (
+                        <img
+                          src={coverCache[group.id]}
+                          alt=""
+                          className="w-full h-full object-cover"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <Book className="w-5 h-5 text-gray-600" />
+                      )}
+                    </div>
 
-                      {/* Book Info */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-start justify-between mb-1">
-                          <h4 className={`font-medium text-sm leading-tight line-clamp-2 pr-2 ${
-                            isSelected ? 'text-blue-900' : 'text-gray-900'
-                          }`}>
-                            {metadata.title}
-                          </h4>
-                          <div className="flex items-center gap-1 flex-shrink-0">
-                            {/* Confidence Badge */}
-                            {metadata.confidence && (
-                              <span
-                                className={`px-1.5 py-0.5 text-[10px] rounded-full font-medium ${
-                                  metadata.confidence.overall >= 85
-                                    ? 'bg-green-100 text-green-700'
-                                    : metadata.confidence.overall >= 60
-                                      ? 'bg-yellow-100 text-yellow-700'
-                                      : 'bg-red-100 text-red-700'
-                                }`}
-                                title={`Confidence: ${metadata.confidence.overall}%`}
-                              >
-                                {metadata.confidence.overall >= 85 ? '🟢' : metadata.confidence.overall >= 60 ? '🟡' : '🔴'}
-                                {metadata.confidence.overall}%
-                              </span>
-                            )}
-                            {/* Scan Status Badge */}
-                            {group.scan_status === 'new_scan' && (
-                              <span className="px-2 py-0.5 bg-cyan-100 text-cyan-700 text-[10px] rounded-full font-medium flex items-center gap-1" title="Freshly scanned from APIs">
-                                <Sparkles className="w-3 h-3" />
-                                New
-                              </span>
-                            )}
-                            {group.scan_status === 'loaded_from_file' && (
-                              <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-[10px] rounded-full font-medium flex items-center gap-1" title="Loaded from existing metadata.json">
-                                <FileJson className="w-3 h-3" />
-                                Saved
-                              </span>
-                            )}
-                            {group.total_changes > 0 && (
-                              <span
-                                className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded-full font-medium cursor-help hover:bg-yellow-200 transition-colors"
-                                onMouseEnter={(e) => handleChangesBadgeHover(group, e)}
-                                onMouseLeave={handleChangesBadgeLeave}
-                                title={`${group.total_changes} pending changes - hover for preview`}
-                              >
-                                {group.total_changes}
-                              </span>
-                            )}
-                            {group.files.some(f => fileStatuses[f.id] === 'success') && (
-                              <CheckCircle className="w-4 h-4 text-green-600" />
-                            )}
-                          </div>
-                        </div>
-                        
-                        <p className={`text-xs mb-2 ${
-                          isSelected ? 'text-blue-700' : 'text-gray-600'
-                        }`}>
-                          by {metadata.author}
-                        </p>
+                    {/* Title & Series */}
+                    <div className="flex-1 min-w-0">
+                      <h4 className={`font-medium text-[15px] leading-snug truncate ${
+                        isSelected ? 'text-white' : 'text-gray-100'
+                      }`}>
+                        {metadata.title}
+                      </h4>
+                      <p className="text-sm text-gray-500 truncate mt-0.5 font-mono">
+                        {getSeriesText()}
+                      </p>
+                    </div>
 
-                        {/* Series - show all_series or primary series */}
-                        {(metadata.all_series?.length > 0 || isValidSeries(metadata.series, metadata.author)) && (
-                          <div className="flex flex-wrap items-center gap-1 mb-1.5">
-                            {metadata.all_series?.length > 0 ? (
-                              // Show first series with count badge if multiple
-                              <>
-                                <span className="text-[11px] font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded truncate max-w-[140px] flex items-center gap-1">
-                                  {metadata.all_series[0].name}
-                                  {isValidSequence(metadata.all_series[0].sequence) && (
-                                    <span className="font-bold">#{metadata.all_series[0].sequence}</span>
-                                  )}
-                                </span>
-                                {metadata.all_series.length > 1 && (
-                                  <span className="text-[10px] px-1.5 py-0.5 bg-indigo-200 text-indigo-700 rounded-full font-medium">
-                                    +{metadata.all_series.length - 1}
-                                  </span>
-                                )}
-                              </>
-                            ) : (
-                              // Fallback to primary series
-                              <span className="text-[11px] font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded truncate max-w-[160px] flex items-center gap-1">
-                                {metadata.series}
-                                {isValidSequence(metadata.sequence) && (
-                                  <span className="font-bold">#{metadata.sequence}</span>
-                                )}
-                              </span>
-                            )}
-                          </div>
-                        )}
-
-                        {metadata.genres && metadata.genres.length > 0 && (
-                          <div className="flex flex-wrap gap-1 mb-1.5">
-                            {metadata.genres.slice(0, 2).map((genre, gIdx) => (
-                              <span 
-                                key={gIdx}
-                                className="text-[10px] px-1.5 py-0.5 bg-gray-900 text-white rounded-full"
-                              >
-                                {genre}
+                    {/* Status indicators & Duration */}
+                    <div className="flex items-center gap-3 flex-shrink-0">
+                      {/* Missing metadata indicators */}
+                      {(() => {
+                        const meta = group.metadata || {};
+                        const missing = [];
+                        if (!meta.tags?.some(t => t.startsWith('dna:'))) missing.push({ label: 'DNA', color: 'text-purple-400' });
+                        if (!meta.genres?.length) missing.push({ label: 'G', color: 'text-blue-400' });
+                        if (!meta.description) missing.push({ label: 'D', color: 'text-cyan-400' });
+                        if (!meta.narrator && !meta.narrators?.length) missing.push({ label: 'N', color: 'text-orange-400' });
+                        if (missing.length === 0) return null;
+                        return (
+                          <div className="flex items-center gap-1" title={`Missing: ${missing.map(m => m.label).join(', ')}`}>
+                            {missing.map(m => (
+                              <span key={m.label} className={`text-[10px] font-mono font-bold ${m.color} opacity-60`}>
+                                {m.label}
                               </span>
                             ))}
-                            {metadata.genres.length > 2 && (
-                              <span className="text-[10px] px-1.5 py-0.5 bg-gray-300 text-gray-700 rounded-full">
-                                +{metadata.genres.length - 2}
+                          </div>
+                        );
+                      })()}
+                      {/* Changed field indicators */}
+                      {group.changedFields?.length > 0 && (
+                        <div className="flex items-center gap-0.5" title={`Changed: ${group.changedFields.join(', ')}`}>
+                          {group.changedFields.slice(0, 5).map(f => {
+                            const fieldColors = {
+                              title: 'bg-blue-500', author: 'bg-blue-400', subtitle: 'bg-blue-300',
+                              series: 'bg-indigo-400', sequence: 'bg-indigo-300', narrator: 'bg-orange-400',
+                              genres: 'bg-emerald-500', tags: 'bg-amber-500', description: 'bg-cyan-400',
+                              themes: 'bg-purple-400', tropes: 'bg-purple-300', age: 'bg-pink-400',
+                              dna: 'bg-violet-500', year: 'bg-yellow-400', isbn: 'bg-lime-400', asin: 'bg-lime-300',
+                            };
+                            return (
+                              <span
+                                key={f}
+                                className={`text-[8px] font-bold uppercase px-1 py-px rounded ${fieldColors[f] || 'bg-gray-500'} text-black/80 leading-none`}
+                              >
+                                {f === 'description' ? 'desc' : f === 'sequence' ? 'seq' : f}
                               </span>
-                            )}
-                          </div>
-                        )}
-
-                        {metadata.description && (
-                          <p className="text-[11px] text-gray-600 line-clamp-1 leading-tight mb-1.5">
-                            {metadata.description}
-                          </p>
-                        )}
-                        
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-3 text-xs text-gray-500">
-                            <span>{group.files.length} files</span>
-                            <span className="capitalize">{group.group_type}</span>
-                          </div>
-                          
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onToggleGroup(group.id);
-                            }}
-                            className="p-1 hover:bg-gray-200 rounded transition-colors"
-                          >
-                            {expandedGroups.has(group.id) ? (
-                              <ChevronDown className="w-4 h-4 text-gray-500" />
-                            ) : (
-                              <ChevronRight className="w-4 h-4 text-gray-500" />
-                            )}
-                          </button>
+                            );
+                          })}
+                          {group.changedFields.length > 5 && (
+                            <span className="text-[8px] text-gray-500">+{group.changedFields.length - 5}</span>
+                          )}
                         </div>
-                      </div>
+                      )}
+                      {hasChanges && !group.changedFields?.length && (
+                        <span
+                          className="w-2 h-2 rounded-full bg-amber-500"
+                          title={`${group.total_changes} pending changes`}
+                          onMouseEnter={(e) => handleChangesBadgeHover(group, e)}
+                          onMouseLeave={handleChangesBadgeLeave}
+                        />
+                      )}
+                      {hasIssues && (
+                        <span
+                          className={`w-2 h-2 rounded-full ${validationResults[group.id]?.errorCount > 0 ? 'bg-red-500' : 'bg-yellow-500'}`}
+                          title={`${validationResults[group.id]?.errorCount || 0} errors, ${validationResults[group.id]?.warningCount || 0} warnings`}
+                        />
+                      )}
+                      {group.files.some(f => fileStatuses[f.id] === 'success') && (
+                        <CheckCircle className="w-4 h-4 text-green-500" />
+                      )}
+
+                      {/* Duration */}
+                      <span className="text-sm text-gray-500 tabular-nums w-10 text-right">
+                        {duration || '0h'}
+                      </span>
                     </div>
                   </div>
                   
-                  {/* Expanded Files - Shows chapter order for ABS */}
+                  {/* Expanded Files */}
                   {expandedGroups.has(group.id) && (
-                    <div className="bg-gray-50 border-t border-gray-200">
+                    <div className="bg-neutral-900/50 border-t border-neutral-800/50">
                       {group.files.map((file, fileIndex) => (
                         <div
                           key={file.id}
-                          className="px-4 py-3 hover:bg-gray-100 transition-colors border-b border-gray-200 last:border-b-0"
+                          className="flex items-center gap-3 px-4 py-2 pl-20 border-b border-neutral-800/30 last:border-b-0"
                         >
-                          <div className="flex items-center gap-3 pl-7">
-                            <input
-                              type="checkbox"
-                              checked={allSelected || selectedFiles.has(file.id)}
-                              onChange={(e) => {
-                                e.stopPropagation();
-                              }}
-                              className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                            />
-
-                            {/* Chapter number badge */}
-                            <span className="flex-shrink-0 w-7 h-5 bg-purple-100 text-purple-700 rounded text-xs font-bold flex items-center justify-center">
-                              {fileIndex + 1}
-                            </span>
-
-                            <div className="flex items-center gap-2">
-                              {getFileStatusIcon(file.id)}
-                              <FileAudio className="w-4 h-4 text-gray-400" />
-                            </div>
-
-                            <div className="flex-1 min-w-0">
-                              <div className="text-sm text-gray-900 truncate">
-                                {file.filename}
-                              </div>
-                              {Object.keys(file.changes).length > 0 && (
-                                <div className="text-xs text-amber-600 mt-0.5">
-                                  {Object.keys(file.changes).length} pending changes
-                                </div>
-                              )}
-                            </div>
-                          </div>
+                          <span className="text-xs text-gray-600 font-mono w-6 text-right">
+                            {fileIndex + 1}
+                          </span>
+                          <FileAudio className="w-3.5 h-3.5 text-gray-600" />
+                          <span className="text-sm text-gray-400 truncate flex-1">
+                            {file.filename}
+                          </span>
+                          {getFileStatusIcon(file.id)}
                         </div>
                       ))}
                     </div>
