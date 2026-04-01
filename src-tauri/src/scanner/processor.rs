@@ -2913,11 +2913,31 @@ pub fn preferred_base_url() -> String {
         .unwrap_or_else(|_| "https://api.openai.com".to_string())
 }
 
+/// Call GPT API, bypassing the response cache (for force-fresh operations)
+pub async fn call_gpt_api_fresh(
+    prompt: &str,
+    api_key: &str,
+    model: &str,
+    max_tokens: u32
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    call_gpt_api_inner(prompt, api_key, model, max_tokens, true).await
+}
+
 pub async fn call_gpt_api(
     prompt: &str,
     api_key: &str,
     model: &str,
     max_tokens: u32
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    call_gpt_api_inner(prompt, api_key, model, max_tokens, false).await
+}
+
+async fn call_gpt_api_inner(
+    prompt: &str,
+    api_key: &str,
+    model: &str,
+    max_tokens: u32,
+    skip_cache: bool,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // Check cache first (hash the prompt + model as key)
     use std::collections::hash_map::DefaultHasher;
@@ -2927,18 +2947,50 @@ pub async fn call_gpt_api(
     model.hash(&mut hasher);
     let cache_key = format!("gpt_{}_{}", model, hasher.finish());
 
-    if let Some(cached) = cache::get::<String>(&cache_key) {
-        return Ok(cached);
+    if !skip_cache {
+        if let Some(cached) = cache::get::<String>(&cache_key) {
+            return Ok(cached);
+        }
     }
 
     let client = crate::cache::shared_client();
 
     let base_url = preferred_base_url();
-    // GPT-5 models use Responses API; local/non-OpenAI endpoints always use Chat Completions
+    // Detect which API to use:
+    // - Ollama (localhost:11434): native /api/chat with think:false + format:json
+    // - OpenAI GPT-5: Responses API (/v1/responses)
+    // - Everything else: Chat Completions API (/v1/chat/completions)
     let is_openai = base_url.contains("openai.com");
+    let is_ollama = base_url.contains("11434") || base_url.contains("ollama");
     let use_responses_api = is_openai && model.starts_with("gpt-5");
 
-    let (endpoint, body) = if use_responses_api {
+    let (endpoint, body) = if is_ollama {
+        // Ollama native API — uses /api/chat with think:false to disable
+        // reasoning mode (qwen3 etc.), and format:"json" for structured output
+        (
+            format!("{}/api/chat", base_url),
+            serde_json::json!({
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You extract audiobook metadata. Return ONLY valid JSON, no markdown. Be concise."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "stream": false,
+                "think": false,
+                "format": "json",
+                "options": {
+                    "num_predict": max_tokens,
+                    "temperature": 0.3
+                }
+            })
+        )
+    } else if use_responses_api {
         // OpenAI GPT-5 models use the /v1/responses endpoint
         (
             format!("{}/v1/responses", base_url),
@@ -2966,7 +3018,7 @@ pub async fn call_gpt_api(
             })
         )
     } else {
-        // Chat Completions API for GPT-4 models (legacy)
+        // Chat Completions API for GPT-4 models (legacy) and other OpenAI-compat endpoints
         let is_gpt5_model = model.starts_with("gpt-5");
         let mut body = serde_json::json!({
             "model": model,
@@ -3012,7 +3064,23 @@ pub async fn call_gpt_api(
     let response_text = response.text().await?;
 
     // Parse response based on API type
-    let content = if use_responses_api {
+    let content = if is_ollama {
+        // Ollama native API format: { "message": { "content": "..." }, ... }
+        #[derive(serde::Deserialize, Debug)]
+        struct OllamaResponse { message: OllamaMessage }
+
+        #[derive(serde::Deserialize, Debug)]
+        struct OllamaMessage { content: Option<String> }
+
+        let result: OllamaResponse = serde_json::from_str(&response_text)
+            .map_err(|e| format!("Failed to parse Ollama response: {}. Raw: {}", e, &response_text[..response_text.len().min(500)]))?;
+
+        let content = result.message.content.unwrap_or_default();
+        if content.is_empty() {
+            return Err(format!("Empty content from Ollama. Raw: {}", &response_text[..response_text.len().min(500)]).into());
+        }
+        content.trim().to_string()
+    } else if use_responses_api {
         // Responses API format - try multiple approaches
         #[derive(serde::Deserialize, Debug)]
         struct ResponsesApiResponse {

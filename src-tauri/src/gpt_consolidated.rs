@@ -11,6 +11,17 @@ use crate::scanner::processor::call_gpt_api;
 use crate::book_dna::BookDNA;
 use crate::age_rating_resolver::AgeRatingOutput;
 
+/// Log to a file since Tauri dev swallows stdout/stderr
+fn log_local(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true).append(true)
+        .open("/tmp/audiobook-tagger-ai.log")
+    {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
 // =============================================================================
 // Call A: Metadata Resolution (title + subtitle + author + series + sequence)
 // Replaces: #5 clean_title, #8 title_resolver, #9 series_resolver,
@@ -179,7 +190,28 @@ pub async fn resolve_metadata(
         }
     }
 
-    let prompt = format!(
+    let base_url = crate::scanner::processor::preferred_base_url();
+    let is_local = base_url.contains("11434") || base_url.contains("ollama");
+
+    let prompt = if is_local {
+        format!(
+r#"Extract the correct metadata for this audiobook from the data below. Trust folder paths and Audible data over tags.
+
+{context}
+
+Rules:
+- Clean the title: remove "01 -", "(Unabridged)", "(Audiobook)", quality markers
+- Prefer: Folder author > Audible author > current author
+- If Audible or folder has series info, use it. Otherwise null.
+- Extract narrator from filename if present ("read by X"), otherwise null
+- Confidence: 90+ if sources agree, 70-89 if folder is clear, 50-69 if guessing
+
+Return ONLY valid JSON:
+{{"title":"Book Title","author":"Author Name","subtitle":null,"series":null,"sequence":null,"narrator":null,"confidence":90,"notes":"brief explanation"}}"#,
+            context = context
+        )
+    } else {
+        format!(
 r#"Resolve ALL metadata for this audiobook in ONE pass. Determine the correct title, subtitle, author, series, and sequence.
 
 {context}
@@ -226,16 +258,20 @@ r#"Resolve ALL metadata for this audiobook in ONE pass. Determine the correct ti
 
 Return ONLY valid JSON:
 {{"title":"Book Title","author":"Author Name","subtitle":null,"series":null,"sequence":null,"narrator":null,"confidence":90,"notes":"brief explanation"}}"#,
-        context = context
-    );
+            context = context
+        )
+    };
+
+    log_local(&format!("📋 Metadata resolution for '{}': is_local={}", input.current_title, is_local));
 
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(25),
+        std::time::Duration::from_secs(if is_local { 60 } else { 25 }),
         call_gpt_api(&prompt, api_key, &crate::scanner::processor::preferred_model(), 1500)
     ).await;
 
     match result {
         Ok(Ok(response)) => {
+            log_local(&format!("   📋 Raw metadata response for '{}': {}", input.current_title, &response[..response.len().min(400)]));
             match serde_json::from_str::<GptMetadataResponse>(extract_json(&response)) {
                 Ok(parsed) => {
                     let mut output = ResolveMetadataOutput {
@@ -252,13 +288,25 @@ Return ONLY valid JSON:
                     // Post-GPT validation: ensure series consistency
                     validate_series_consistency(&mut output, input);
 
+                    log_local(&format!("   ✅ Metadata for '{}': title='{}', author='{}', series={:?} #{:?}, confidence={}",
+                        input.current_title, output.title, output.author, output.series, output.sequence, output.confidence));
+
                     Ok(output)
                 },
-                Err(e) => Err(format!("Failed to parse metadata response: {}. Raw: {}", e, &response[..response.len().min(300)])),
+                Err(e) => {
+                    log_local(&format!("   ❌ Metadata parse failed for '{}': {}", input.current_title, e));
+                    Err(format!("Failed to parse metadata response: {}. Raw: {}", e, &response[..response.len().min(300)]))
+                },
             }
         }
-        Ok(Err(e)) => Err(format!("Metadata resolution GPT error: {}", e)),
-        Err(_) => Err("Metadata resolution timed out".to_string()),
+        Ok(Err(e)) => {
+            log_local(&format!("   ❌ Metadata GPT error for '{}': {}", input.current_title, e));
+            Err(format!("Metadata resolution GPT error: {}", e))
+        },
+        Err(_) => {
+            log_local(&format!("   ❌ Metadata timed out for '{}'", input.current_title));
+            Err("Metadata resolution timed out".to_string())
+        },
     }
 }
 
@@ -534,6 +582,18 @@ pub struct ClassifyInput {
     pub series_sequence: Option<String>,
     pub year: Option<String>,
     pub publisher: Option<String>,
+
+    // External data (gathered from providers — Audible, Goodreads, Hardcover, etc.)
+    #[serde(default)]
+    pub external_description: Option<String>,
+    #[serde(default)]
+    pub external_genres: Vec<String>,
+    #[serde(default)]
+    pub external_narrator: Option<String>,
+    #[serde(default)]
+    pub external_series: Option<String>,
+    #[serde(default)]
+    pub external_year: Option<String>,
 }
 
 /// Output from consolidated classification
@@ -581,6 +641,58 @@ struct GptClassifyResponse {
     #[serde(default)]
     tropes: Vec<String>,
 }
+
+/// Simplified system prompt for local AI models (4B-8B parameter models).
+/// Shorter, fewer options, clearer structure — optimized for small models.
+const CLASSIFY_LOCAL_PROMPT: &str = r#"
+Classify this audiobook. Use the description and provider data carefully — trust external data over guessing.
+
+GENRES (pick 1-3 from this list ONLY):
+Literary Fiction, Contemporary Fiction, Historical Fiction, Classics, Mystery, Thriller, Crime, Horror, Romance, Fantasy, Science Fiction, Western, Adventure, Humor, Satire, Biography, Memoir, History, True Crime, Science, Psychology, Self-Help, Business, Philosophy, Religion & Spirituality, Children's 6-8, Children's 9-12, Middle Grade, Young Adult, Adult
+
+TAGS (pick 5-10, lowercase-hyphenated):
+Sub-genre: cozy-mystery, police-procedural, legal-thriller, domestic-thriller, noir, heist, rom-com, historical-romance, dark-romance, epic-fantasy, urban-fantasy, dark-fantasy, grimdark, space-opera, dystopian, post-apocalyptic, gothic, supernatural, psychological-horror, folk-horror, cosmic-horror
+Mood: atmospheric, dark, funny, mysterious, suspenseful, heartwarming, inspiring, thought-provoking
+Pacing: fast-paced, slow-burn, page-turner
+Style: character-driven, plot-driven, unreliable-narrator, multiple-pov
+Tropes: found-family, chosen-one, reluctant-hero, antihero, redemption-arc, quest, survival, coming-of-age
+Length: under-5-hours, 5-10-hours, 10-15-hours, 15-20-hours, over-20-hours
+Series: standalone, in-series
+
+AGE RATING:
+- age_category: "Children's 6-8", "Children's 9-12", "Middle Grade", "Teen 13-17", "Young Adult", "Adult"
+- content_rating: "G", "PG", "PG-13", "R"
+- intended_for_kids: true only for children's books (Magic Tree House, Dog Man)
+- age_tags: include age-adult/age-childrens, rated-g/pg/pg13/r, age-rec-NUMBER, for-kids/not-for-kids
+
+DNA (simplified — only fill in what you can determine from the description):
+- length: "short"(<5h) | "medium"(5-12h) | "long"(12-20h) | "epic"(20h+)
+- pacing: "slow" | "moderate" | "fast"
+- structure: "linear" | "non-linear" | "multiple-pov"
+- series_position: "standalone" | "series-start" | "mid-series" | "series-end"
+- setting: "urban" | "rural" | "fantasy-world" | "historical" | "space" | "post-apocalyptic"
+- ending_type: "happy" | "bittersweet" | "tragic" | "ambiguous" | "open"
+- humor_type: "none" | "light" | "dark" | "satirical"
+- stakes_level: "personal" | "local" | "global" | "cosmic"
+- violence_level: 0-5
+- intimacy_level: 0-5
+- shelves: 1-3 from [dark-fantasy, epic-fantasy, urban-fantasy, grimdark-fantasy, cozy-fantasy, hard-sci-fi, space-opera, dystopian, cozy-mystery, psychological-thriller, domestic-suspense, gothic-horror, cosmic-horror, supernatural-horror, contemporary-romance, historical-romance, literary-fiction, historical-fiction, family-saga, coming-of-age, satire, memoir, true-crime, self-help]
+- comp_authors: 1-2 similar authors (lowercase-hyphenated)
+- comp_vibes: 2-3 short evocative descriptions (lowercase-hyphenated)
+- tropes: 2-3 story patterns
+- themes: 2-3 abstract themes (loyalty, identity, survival, redemption, etc.)
+- spectrums: ALL 7 required: dark-light, serious-funny, plot-character, simple-complex, action-contemplative, intimate-epic-scope, world-density (values -5 to +5)
+- moods: 2-3 with intensity 1-10 (from: tension, horror, mystery, humor, romance, adventure, dread, warmth, propulsive, melancholy, wonder)
+- narrator_performance: 1-2 from [theatrical, character-voices, understated, conversational]
+- production: "single-voice" | "full-cast" | "dramatized"
+- audio_friendliness: 1-5
+- re_listen_value: 1-5
+
+IMPORTANT: Base your answers on the description and provider data. If the provider says Horror, trust that. Don't guess plot details not in the description.
+
+Return ONLY this JSON:
+{"genres":["Genre"],"tags":["tag-1"],"age_category":"Adult","min_age":16,"content_rating":"R","age_tags":["age-adult","rated-r","age-rec-16","not-for-kids"],"intended_for_kids":false,"dna":{"length":"long","pacing":"moderate","structure":"linear","series_position":"standalone","setting":"historical","ending_type":"ambiguous","humor_type":"none","stakes_level":"cosmic","violence_level":4,"intimacy_level":1,"shelves":["dark-fantasy","historical-fiction"],"comp_authors":["joe-abercrombie"],"comp_vibes":["medieval-horror","dark-pilgrimage"],"tropes":["quest","found-family"],"themes":["survival","good-vs-evil"],"spectrums":[{"dimension":"dark-light","value":-4},{"dimension":"serious-funny","value":-3},{"dimension":"plot-character","value":1},{"dimension":"simple-complex","value":2},{"dimension":"action-contemplative","value":0},{"dimension":"intimate-epic-scope","value":3},{"dimension":"world-density","value":3}],"moods":[{"mood":"dread","intensity":8},{"mood":"tension","intensity":9}],"narrator_performance":["theatrical","character-voices"],"production":"single-voice","audio_friendliness":3,"re_listen_value":3},"themes":["Survival","Good vs Evil"],"tropes":["Quest","Found Family"]}
+"#;
 
 /// System prompt for consolidated classification
 const CLASSIFY_SYSTEM_PROMPT: &str = r#"
@@ -777,7 +889,7 @@ pub async fn classify_book(
     let mut h = DefaultHasher::new();
     input.title.to_lowercase().trim().hash(&mut h);
     input.author.to_lowercase().trim().hash(&mut h);
-    "classify_v1".hash(&mut h);
+    "classify_v2_with_external".hash(&mut h);
     let cache_key = format!("classify_{}", h.finish());
 
     if !force_fresh {
@@ -789,54 +901,103 @@ pub async fn classify_book(
         println!("   🔄 Force fresh classification for '{}'", input.title);
     }
 
-    // Build user prompt — embed system prompt since call_gpt_api uses a generic system prompt
-    let mut prompt = format!(
-        "{}\n\n═══ BOOK TO CLASSIFY ═══\n\n\
-         Title: {}\n\
-         Author: {}\n",
-        CLASSIFY_SYSTEM_PROMPT, input.title, input.author
-    );
+    // Detect if using local AI (Ollama) to use simplified prompt
+    let base_url = crate::scanner::processor::preferred_base_url();
+    let is_local = base_url.contains("11434") || base_url.contains("ollama");
+
+    // Build the book data section (shared between both prompt variants)
+    let mut book_data = format!("Title: {}\nAuthor: {}\n", input.title, input.author);
 
     if let Some(ref desc) = input.description {
-        let truncated: String = desc.chars().take(800).collect();
-        prompt.push_str(&format!("Description: {}\n", truncated));
+        let truncated: String = desc.chars().take(if is_local { 500 } else { 800 }).collect();
+        book_data.push_str(&format!("Description: {}\n", truncated));
     }
 
     if !input.genres.is_empty() {
-        prompt.push_str(&format!("Current Genres: {}\n", input.genres.join(", ")));
+        book_data.push_str(&format!("Current Genres: {}\n", input.genres.join(", ")));
     }
 
     if let Some(ref narrator) = input.narrator {
-        prompt.push_str(&format!("Narrator: {}\n", narrator));
+        book_data.push_str(&format!("Narrator: {}\n", narrator));
     }
 
     if let Some(minutes) = input.duration_minutes {
         let hours = minutes / 60;
         let mins = minutes % 60;
-        prompt.push_str(&format!("Duration: {}h {}m\n", hours, mins));
+        book_data.push_str(&format!("Duration: {}h {}m\n", hours, mins));
     }
 
     if let Some(ref series) = input.series_name {
-        prompt.push_str(&format!("Series: {}", series));
+        book_data.push_str(&format!("Series: {}", series));
         if let Some(ref seq) = input.series_sequence {
-            prompt.push_str(&format!(" #{}", seq));
+            book_data.push_str(&format!(" #{}", seq));
         }
-        prompt.push('\n');
+        book_data.push('\n');
     }
 
     if let Some(ref year) = input.year {
-        prompt.push_str(&format!("Published: {}\n", year));
+        book_data.push_str(&format!("Published: {}\n", year));
     }
 
     if let Some(ref publisher) = input.publisher {
-        prompt.push_str(&format!("Publisher: {}\n", publisher));
+        book_data.push_str(&format!("Publisher: {}\n", publisher));
     }
 
-    prompt.push_str("\nReturn the classification JSON.");
+    // Add external data from providers
+    let has_external = input.external_description.is_some()
+        || !input.external_genres.is_empty()
+        || input.external_narrator.is_some()
+        || input.external_series.is_some()
+        || input.external_year.is_some();
 
-    // Use gpt-4o-mini for classification (same as individual calls used)
-    let response = call_gpt_api(&prompt, api_key, &crate::scanner::processor::preferred_model(), 3000).await
-        .map_err(|e| format!("Classification GPT error: {}", e))?;
+    if has_external {
+        log_local(&format!("   📡 Enriching classification prompt with external data for '{}'", input.title));
+        book_data.push_str("\n--- External Data (from Audible/Goodreads/Hardcover/Storytel) ---\n");
+
+        if let Some(ref desc) = input.external_description {
+            let truncated: String = desc.chars().take(if is_local { 500 } else { 800 }).collect();
+            book_data.push_str(&format!("Provider Description: {}\n", truncated));
+        }
+
+        if !input.external_genres.is_empty() {
+            book_data.push_str(&format!("Provider Genres: {}\n", input.external_genres.join(", ")));
+        }
+
+        if let Some(ref narrator) = input.external_narrator {
+            book_data.push_str(&format!("Provider Narrator: {}\n", narrator));
+        }
+
+        if let Some(ref series) = input.external_series {
+            book_data.push_str(&format!("Provider Series: {}\n", series));
+        }
+
+        if let Some(ref year) = input.external_year {
+            book_data.push_str(&format!("Provider Published: {}\n", year));
+        }
+    }
+
+    // Build the full prompt — simplified for local models, full for cloud
+    let prompt = if is_local {
+        log_local(&format!("   🏠 Using simplified local AI prompt for '{}'", input.title));
+        format!(
+            "{}\n\n═══ BOOK TO CLASSIFY ═══\n\n{}\nReturn the classification JSON.",
+            CLASSIFY_LOCAL_PROMPT, book_data
+        )
+    } else {
+        format!(
+            "{}\n\n═══ BOOK TO CLASSIFY ═══\n\n{}\nReturn the classification JSON.",
+            CLASSIFY_SYSTEM_PROMPT, book_data
+        )
+    };
+
+    // Use configured model for classification; bypass GPT cache when force_fresh
+    let model = &crate::scanner::processor::preferred_model();
+    let max_tokens = if is_local { 2000 } else { 3000 };
+    let response = if force_fresh {
+        crate::scanner::processor::call_gpt_api_fresh(&prompt, api_key, model, max_tokens).await
+    } else {
+        call_gpt_api(&prompt, api_key, model, max_tokens).await
+    }.map_err(|e| format!("Classification GPT error: {}", e))?;
 
     let parsed = parse_classify_response(&response, &input)?;
 
@@ -944,23 +1105,55 @@ pub async fn process_description(
 ) -> Result<DescriptionOutput, String> {
     let genres_str = if genres.is_empty() { "Unknown".to_string() } else { genres.join(", ") };
 
+    let base_url = crate::scanner::processor::preferred_base_url();
+    let is_local = base_url.contains("11434") || base_url.contains("ollama");
+
+    let has_existing = existing_description.map(|d| d.trim().len() >= 50).unwrap_or(false);
+    log_local(&format!("📝 Description for '{}': is_local={}, has_existing={}, existing_len={}",
+        title, is_local, has_existing,
+        existing_description.map(|d| d.len()).unwrap_or(0)));
+
     let prompt = if let Some(desc) = existing_description {
         if desc.trim().len() < 50 {
-            // Too short — generate from scratch
-            build_generate_prompt(title, author, &genres_str)
+            if is_local {
+                log_local("   📝 Using local generate prompt (short existing)");
+                build_local_generate_prompt(title, author, &genres_str, Some(desc))
+            } else {
+                build_generate_prompt(title, author, &genres_str)
+            }
         } else {
-            // Validate and fix in one call
-            build_validate_and_fix_prompt(title, author, &genres_str, desc)
+            if is_local {
+                log_local("   📝 Using local validate/clean prompt");
+                build_local_validate_prompt(title, author, &genres_str, desc)
+            } else {
+                build_validate_and_fix_prompt(title, author, &genres_str, desc)
+            }
         }
     } else {
-        // No description — generate from scratch
-        build_generate_prompt(title, author, &genres_str)
+        if is_local {
+            log_local("   📝 Using local generate prompt (no existing)");
+            build_local_generate_prompt(title, author, &genres_str, None)
+        } else {
+            build_generate_prompt(title, author, &genres_str)
+        }
     };
 
+    log_local("   📝 Calling AI for description...");
     let response = call_gpt_api(&prompt, api_key, &crate::scanner::processor::preferred_model(), 800).await
-        .map_err(|e| format!("Description GPT error: {}", e))?;
+        .map_err(|e| {
+            log_local(&format!("   ❌ Description GPT error for '{}': {}", title, e));
+            format!("Description GPT error: {}", e)
+        })?;
 
-    parse_description_response(&response, existing_description.is_none())
+    log_local(&format!("   📝 Raw AI response for '{}': {}", title, &response[..response.len().min(300)]));
+
+    let result = parse_description_response(&response, existing_description.is_none());
+    match &result {
+        Ok(out) => log_local(&format!("   ✅ Description for '{}': valid={}, generated={}, len={}",
+            title, out.was_valid, out.was_generated, out.description.len())),
+        Err(e) => log_local(&format!("   ❌ Description parse failed for '{}': {}", title, e)),
+    }
+    result
 }
 
 fn build_validate_and_fix_prompt(title: &str, author: &str, genres: &str, description: &str) -> String {
@@ -1013,6 +1206,54 @@ RULES:
 Return ONLY JSON:
 {{"was_valid": false, "invalid_reason": "no existing description", "description": "your generated description", "was_generated": true}}"#,
         title = title, author = author, genres = genres
+    )
+}
+
+/// Local AI: validate/clean an existing description. Don't ask for book knowledge.
+fn build_local_validate_prompt(title: &str, author: &str, genres: &str, description: &str) -> String {
+    format!(
+r#"Clean up this audiobook description. Remove HTML tags, promotional text, "Narrated by" lines, and review quotes. Keep only the plot summary.
+
+Title: "{title}"
+Author: {author}
+Genres: {genres}
+
+Description to clean:
+{description}
+
+Rules:
+- Keep it 150-300 characters
+- Third person, present tense
+- Only include information from the description above
+- Do NOT add plot details not in the original
+
+Return ONLY JSON:
+{{"was_valid": true, "description": "the cleaned description", "was_generated": false}}"#,
+        title = title, author = author, genres = genres, description = description
+    )
+}
+
+/// Local AI: generate a description from limited info. Don't pretend to know the book.
+fn build_local_generate_prompt(title: &str, author: &str, genres: &str, short_desc: Option<&str>) -> String {
+    let desc_context = if let Some(d) = short_desc {
+        format!("\nPartial description: {}", d)
+    } else {
+        String::new()
+    };
+
+    format!(
+r#"Write a brief audiobook description for "{title}" by {author}.
+Genre: {genres}{desc_context}
+
+Rules:
+- Write 2-3 sentences about what the book is likely about based on the title and genre
+- Third person, present tense
+- Be vague rather than wrong — describe the type of story, not specific plot points you don't know
+- Target 150-250 characters
+
+Return ONLY JSON:
+{{"was_valid": false, "description": "your description", "was_generated": true}}"#,
+        title = title, author = author, genres = genres, desc_context = desc_context
     )
 }
 

@@ -110,16 +110,45 @@ pub async fn classify_books_batch(
     let total = books.len();
     println!("🤖 Consolidated classification for {} books", total);
 
+    // Phase 1: Gather external data from providers (Audible, Goodreads, Hardcover, Storytel, etc.)
+    println!("📡 Phase 1: Gathering external data for {} books...", total);
+    let gather_counter = Arc::new(AtomicUsize::new(0));
+
+    let books_with_data: Vec<(ClassifyRequest, ExternalBookData)> = stream::iter(books)
+        .map(|book| {
+            let config = config.clone();
+            let window = window.clone();
+            let counter = gather_counter.clone();
+            async move {
+                let external = gather_for_classify(&book.title, &book.author, &config).await;
+                let current = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                let _ = window.emit("batch-progress", BatchProgressEvent {
+                    call_type: "gather".to_string(),
+                    current,
+                    total,
+                    title: book.title.clone(),
+                    success: true,
+                    error: None,
+                });
+                (book, external)
+            }
+        })
+        .buffer_unordered(25)
+        .collect()
+        .await;
+
+    // Phase 2: Classify with AI using enriched data
+    println!("🤖 Phase 2: AI classification for {} books...", total);
     let api_key = api_key.clone();
     let counter = Arc::new(AtomicUsize::new(0));
 
-    let results: Vec<ClassifyBookResult> = stream::iter(books)
-        .map(|book| {
+    let results: Vec<ClassifyBookResult> = stream::iter(books_with_data)
+        .map(|(book, external)| {
             let api_key = api_key.clone();
             let window = window.clone();
             let counter = counter.clone();
             async move {
-                let result = classify_single_book(book, include_description, force_fresh, &api_key).await;
+                let result = classify_single_book(book, external, include_description, force_fresh, &api_key).await;
                 let current = counter.fetch_add(1, Ordering::Relaxed) + 1;
                 let _ = window.emit("batch-progress", BatchProgressEvent {
                     call_type: "classify".to_string(),
@@ -148,8 +177,73 @@ pub async fn classify_books_batch(
     })
 }
 
+/// External data gathered from providers for classification enrichment
+#[derive(Debug, Clone, Default)]
+struct ExternalBookData {
+    description: Option<String>,
+    genres: Vec<String>,
+    narrator: Option<String>,
+    series: Option<String>,
+    year: Option<String>,
+}
+
+/// Gather external data from ABS + custom providers for a single book
+async fn gather_for_classify(
+    title: &str,
+    author: &str,
+    config: &crate::config::Config,
+) -> ExternalBookData {
+    let mut data = ExternalBookData::default();
+
+    // Run ABS search + custom providers in parallel
+    let (abs_result, provider_results) = tokio::join!(
+        crate::abs_search::search_metadata_waterfall(config, title, author),
+        crate::custom_providers::search_custom_providers(config, title, author),
+    );
+
+    // Process ABS results (Audible/Google/iTunes)
+    if let Some(abs) = abs_result {
+        data.description = abs.description;
+        data.narrator = abs.narrator;
+        data.year = abs.published_year;
+        if let Some(first_series) = abs.series.first() {
+            data.series = first_series.series.clone();
+        }
+    }
+
+    // Process custom provider results (Goodreads, Hardcover, Storytel)
+    for result in &provider_results {
+        if data.description.is_none() {
+            data.description = result.description.clone();
+        }
+        if data.narrator.is_none() {
+            data.narrator = result.narrator.clone();
+        }
+        if data.genres.is_empty() {
+            data.genres = result.genres.clone();
+        }
+        if data.year.is_none() {
+            data.year = result.published_year.clone();
+        }
+    }
+
+    let sources = [
+        if data.description.is_some() { "desc" } else { "" },
+        if !data.genres.is_empty() { "genres" } else { "" },
+        if data.narrator.is_some() { "narrator" } else { "" },
+        if data.series.is_some() { "series" } else { "" },
+    ].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("+");
+
+    if !sources.is_empty() {
+        println!("   📡 {} : external data: {}", title, sources);
+    }
+
+    data
+}
+
 async fn classify_single_book(
     book: ClassifyRequest,
+    external: ExternalBookData,
     include_description: bool,
     force_fresh: bool,
     api_key: &str,
@@ -165,6 +259,11 @@ async fn classify_single_book(
         series_sequence: book.series_sequence.clone(),
         year: book.year.clone(),
         publisher: book.publisher.clone(),
+        external_description: external.description,
+        external_genres: external.genres,
+        external_narrator: external.narrator,
+        external_series: external.series,
+        external_year: external.year,
     };
 
     // Call B: Classification
