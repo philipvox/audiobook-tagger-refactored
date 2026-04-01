@@ -6,6 +6,9 @@ on:
       - 'v*'  # Only build on version tags (v1.0.0, v1.1.0, etc.)
   workflow_dispatch:  # Manual trigger from GitHub UI
 
+permissions:
+  contents: write  # Required for creating releases
+
 jobs:
   build:
     strategy:
@@ -21,9 +24,6 @@ jobs:
           - platform: macos-latest
             target: aarch64-apple-darwin
             name: macOS-ARM
-          - platform: macos-13
-            target: x86_64-apple-darwin
-            name: macOS-Intel
 
     runs-on: ${{ matrix.platform }}
     name: Build (${{ matrix.name }})
@@ -40,7 +40,7 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -58,7 +58,12 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Audiobook Tagger ${{ github.ref_name }}'
-          releaseBody: 'See the changelog for details.'
+          releaseBody: |
+            ## What's New
+            - One-click Local AI (bundled Ollama) — no API key needed
+            - Simplified prompts for local models
+            - Classification now gathers external data from Goodreads/Audible/Hardcover before AI processing
+            - Ollama native API integration with thinking mode disabled
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
