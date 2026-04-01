@@ -30,6 +30,7 @@ pub mod book_dna;
 pub mod classify;
 pub mod gather;
 pub mod authors;
+pub mod ollama;
 
 // Re-export all commands for easy access
 // pub use config::*;

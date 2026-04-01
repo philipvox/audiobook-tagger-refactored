@@ -23,7 +23,7 @@ dirs = "5"
 walkdir = "2"
 lofty = "0.19"
 regex = "1"
-reqwest = { version = "0.12.24", features = ["json", "multipart"] }
+reqwest = { version = "0.12.24", features = ["json", "multipart", "stream"] }
 lazy_static = "1.5.0"
 urlencoding = "2.1.3"
 once_cell = "1.21.3"
@@ -41,6 +41,7 @@ trash = "5"
 natord = "1.0"  # Natural ordering for filenames
 fs2 = "0.4"     # Disk space checking
 rayon = "1.10"  # Parallel iteration for faster metadata loading
+libc = "0.2"  # Unix signal handling for Ollama process management
 
 # Immersion Sync / Alignment
 zip = "0.6"           # EPUB is a ZIP archive

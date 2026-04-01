@@ -67,6 +67,12 @@ pub struct Config {
     #[serde(default)]
     pub enable_age_rating_lookup: bool,
 
+    // Local AI (bundled Ollama)
+    #[serde(default)]
+    pub use_local_ai: bool,
+    #[serde(default)]
+    pub ollama_model: Option<String>,  // e.g. "qwen3:4b"
+
     // Custom metadata providers (abs-agg, etc.)
     #[serde(default = "default_custom_providers")]
     pub custom_providers: Vec<CustomProvider>,
@@ -165,6 +171,8 @@ impl Default for Config {
             ai_model: default_ai_model(),
             ai_base_url: default_ai_base_url(),
             enable_age_rating_lookup: false,  // Disabled by default (uses extra API calls)
+            use_local_ai: false,
+            ollama_model: None,
             custom_providers: default_custom_providers(),
         }
     }

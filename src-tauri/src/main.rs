@@ -26,6 +26,7 @@ mod series_resolver;
 mod age_rating_resolver;
 mod book_dna;
 mod gpt_consolidated;
+mod ollama_manager;
 
 // Immersion Sync / Alignment
 mod epub;
@@ -58,6 +59,21 @@ fn main() {
         .setup(|_app| {
             // #[cfg(debug_assertions)]
             // _app.get_webview_window("main").unwrap().open_devtools();
+
+            // Auto-start bundled Ollama if local AI is enabled
+            if let Ok(config) = crate::config::load_config() {
+                if config.use_local_ai {
+                    std::thread::spawn(|| {
+                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        rt.block_on(async {
+                            if let Err(e) = ollama_manager::start().await {
+                                eprintln!("Failed to auto-start Ollama: {}", e);
+                            }
+                        });
+                    });
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -301,6 +317,22 @@ fn main() {
             commands::authors::get_abs_author_image,
             commands::authors::fix_author_descriptions_gpt,
             commands::authors::push_author_changes_to_abs,
+
+            // =====================================================
+            // LOCAL AI: Bundled Ollama Management
+            // =====================================================
+            commands::ollama::ollama_get_status,
+            commands::ollama::ollama_get_model_presets,
+            commands::ollama::ollama_install,
+            commands::ollama::ollama_cancel_install,
+            commands::ollama::ollama_uninstall,
+            commands::ollama::ollama_start,
+            commands::ollama::ollama_stop,
+            commands::ollama::ollama_pull_model,
+            commands::ollama::ollama_delete_model,
+            commands::ollama::ollama_get_disk_usage,
+            commands::ollama::ollama_enable,
+            commands::ollama::ollama_disable,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
