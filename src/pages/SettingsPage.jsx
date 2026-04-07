@@ -156,6 +156,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   const [selectedPreset, setSelectedPreset] = useState('gemma4');
   const [installing, setInstalling] = useState(false);
   const [pulling, setPulling] = useState(false);
+  const [pullProgress, setPullProgress] = useState(null); // { completed, total, status }
   const [diskUsage, setDiskUsage] = useState(0);
 
   // Auto-fetch libraries when URL + token are both set
@@ -210,6 +211,20 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
     loadOllamaState();
     const interval = setInterval(loadOllamaState, 5000);
     return () => clearInterval(interval);
+  }, []);
+
+  // Listen for Ollama pull progress events
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten;
+    (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen('ollama-pull-progress', (event) => {
+        const { completed, total, status } = event.payload;
+        setPullProgress({ completed, total, status });
+      });
+    })();
+    return () => { if (unlisten) unlisten(); };
   }, []);
 
   const loadProviders = async () => {
@@ -318,7 +333,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
         setPulling(true);
         toast.info(`Downloading model ${selectedPreset}...`);
         await callBackend('ollama_pull_model', { modelName: selectedPreset });
-        setPulling(false);
+        setPulling(false); setPullProgress(null);
       }
       const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset };
       setLocalConfig(newConfig);
@@ -330,7 +345,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       toast.error(`Install failed: ${err.message || err}`);
     } finally {
       setInstalling(false);
-      setPulling(false);
+      setPulling(false); setPullProgress(null);
     }
   };
 
@@ -367,10 +382,10 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
         toast.success(`Model ${modelId} ready`);
       } catch (err) {
         toast.error(`Model pull failed: ${err.message || err}`);
-        setPulling(false);
+        setPulling(false); setPullProgress(null);
         return;
       }
-      setPulling(false);
+      setPulling(false); setPullProgress(null);
     }
     const newConfig = { ...localConfig, ollama_model: modelId };
     setLocalConfig(newConfig);
@@ -564,13 +579,34 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                   </div>
                 )}
 
-                {/* Installing */}
-                {installing && (
-                  <div className="text-center py-4">
-                    <div className="animate-spin w-6 h-6 border-2 border-blue-400 border-t-transparent rounded-full mx-auto mb-2" />
-                    <p className="text-sm text-gray-400">
-                      {pulling ? 'Downloading model...' : 'Installing Ollama...'}
-                    </p>
+                {/* Installing / Downloading */}
+                {(installing || pulling) && (
+                  <div className="py-4 space-y-3">
+                    {pulling && pullProgress?.total > 0 ? (
+                      <>
+                        <div className="w-full bg-neutral-800 rounded-full h-2.5 overflow-hidden">
+                          <div
+                            className="bg-blue-500 h-full rounded-full transition-all duration-300"
+                            style={{ width: `${Math.round((pullProgress.completed / pullProgress.total) * 100)}%` }}
+                          />
+                        </div>
+                        <div className="flex justify-between text-xs text-gray-500">
+                          <span>{pullProgress.status || 'Downloading...'}</span>
+                          <span>
+                            {(pullProgress.completed / 1e9).toFixed(1)} / {(pullProgress.total / 1e9).toFixed(1)} GB
+                            {' · '}
+                            {Math.round((pullProgress.completed / pullProgress.total) * 100)}%
+                          </span>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-center">
+                        <div className="animate-spin w-6 h-6 border-2 border-blue-400 border-t-transparent rounded-full mx-auto mb-2" />
+                        <p className="text-sm text-gray-400">
+                          {pulling ? 'Downloading model...' : 'Installing Ollama...'}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
 

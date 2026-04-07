@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use tauri::Emitter;
 
 const OLLAMA_PORT: u16 = 11434;
 const OLLAMA_BASE: &str = "http://127.0.0.1:11434";
@@ -283,15 +284,15 @@ pub async fn ollama_uninstall() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn ollama_pull_model(model_name: String) -> Result<String, String> {
+pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String) -> Result<String, String> {
     if !is_running().await {
         return Err("Ollama is not running. Start it first.".to_string());
     }
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{}/api/pull", OLLAMA_BASE))
-        .json(&serde_json::json!({ "name": model_name, "stream": false }))
-        .timeout(std::time::Duration::from_secs(600))
+        .json(&serde_json::json!({ "name": model_name, "stream": true }))
+        .timeout(std::time::Duration::from_secs(1200))
         .send().await
         .map_err(|e| format!("Pull failed: {}", e))?;
 
@@ -299,6 +300,39 @@ pub async fn ollama_pull_model(model_name: String) -> Result<String, String> {
         let text = resp.text().await.unwrap_or_default();
         return Err(format!("Pull failed: {}", text));
     }
+
+    // Stream the response line by line, emit progress events
+    use tokio::io::AsyncBufReadExt;
+    let stream = resp.bytes_stream();
+    use futures::StreamExt;
+    let mut buffer = String::new();
+
+    tokio::pin!(stream);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        // Process complete JSON lines
+        while let Some(newline_pos) = buffer.find('\n') {
+            let line = buffer[..newline_pos].trim().to_string();
+            buffer = buffer[newline_pos + 1..].to_string();
+
+            if line.is_empty() { continue; }
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                let completed = json["completed"].as_u64().unwrap_or(0);
+                let total = json["total"].as_u64().unwrap_or(0);
+                let status = json["status"].as_str().unwrap_or("").to_string();
+
+                let _ = app_handle.emit("ollama-pull-progress", serde_json::json!({
+                    "completed": completed,
+                    "total": total,
+                    "status": status,
+                    "model": model_name,
+                }));
+            }
+        }
+    }
+
     Ok(format!("Model '{}' pulled successfully", model_name))
 }
 
