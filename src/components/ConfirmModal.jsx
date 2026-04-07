@@ -1,0 +1,91 @@
+import { AlertTriangle, CheckCircle, X } from 'lucide-react';
+
+export function ConfirmModal({ 
+  isOpen, 
+  onClose, 
+  onConfirm, 
+  title, 
+  message, 
+  confirmText = "Confirm", 
+  cancelText = "Cancel",
+  type = "warning" // "warning", "danger", "info"
+}) {
+  if (!isOpen) return null;
+
+  const getTypeStyles = () => {
+    switch (type) {
+      case 'danger':
+        return {
+          icon: <AlertTriangle className="w-6 h-6 text-red-600" />,
+          iconBg: 'bg-red-100',
+          confirmBtn: 'bg-red-600 hover:bg-red-700 text-white'
+        };
+      case 'info':
+        return {
+          icon: <CheckCircle className="w-6 h-6 text-blue-600" />,
+          iconBg: 'bg-blue-100',
+          confirmBtn: 'bg-blue-600 hover:bg-blue-700 text-white'
+        };
+      default: // warning
+        return {
+          icon: <AlertTriangle className="w-6 h-6 text-yellow-600" />,
+          iconBg: 'bg-yellow-100',
+          confirmBtn: 'bg-yellow-600 hover:bg-yellow-700 text-white'
+        };
+    }
+  };
+
+  const styles = getTypeStyles();
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-neutral-900 rounded-xl shadow-2xl max-w-md w-full max-h-[80vh] flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="p-6 pb-4 flex-shrink-0">
+          <div className="flex items-start gap-4">
+            <div className={`p-2 rounded-lg ${styles.iconBg} flex-shrink-0`}>
+              {styles.icon}
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-lg font-semibold text-gray-100 mb-2">
+                {title}
+              </h3>
+            </div>
+            <button
+              onClick={onClose}
+              className="p-1 hover:bg-neutral-800 rounded-lg transition-colors flex-shrink-0"
+            >
+              <X className="w-5 h-5 text-gray-400" />
+            </button>
+          </div>
+        </div>
+
+        {/* Scrollable Content */}
+        <div className="flex-1 overflow-y-auto px-6 pb-4">
+          <div className="text-gray-400 text-sm leading-relaxed whitespace-pre-wrap">
+            {message}
+          </div>
+        </div>
+
+        {/* Footer - Always visible */}
+        <div className="px-6 py-4 flex gap-3 justify-end border-t border-neutral-800 bg-neutral-950 flex-shrink-0">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-gray-300 bg-neutral-900 border border-neutral-700 rounded-lg hover:bg-neutral-950 transition-colors font-medium"
+          >
+            {cancelText}
+          </button>
+          <button
+            onClick={() => {
+              onConfirm();
+              onClose();
+            }}
+            className={`px-4 py-2 rounded-lg transition-colors font-medium ${styles.confirmBtn}`}
+          >
+            {confirmText}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
