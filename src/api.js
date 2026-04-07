@@ -44,6 +44,9 @@ const DEFAULT_CONFIG = {
   ai_base_url: 'https://api.openai.com',
   use_local_ai: false,
   ollama_model: null,
+  local_concurrency: 1,
+  cloud_concurrency: 5,
+  local_skip_dna: false,
   custom_providers: [],
 };
 
@@ -450,7 +453,8 @@ const HANDLERS = {
   resolve_metadata_batch: async (args) => {
     const config = getLocalConfig();
     const books = args.books || [];
-    const CONCURRENCY = 5;
+    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
+    const CONCURRENCY = isLocalAI ? (config.local_concurrency || 1) : (config.cloud_concurrency || 5);
     const results = [];
 
     const processBook = async (book) => {
@@ -521,20 +525,33 @@ If it's part of a series, fill in the name and book number. If standalone, use n
   classify_books_batch: async (args) => {
     const config = getLocalConfig();
     const books = args.books || [];
-    const dnaEnabled = args.dnaEnabled !== false;
-    const CONCURRENCY = 5; // Process 5 books in parallel
+    const isLocal = !!(config.use_local_ai && config.ollama_model);
+    const dnaEnabled = (args.dnaEnabled !== false) && !(isLocal && config.local_skip_dna);
+    // Local AI: sequential (1 at a time). Cloud AI: 5 parallel.
+    const CONCURRENCY = isLocal ? (config.local_concurrency || 1) : (config.cloud_concurrency || 5);
     const results = [];
 
-    // Process a single book (classification + DNA in parallel)
+    // Process a single book
     const processBook = async (book) => {
       try {
-        const classifyPromise = callAI(config, getSystemPrompt(config),
-          buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
-        const dnaPromise = dnaEnabled
-          ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null)
-          : Promise.resolve(null);
+        let response, dnaResponse = null;
 
-        const [response, dnaResponse] = await Promise.all([classifyPromise, dnaPromise]);
+        if (isLocal) {
+          // Local AI: run classification first, then DNA sequentially (model can only do one at a time)
+          response = await callAI(config, getSystemPrompt(config),
+            buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
+          if (dnaEnabled) {
+            dnaResponse = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null);
+          }
+        } else {
+          // Cloud AI: run classification + DNA in parallel
+          const classifyPromise = callAI(config, getSystemPrompt(config),
+            buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
+          const dnaPromise = dnaEnabled
+            ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null)
+            : Promise.resolve(null);
+          [response, dnaResponse] = await Promise.all([classifyPromise, dnaPromise]);
+        }
         const parsed = parseAIJson(response);
 
         const age_tags = [];
@@ -592,7 +609,8 @@ If it's part of a series, fill in the name and book number. If standalone, use n
   fix_descriptions_with_gpt: async (args) => {
     const config = getLocalConfig();
     const books = args.books || [];
-    const CONCURRENCY = 5;
+    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
+    const CONCURRENCY = isLocalAI ? (config.local_concurrency || 1) : (config.cloud_concurrency || 5);
     const results = [];
 
     const processBook = async (book) => {
@@ -618,7 +636,8 @@ If it's part of a series, fill in the name and book number. If standalone, use n
   process_descriptions_batch: async (args) => {
     const config = getLocalConfig();
     const books = args.books || args.request?.books || [];
-    const CONCURRENCY = 5;
+    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
+    const CONCURRENCY = isLocalAI ? (config.local_concurrency || 1) : (config.cloud_concurrency || 5);
     const results = [];
 
     const processBook = async (book) => {

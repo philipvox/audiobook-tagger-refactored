@@ -702,6 +702,60 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
               </div>
             )}
 
+            {/* Performance Controls */}
+            {isTauri() && (
+              <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
+                <div className="flex items-center gap-2">
+                  <Settings className="w-4 h-4 text-gray-400" />
+                  <h3 className="text-lg font-semibold text-white">Performance</h3>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm text-gray-500 mb-1.5">Local AI Workers</label>
+                    <select
+                      value={localConfig.local_concurrency || 1}
+                      onChange={(e) => setLocalConfig({ ...localConfig, local_concurrency: parseInt(e.target.value) })}
+                      className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
+                    >
+                      <option value={1}>1 (Sequential — safest)</option>
+                      <option value={2}>2 (if model fits in RAM twice)</option>
+                      <option value={3}>3 (high-end GPU only)</option>
+                    </select>
+                    <p className="text-xs text-gray-600 mt-1">Local models process one request at a time. Increase only if you have excess GPU/RAM.</p>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-500 mb-1.5">Cloud AI Workers</label>
+                    <select
+                      value={localConfig.cloud_concurrency || 5}
+                      onChange={(e) => setLocalConfig({ ...localConfig, cloud_concurrency: parseInt(e.target.value) })}
+                      className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
+                    >
+                      <option value={1}>1 (Slowest)</option>
+                      <option value={3}>3</option>
+                      <option value={5}>5 (Default)</option>
+                      <option value={10}>10 (Fast)</option>
+                      <option value={15}>15 (Aggressive)</option>
+                    </select>
+                    <p className="text-xs text-gray-600 mt-1">Cloud APIs handle parallel requests well. Higher = faster batch processing.</p>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-sm text-gray-400">Skip DNA for Local AI</span>
+                    <p className="text-xs text-gray-600">DNA fingerprints are complex — skip them to speed up local classification by ~50%.</p>
+                  </div>
+                  <button
+                    onClick={() => setLocalConfig({ ...localConfig, local_skip_dna: !localConfig.local_skip_dna })}
+                    className={`relative w-10 h-5 rounded-full transition-colors ${localConfig.local_skip_dna ? 'bg-blue-600' : 'bg-neutral-700'}`}
+                  >
+                    <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${localConfig.local_skip_dna ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
               <h3 className="text-lg font-semibold text-white mb-3">AI Provider</h3>
               <p className="text-sm text-gray-400">Enter your API key for OpenAI or Anthropic Claude. Keys are stored in your browser only — never sent to our server.</p>
