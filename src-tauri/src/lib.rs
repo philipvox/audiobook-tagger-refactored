@@ -1,4 +1,5 @@
 mod scanner;
+mod ollama;
 
 pub fn run() {
     tauri::Builder::default()
@@ -6,7 +7,22 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .invoke_handler(tauri::generate_handler![
             scanner::scan_library,
+            ollama::ollama_get_status,
+            ollama::ollama_get_model_presets,
+            ollama::ollama_get_disk_usage,
+            ollama::ollama_start,
+            ollama::ollama_stop,
+            ollama::ollama_install,
+            ollama::ollama_uninstall,
+            ollama::ollama_pull_model,
+            ollama::ollama_delete_model,
         ])
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let _ = rt.block_on(ollama::ollama_stop());
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running Audiobook Tagger");
 }
