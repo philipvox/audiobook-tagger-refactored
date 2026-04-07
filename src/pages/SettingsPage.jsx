@@ -153,7 +153,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   // Ollama state (only used in Tauri)
   const [ollamaStatus, setOllamaStatus] = useState(null);
   const [modelPresets, setModelPresets] = useState([]);
-  const [selectedPreset, setSelectedPreset] = useState('qwen3:4b');
+  const [selectedPreset, setSelectedPreset] = useState('gemma4:12b');
   const [installing, setInstalling] = useState(false);
   const [pulling, setPulling] = useState(false);
   const [diskUsage, setDiskUsage] = useState(0);
