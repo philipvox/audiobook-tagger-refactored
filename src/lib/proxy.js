@@ -2,6 +2,8 @@
 // Smart fetch — tries direct first, falls back to CORS proxy if blocked.
 // This way it works both locally (direct) and on GitHub Pages (via proxy).
 
+import { isTauri, getTauriFetch } from './platform.js';
+
 const PROXY_URL = import.meta.env.VITE_PROXY_URL || 'https://audiobook-tagger-proxy.workers.dev';
 
 /**
@@ -28,6 +30,17 @@ function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
 export async function proxyFetch(targetUrl, options = {}, timeoutMs = 30000) {
   const { method = 'GET', headers = {}, body = null } = options;
 
+  // In Tauri, always use direct fetch (HTTP plugin bypasses CORS)
+  if (isTauri()) {
+    const tauriFetch = await getTauriFetch();
+    const directOpts = { method, headers: { ...headers } };
+    if (body && method !== 'GET' && method !== 'HEAD') {
+      directOpts.body = typeof body === 'string' ? body : JSON.stringify(body);
+    }
+    return tauriFetch(targetUrl, directOpts);
+  }
+
+  // Browser: try direct fetch first, fall back to CORS proxy
   // Try direct fetch first (works same-origin or if server allows CORS)
   try {
     const directOpts = { method, headers: { ...headers }, credentials: 'omit' };
@@ -97,7 +110,7 @@ export async function callOpenAI(apiKey, model, systemPrompt, userPrompt, maxTok
   const useResponsesApi = isGpt5;
 
   // Route through Caddy proxy if on same origin, otherwise use proxyFetch
-  const useLocalProxy = typeof window !== 'undefined' && baseUrl === 'https://api.openai.com';
+  const useLocalProxy = !isTauri() && typeof window !== 'undefined' && baseUrl === 'https://api.openai.com';
   const apiBase = useLocalProxy ? '/api/openai' : baseUrl;
 
   let endpoint, body;
@@ -127,7 +140,7 @@ export async function callOpenAI(apiKey, model, systemPrompt, userPrompt, maxTok
     };
   }
 
-  const fetchFn = useLocalProxy ? fetchWithTimeout : proxyFetch;
+  const fetchFn = isTauri() ? await getTauriFetch() : (useLocalProxy ? fetchWithTimeout : proxyFetch);
   const res = await fetchFn(endpoint, {
     method: 'POST',
     headers: {
@@ -170,9 +183,9 @@ export async function callOpenAI(apiKey, model, systemPrompt, userPrompt, maxTok
  */
 export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, maxTokens = 2000) {
   // Route through Caddy proxy to avoid CORS
-  const useLocalProxy = typeof window !== 'undefined';
+  const useLocalProxy = !isTauri() && typeof window !== 'undefined';
   const endpoint = useLocalProxy ? '/api/anthropic/v1/messages' : 'https://api.anthropic.com/v1/messages';
-  const fetchFn = useLocalProxy ? fetchWithTimeout : proxyFetch;
+  const fetchFn = isTauri() ? await getTauriFetch() : (useLocalProxy ? fetchWithTimeout : proxyFetch);
 
   const res = await fetchFn(endpoint, {
     method: 'POST',
