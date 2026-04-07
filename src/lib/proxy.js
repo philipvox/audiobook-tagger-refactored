@@ -222,24 +222,44 @@ export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b',
 
   const fetchFn = isTauri() ? await getTauriFetch() : globalThis.fetch.bind(globalThis);
 
-  const resp = await fetchFn(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      stream: false,
-      think: false,
-      format: 'json',
-      options: {
-        num_predict: maxTokens,
-        temperature: 0.3,
-      },
-    }),
-  });
+  // Build request body — adapt parameters for different model families
+  const isQwen = model.startsWith('qwen');
+  const body = {
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    stream: false,
+    format: 'json',
+    options: {
+      num_predict: maxTokens,
+      temperature: 0.3,
+    },
+  };
+  // Qwen 3 models support 'think' parameter to disable extended reasoning
+  if (isQwen) body.think = false;
+
+  // Use AbortController for timeout — larger models can take 2+ minutes on first load
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minute timeout
+
+  let resp;
+  try {
+    resp = await fetchFn(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error(`Ollama timed out after 3 minutes. The model "${model}" may be too large for your hardware, or still loading into memory. Try a smaller model.`);
+    }
+    throw err;
+  }
+  clearTimeout(timeoutId);
 
   if (!resp.ok) {
     const text = await resp.text();
