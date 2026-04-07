@@ -219,6 +219,10 @@ export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, max
  */
 export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b', maxTokens = 1000 } = {}) {
   const url = 'http://127.0.0.1:11434/api/chat';
+  const t0 = performance.now();
+
+  const promptChars = systemPrompt.length + userPrompt.length;
+  console.log(`[Ollama] Starting request — model=${model}, prompt=${(promptChars/1024).toFixed(1)}KB, maxTokens=${maxTokens}`);
 
   const fetchFn = isTauri() ? await getTauriFetch() : globalThis.fetch.bind(globalThis);
 
@@ -254,19 +258,34 @@ export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b',
     });
   } catch (err) {
     clearTimeout(timeoutId);
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
     if (err.name === 'AbortError') {
+      console.error(`[Ollama] TIMEOUT after ${elapsed}s — model=${model}`);
       throw new Error(`Ollama timed out after 3 minutes. The model "${model}" may be too large for your hardware, or still loading into memory. Try a smaller model.`);
     }
+    console.error(`[Ollama] FETCH ERROR after ${elapsed}s — ${err.message}`);
     throw err;
   }
   clearTimeout(timeoutId);
 
   if (!resp.ok) {
     const text = await resp.text();
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+    console.error(`[Ollama] HTTP ${resp.status} after ${elapsed}s — ${text.substring(0, 200)}`);
     throw new Error(`Ollama error ${resp.status}: ${text}`);
   }
 
   const data = await resp.json();
+  const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+  const loadTime = data.load_duration ? (data.load_duration / 1e9).toFixed(1) : '?';
+  const evalTime = data.eval_duration ? (data.eval_duration / 1e9).toFixed(1) : '?';
+  const promptEvalTime = data.prompt_eval_duration ? (data.prompt_eval_duration / 1e9).toFixed(1) : '?';
+  const tokens = data.eval_count || '?';
+  const promptTokens = data.prompt_eval_count || '?';
+  const speed = (data.eval_count && data.eval_duration) ? (data.eval_count / (data.eval_duration / 1e9)).toFixed(0) : '?';
+
+  console.log(`[Ollama] DONE in ${elapsed}s — load=${loadTime}s, prompt_eval=${promptEvalTime}s (${promptTokens} tokens), gen=${evalTime}s (${tokens} tokens, ${speed} tok/s)`);
+
   const content = data?.message?.content;
   if (!content) throw new Error('Empty response from Ollama');
   return content.trim();
