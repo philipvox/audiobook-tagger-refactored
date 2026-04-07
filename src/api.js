@@ -364,6 +364,7 @@ const HANDLERS = {
   // === Full Pipeline (matching desktop process_with_pipeline) ===
   process_with_pipeline: async (args) => {
     const config = getLocalConfig();
+    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const request = args.request || {};
     const books = request.books || [];
     const results = [];
@@ -384,7 +385,7 @@ const HANDLERS = {
         try {
           emitEvent('pipeline_progress', { current: i + 1, total: books.length, phase: 'dna', message: `DNA for ${book.title}...` });
           const dnaPrompt = buildDnaPrompt(book);
-          const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, 3000);
+          const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, isLocalAI ? 500 : 1500);
           dna_tags = convertDnaToTags(parseAIJson(dnaResponse));
         } catch (e) { console.warn('DNA failed:', e.message); }
 
@@ -535,8 +536,9 @@ If it's part of a series, fill in the name and book number. If standalone, use n
       try {
         const classifyPromise = callAI(config, getSystemPrompt(config),
           buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
+        const dnaMaxTokens = isLocal ? 500 : 1500; // Local: compact DNA (~3s), Cloud: full DNA
         const dnaPromise = dnaEnabled
-            ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null)
+            ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), dnaMaxTokens).catch(() => null)
             : Promise.resolve(null);
 
         const [response, dnaResponse] = await Promise.all([classifyPromise, dnaPromise]);
@@ -690,6 +692,7 @@ Return JSON: {"genres":["Genre1","Genre2"]}`;
   // === GPT: Tag Assignment (standard tags + DNA, matching desktop classify_book) ===
   assign_tags_with_gpt: async (args) => {
     const config = getLocalConfig();
+    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const books = args.books || [];
     const dnaEnabled = args.dnaEnabled !== false; // default ON
     const results = [];
@@ -725,7 +728,7 @@ Return ONLY valid JSON:
         if (dnaEnabled) {
           try {
             const dnaPrompt = buildDnaPrompt(book);
-            const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, 3000);
+            const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, isLocalAI ? 500 : 1500);
             const dna = parseAIJson(dnaResponse);
             dnaTags = convertDnaToTags(dna);
           } catch (dnaErr) {
@@ -841,13 +844,14 @@ Return JSON: {"year":"2005"}`;
   // === BookDNA Generation ===
   generate_book_dna_batch: async (args) => {
     const config = getLocalConfig();
+    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const items = args.request?.items || args.items || [];
     const results = [];
 
     for (const item of items) {
       try {
         const prompt = buildDnaPrompt(item);
-        const response = await callAI(config, getDnaSystemPrompt(config), prompt, 3000);
+        const response = await callAI(config, getDnaSystemPrompt(config), prompt, isLocalAI ? 500 : 1500);
         const parsed = parseAIJson(response);
         const dnaTags = convertDnaToTags(parsed);
 
