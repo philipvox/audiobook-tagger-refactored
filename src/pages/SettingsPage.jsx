@@ -603,6 +603,38 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                       </div>
                     )}
 
+                    {/* Custom model input */}
+                    <div>
+                      <label className="block text-sm text-gray-500 mb-1.5">Or use any model</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          placeholder="e.g. mistral:7b, deepseek-r1:8b"
+                          className="flex-1 px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:border-neutral-600"
+                          onKeyDown={async (e) => {
+                            if (e.key === 'Enter' && e.target.value.trim()) {
+                              await handleSwitchModel(e.target.value.trim());
+                              e.target.value = '';
+                            }
+                          }}
+                          id="custom-model-input"
+                        />
+                        <button
+                          onClick={async () => {
+                            const input = document.getElementById('custom-model-input');
+                            if (input?.value.trim()) {
+                              await handleSwitchModel(input.value.trim());
+                              input.value = '';
+                            }
+                          }}
+                          className="px-3 py-2 bg-neutral-700 text-sm text-white rounded-lg hover:bg-neutral-600 transition-colors"
+                        >
+                          Pull
+                        </button>
+                      </div>
+                      <p className="text-xs text-gray-600 mt-1">Enter any Ollama model name. It will be downloaded if not already installed.</p>
+                    </div>
+
                     <div className="flex gap-2">
                       <button
                         onClick={handleToggleOllama}
