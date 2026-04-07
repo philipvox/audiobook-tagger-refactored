@@ -214,6 +214,45 @@ export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, max
 }
 
 /**
+ * Call local Ollama server for chat completions.
+ * Uses Ollama's native /api/chat endpoint (not OpenAI-compat).
+ */
+export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b', maxTokens = 1000 } = {}) {
+  const url = 'http://127.0.0.1:11434/api/chat';
+
+  const fetchFn = isTauri() ? await getTauriFetch() : globalThis.fetch.bind(globalThis);
+
+  const resp = await fetchFn(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      stream: false,
+      think: false,
+      format: 'json',
+      options: {
+        num_predict: maxTokens,
+        temperature: 0.3,
+      },
+    }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Ollama error ${resp.status}: ${text}`);
+  }
+
+  const data = await resp.json();
+  const content = data?.message?.content;
+  if (!content) throw new Error('Empty response from Ollama');
+  return content.trim();
+}
+
+/**
  * Call the configured AI provider (OpenAI or Anthropic).
  * Auto-detects based on model name.
  * @param {object} config - App config with api keys and model settings
@@ -222,6 +261,14 @@ export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, max
  * @param {number} maxTokens
  */
 export async function callAI(config, systemPrompt, userPrompt, maxTokens = 2000) {
+  // Local AI takes priority
+  if (config.use_local_ai && config.ollama_model) {
+    return callOllama(systemPrompt, userPrompt, {
+      model: config.ollama_model,
+      maxTokens,
+    });
+  }
+
   const model = config.ai_model || 'gpt-5-nano';
   const isAnthropic = model.startsWith('claude');
 
