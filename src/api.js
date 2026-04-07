@@ -7,6 +7,7 @@ import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
 import { buildMetadataPrompt, buildClassificationPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName } from './lib/normalize';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit, enforceTagPolicyWithDna } from './lib/genres';
+import { isTauri } from './lib/platform.js';
 
 /** Safely serialize a value for AI prompts (escapes quotes/newlines). */
 function safe(value) {
@@ -69,12 +70,37 @@ export function saveLocalConfig(config) {
 }
 
 // ============================================================================
+// Tauri-native command overrides (populated lazily on first use)
+// ============================================================================
+
+let tauriInvoke = null;
+
+async function getTauriInvoke() {
+  if (!tauriInvoke) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    tauriInvoke = invoke;
+  }
+  return tauriInvoke;
+}
+
+// Commands that route to Rust when running in Tauri
+const TAURI_COMMANDS = new Set([
+  'scan_library',
+]);
+
+// ============================================================================
 // callBackend() — main dispatch function
 // Routes commands to client-side handlers or CORS proxy.
 // All existing component code calls this — we just changed what's under the hood.
 // ============================================================================
 
 export async function callBackend(cmd, args = {}) {
+  // In Tauri, check if this command has a native override
+  if (isTauri() && TAURI_COMMANDS.has(cmd)) {
+    const invoke = await getTauriInvoke();
+    return invoke(cmd, args);
+  }
+
   const handler = HANDLERS[cmd];
   if (handler) {
     return handler(args);
@@ -1187,6 +1213,21 @@ let fileBrowserResolver = null;
 let fileBrowserOptions = null;
 
 export function pickPath(options = {}) {
+  // In Tauri, use native file/folder dialog
+  if (isTauri()) {
+    return (async () => {
+      const { open, save } = await import('@tauri-apps/plugin-dialog');
+      if (options.save) {
+        return save({ defaultPath: options.defaultPath });
+      }
+      return open({
+        directory: options.directory || false,
+        multiple: options.multiple || false,
+      });
+    })();
+  }
+
+  // Browser: existing implementation
   if (options.directory) {
     return new Promise((resolve) => {
       fileBrowserResolver = resolve;
