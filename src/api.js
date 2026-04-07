@@ -534,17 +534,23 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const CONCURRENCY = isLocal ? (config.local_concurrency || 1) : (config.cloud_concurrency || 5);
     const results = [];
 
+    let bookIndex = 0;
     const processBook = async (book) => {
       try {
         let response, dnaResponse = null;
+        bookIndex++;
 
         if (isLocal) {
           // Local AI: sequential — avoids GPU contention and model re-loading
+          const steps = dnaEnabled ? 2 : 1;
+          emitEvent('batch-progress', { call_type: 'classify', current: bookIndex - 1, total: books.length, title: `Classifying: ${book.title}...`, substep: `Step 1/${steps}: Classification` });
           response = await callAI(config, getSystemPrompt(config),
             buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
           if (dnaEnabled) {
+            emitEvent('batch-progress', { call_type: 'classify', current: bookIndex - 0.5, total: books.length, title: `DNA: ${book.title}...`, substep: `Step 2/${steps}: DNA Fingerprint` });
             dnaResponse = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null);
           }
+          emitEvent('batch-progress', { call_type: 'classify', current: bookIndex, total: books.length, title: book.title });
         } else {
           // Cloud AI: parallel — APIs handle concurrent requests well
           const [r, d] = await Promise.all([
