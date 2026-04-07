@@ -17,9 +17,11 @@ pub struct ModelPreset {
 }
 
 pub const MODEL_PRESETS: &[ModelPreset] = &[
-    ModelPreset { id: "qwen3:1.7b",  label: "Fast & Small (1.7B)",  size_gb: 1.1, ram_gb: 4, description: "Fastest option. Good for basic metadata extraction." },
-    ModelPreset { id: "qwen3:4b",    label: "Balanced (4B)",         size_gb: 2.6, ram_gb: 8, description: "Best balance of speed and quality. Recommended." },
-    ModelPreset { id: "gemma3:4b",   label: "Gemma 3 (4B)",          size_gb: 3.3, ram_gb: 8, description: "Google's model. Strong at structured output." },
+    ModelPreset { id: "gemma4:12b",  label: "Gemma 4 12B MoE (Recommended)", size_gb: 7.0, ram_gb: 12, description: "Best for structured JSON. Native function calling. Great quality/speed." },
+    ModelPreset { id: "gemma4:26b",  label: "Gemma 4 26B MoE (Best Quality)", size_gb: 15.0, ram_gb: 18, description: "Closest to GPT-5 quality. Full DNA support. Needs 18GB+ RAM." },
+    ModelPreset { id: "qwen3:4b",    label: "Qwen 3 4B (Fast)",     size_gb: 2.6, ram_gb: 8, description: "Fast and small. Good for basic classification." },
+    ModelPreset { id: "gemma3:4b",   label: "Gemma 3 4B",            size_gb: 3.3, ram_gb: 8, description: "Google's older model. Decent at structured output." },
+    ModelPreset { id: "qwen3:1.7b",  label: "Qwen 3 1.7B (Tiny)",   size_gb: 1.1, ram_gb: 4, description: "Fastest/smallest. Basic metadata only." },
     ModelPreset { id: "phi4-mini",   label: "Phi-4 Mini (3.8B)",     size_gb: 2.5, ram_gb: 8, description: "Microsoft's model. Strong reasoning for its size." },
     ModelPreset { id: "llama3.2:3b", label: "Llama 3.2 (3B)",        size_gb: 2.0, ram_gb: 6, description: "Meta's compact model. Good general quality." },
 ];
