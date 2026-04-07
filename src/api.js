@@ -534,16 +534,29 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const CONCURRENCY = isLocal ? (config.local_concurrency || 1) : (config.cloud_concurrency || 5);
     const results = [];
 
-    // Process a single book (classification + DNA in parallel — Ollama queues internally)
     const processBook = async (book) => {
       try {
-        const classifyPromise = callAI(config, getSystemPrompt(config),
-          buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
-        const dnaPromise = dnaEnabled
-            ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null)
-            : Promise.resolve(null);
+        let response, dnaResponse = null;
 
-        const [response, dnaResponse] = await Promise.all([classifyPromise, dnaPromise]);
+        if (isLocal) {
+          // Local AI: sequential — avoids GPU contention and model re-loading
+          response = await callAI(config, getSystemPrompt(config),
+            buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
+          if (dnaEnabled) {
+            dnaResponse = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null);
+          }
+        } else {
+          // Cloud AI: parallel — APIs handle concurrent requests well
+          const [r, d] = await Promise.all([
+            callAI(config, getSystemPrompt(config),
+              buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000),
+            dnaEnabled
+              ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null)
+              : Promise.resolve(null),
+          ]);
+          response = r;
+          dnaResponse = d;
+        }
         const parsed = parseAIJson(response);
 
         const age_tags = [];
