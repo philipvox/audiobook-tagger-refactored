@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { callBackend } from '../api';
+import { isTauri } from '../lib/platform.js';
 import {
   SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT,
   DEFAULT_CLASSIFICATION_INSTRUCTIONS,
@@ -9,7 +10,7 @@ import {
   BOOK_DNA_SYSTEM_PROMPT as DEFAULT_DNA_PROMPT,
 } from '../lib/prompts';
 import { APPROVED_GENRES } from '../lib/genres';
-import { ChevronDown, Check, X, Plus, Trash2, AlertCircle, Library, Settings, Sparkles } from 'lucide-react';
+import { ChevronDown, Check, X, Plus, Trash2, AlertCircle, Library, Settings, Sparkles, Cpu, Download, HardDrive } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { useToast } from '../components/Toast';
 import { ConfirmModal } from '../components/ConfirmModal';
@@ -149,6 +150,14 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   const [confirmRemoveId, setConfirmRemoveId] = useState(null);
   const [confirmClearKeys, setConfirmClearKeys] = useState(false);
 
+  // Ollama state (only used in Tauri)
+  const [ollamaStatus, setOllamaStatus] = useState(null);
+  const [modelPresets, setModelPresets] = useState([]);
+  const [selectedPreset, setSelectedPreset] = useState('qwen3:4b');
+  const [installing, setInstalling] = useState(false);
+  const [pulling, setPulling] = useState(false);
+  const [diskUsage, setDiskUsage] = useState(0);
+
   // Auto-fetch libraries when URL + token are both set
   useEffect(() => {
     const url = localConfig.abs_base_url;
@@ -177,6 +186,30 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   useEffect(() => {
     loadProviders();
     loadAvailableProviders();
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const loadOllamaState = async () => {
+      try {
+        const [status, presets, usage] = await Promise.all([
+          callBackend('ollama_get_status'),
+          callBackend('ollama_get_model_presets'),
+          callBackend('ollama_get_disk_usage'),
+        ]);
+        setOllamaStatus(status);
+        setModelPresets(presets || []);
+        setDiskUsage(usage || 0);
+        if (status?.models?.length > 0) {
+          setSelectedPreset(status.models[0].name);
+        }
+      } catch (err) {
+        console.warn('Failed to load Ollama state:', err);
+      }
+    };
+    loadOllamaState();
+    const interval = setInterval(loadOllamaState, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   const loadProviders = async () => {
@@ -262,6 +295,101 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
     } catch (e) {
       setConnectionStatus('error');
       console.error('Connection failed:', e);
+    }
+  };
+
+  const formatBytes = (bytes) => {
+    if (!bytes) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    let size = bytes;
+    while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+    return `${size.toFixed(i > 1 ? 1 : 0)} ${units[i]}`;
+  };
+
+  const handleInstallOllama = async () => {
+    setInstalling(true);
+    try {
+      toast.info('Installing Ollama...');
+      await callBackend('ollama_install');
+      toast.info('Starting Ollama...');
+      await callBackend('ollama_start');
+      if (selectedPreset) {
+        setPulling(true);
+        toast.info(`Downloading model ${selectedPreset}...`);
+        await callBackend('ollama_pull_model', { modelName: selectedPreset });
+        setPulling(false);
+      }
+      const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset };
+      setLocalConfig(newConfig);
+      await saveConfig(newConfig);
+      const status = await callBackend('ollama_get_status');
+      setOllamaStatus(status);
+      toast.success('Local AI installed and running!');
+    } catch (err) {
+      toast.error(`Install failed: ${err.message || err}`);
+    } finally {
+      setInstalling(false);
+      setPulling(false);
+    }
+  };
+
+  const handleToggleOllama = async () => {
+    try {
+      if (ollamaStatus?.running) {
+        await callBackend('ollama_stop');
+        const newConfig = { ...localConfig, use_local_ai: false };
+        setLocalConfig(newConfig);
+        await saveConfig(newConfig);
+        toast.info('Local AI stopped');
+      } else {
+        await callBackend('ollama_start');
+        const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset };
+        setLocalConfig(newConfig);
+        await saveConfig(newConfig);
+        toast.success('Local AI started');
+      }
+      const status = await callBackend('ollama_get_status');
+      setOllamaStatus(status);
+    } catch (err) {
+      toast.error(`Failed: ${err.message || err}`);
+    }
+  };
+
+  const handleSwitchModel = async (modelId) => {
+    setSelectedPreset(modelId);
+    const isDownloaded = ollamaStatus?.models?.some(m => m.name === modelId);
+    if (!isDownloaded) {
+      setPulling(true);
+      try {
+        toast.info(`Downloading model ${modelId}...`);
+        await callBackend('ollama_pull_model', { modelName: modelId });
+        toast.success(`Model ${modelId} ready`);
+      } catch (err) {
+        toast.error(`Model pull failed: ${err.message || err}`);
+        setPulling(false);
+        return;
+      }
+      setPulling(false);
+    }
+    const newConfig = { ...localConfig, ollama_model: modelId };
+    setLocalConfig(newConfig);
+    await saveConfig(newConfig);
+    const status = await callBackend('ollama_get_status');
+    setOllamaStatus(status);
+  };
+
+  const handleUninstallOllama = async () => {
+    try {
+      await callBackend('ollama_uninstall');
+      const newConfig = { ...localConfig, use_local_ai: false, ollama_model: null };
+      setLocalConfig(newConfig);
+      await saveConfig(newConfig);
+      setOllamaStatus({ installed: false, running: false, models: [], version: null });
+      setDiskUsage(0);
+      toast.info('Local AI removed');
+    } catch (err) {
+      toast.error(`Uninstall failed: ${err.message || err}`);
     }
   };
 
@@ -374,6 +502,137 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
 
           {/* Right: AI & Processing */}
           <div className="space-y-6">
+
+            {isTauri() && (
+              <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Cpu className="w-4 h-4 text-blue-400" />
+                    <h3 className="text-lg font-semibold text-white">Local AI</h3>
+                  </div>
+                  {ollamaStatus?.running && (
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                      <span className="text-xs text-green-400">Running</span>
+                    </div>
+                  )}
+                  {ollamaStatus?.installed && !ollamaStatus?.running && (
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-2 h-2 rounded-full bg-yellow-400" />
+                      <span className="text-xs text-yellow-400">Stopped</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Not installed */}
+                {!ollamaStatus?.installed && !installing && (
+                  <div className="space-y-3">
+                    <p className="text-sm text-gray-400">
+                      Run AI locally on your machine. No API key needed, no usage costs, complete privacy.
+                    </p>
+                    <div>
+                      <label className="block text-sm text-gray-500 mb-1.5">Choose a model</label>
+                      <div className="space-y-1.5">
+                        {modelPresets.map(preset => (
+                          <button
+                            key={preset.id}
+                            onClick={() => setSelectedPreset(preset.id)}
+                            className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors border ${
+                              selectedPreset === preset.id
+                                ? 'border-blue-500 bg-blue-500/10 text-white'
+                                : 'border-neutral-700 bg-neutral-800 text-gray-400 hover:border-neutral-600'
+                            }`}
+                          >
+                            <div className="flex justify-between items-center">
+                              <span className="font-medium">{preset.label}</span>
+                              <span className="text-gray-500">{preset.size_gb} GB</span>
+                            </div>
+                            <div className="text-xs text-gray-500 mt-0.5">
+                              {preset.description} Requires {preset.ram_gb}GB+ RAM.
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleInstallOllama}
+                      className="w-full py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-500 transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Download className="w-4 h-4" />
+                      Install Local AI
+                    </button>
+                  </div>
+                )}
+
+                {/* Installing */}
+                {installing && (
+                  <div className="text-center py-4">
+                    <div className="animate-spin w-6 h-6 border-2 border-blue-400 border-t-transparent rounded-full mx-auto mb-2" />
+                    <p className="text-sm text-gray-400">
+                      {pulling ? 'Downloading model...' : 'Installing Ollama...'}
+                    </p>
+                  </div>
+                )}
+
+                {/* Installed */}
+                {ollamaStatus?.installed && !installing && !pulling && (
+                  <div className="space-y-3">
+                    {ollamaStatus.models?.length > 0 && (
+                      <div>
+                        <label className="block text-sm text-gray-500 mb-1.5">Active Model</label>
+                        <select
+                          value={selectedPreset}
+                          onChange={(e) => handleSwitchModel(e.target.value)}
+                          className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
+                        >
+                          {ollamaStatus.models.map(m => (
+                            <option key={m.name} value={m.name}>
+                              {m.name} ({formatBytes(m.size_bytes)})
+                            </option>
+                          ))}
+                          <optgroup label="Download new model">
+                            {modelPresets
+                              .filter(p => !ollamaStatus.models.some(m => m.name === p.id))
+                              .map(p => (
+                                <option key={p.id} value={p.id}>
+                                  {p.label} (~{p.size_gb} GB download)
+                                </option>
+                              ))}
+                          </optgroup>
+                        </select>
+                      </div>
+                    )}
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleToggleOllama}
+                        className={`flex-1 py-2 text-sm font-medium rounded-lg transition-colors ${
+                          ollamaStatus.running
+                            ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30'
+                            : 'bg-green-600/20 text-green-400 hover:bg-green-600/30'
+                        }`}
+                      >
+                        {ollamaStatus.running ? 'Stop Local AI' : 'Start Local AI'}
+                      </button>
+                      <button
+                        onClick={handleUninstallOllama}
+                        className="px-3 py-2 text-sm text-gray-500 hover:text-red-400 transition-colors"
+                      >
+                        Remove
+                      </button>
+                    </div>
+
+                    {diskUsage > 0 && (
+                      <div className="flex items-center gap-1.5 text-xs text-gray-600">
+                        <HardDrive className="w-3 h-3" />
+                        Using {formatBytes(diskUsage)} on disk
+                        {ollamaStatus.version && <span> · Ollama v{ollamaStatus.version}</span>}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
               <h3 className="text-lg font-semibold text-white mb-3">AI Provider</h3>
