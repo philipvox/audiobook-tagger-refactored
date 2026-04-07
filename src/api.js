@@ -86,6 +86,15 @@ async function getTauriInvoke() {
 // Commands that route to Rust when running in Tauri
 const TAURI_COMMANDS = new Set([
   'scan_library',
+  'ollama_get_status',
+  'ollama_get_model_presets',
+  'ollama_get_disk_usage',
+  'ollama_start',
+  'ollama_stop',
+  'ollama_install',
+  'ollama_uninstall',
+  'ollama_pull_model',
+  'ollama_delete_model',
 ]);
 
 // ============================================================================
