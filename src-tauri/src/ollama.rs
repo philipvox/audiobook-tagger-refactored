@@ -17,8 +17,9 @@ pub struct ModelPreset {
 }
 
 pub const MODEL_PRESETS: &[ModelPreset] = &[
-    ModelPreset { id: "gemma4:12b",  label: "Gemma 4 12B MoE (Recommended)", size_gb: 7.0, ram_gb: 12, description: "Best for structured JSON. Native function calling. Great quality/speed." },
-    ModelPreset { id: "gemma4:26b",  label: "Gemma 4 26B MoE (Best Quality)", size_gb: 15.0, ram_gb: 18, description: "Closest to GPT-5 quality. Full DNA support. Needs 18GB+ RAM." },
+    ModelPreset { id: "gemma4",      label: "Gemma 4 E4B (Recommended)",     size_gb: 9.6, ram_gb: 12, description: "Best for structured JSON. Native function calling. Great quality/speed." },
+    ModelPreset { id: "gemma4:e2b",  label: "Gemma 4 E2B (Small & Fast)",    size_gb: 7.2, ram_gb: 8,  description: "Lightweight Gemma 4. Good quality, fits 8GB RAM." },
+    ModelPreset { id: "gemma4:26b",  label: "Gemma 4 26B (Best Quality)",    size_gb: 18.0, ram_gb: 20, description: "Closest to GPT-5 quality. Full DNA support. Needs 20GB+ RAM." },
     ModelPreset { id: "qwen3:4b",    label: "Qwen 3 4B (Fast)",     size_gb: 2.6, ram_gb: 8, description: "Fast and small. Good for basic classification." },
     ModelPreset { id: "gemma3:4b",   label: "Gemma 3 4B",            size_gb: 3.3, ram_gb: 8, description: "Google's older model. Decent at structured output." },
     ModelPreset { id: "qwen3:1.7b",  label: "Qwen 3 1.7B (Tiny)",   size_gb: 1.1, ram_gb: 4, description: "Fastest/smallest. Basic metadata only." },
