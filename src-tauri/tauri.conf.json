@@ -33,14 +33,5 @@
       "icons/icon.png"
     ]
   },
-  "plugins": {
-    "dialog": {},
-    "http": {
-      "scope": [
-        { "url": "https://**" },
-        { "url": "http://127.0.0.1:**" },
-        { "url": "http://localhost:**" }
-      ]
-    }
-  }
+  "plugins": {}
 }

@@ -11,6 +11,13 @@
     "dialog:allow-ask",
     "dialog:allow-confirm",
     "http:default",
-    "http:allow-fetch"
+    {
+      "identifier": "http:allow-fetch",
+      "allow": [
+        { "url": "https://**" },
+        { "url": "http://127.0.0.1:**" },
+        { "url": "http://localhost:**" }
+      ]
+    }
   ]
 }
