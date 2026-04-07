@@ -718,11 +718,12 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                       onChange={(e) => setLocalConfig({ ...localConfig, local_concurrency: parseInt(e.target.value) })}
                       className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
                     >
-                      <option value={1}>1 (Sequential — safest)</option>
-                      <option value={2}>2 (if model fits in RAM twice)</option>
-                      <option value={3}>3 (high-end GPU only)</option>
+                      <option value={1}>1 (Sequential)</option>
+                      <option value={2}>2 books at once</option>
+                      <option value={3}>3 books at once</option>
+                      <option value={5}>5 books at once</option>
                     </select>
-                    <p className="text-xs text-gray-600 mt-1">Local models process one request at a time. Increase only if you have excess GPU/RAM.</p>
+                    <p className="text-xs text-gray-600 mt-1">Ollama queues requests internally. Higher values reduce wait time between books.</p>
                   </div>
                   <div>
                     <label className="block text-sm text-gray-500 mb-1.5">Cloud AI Workers</label>
