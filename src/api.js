@@ -4,7 +4,7 @@
 // Config lives in browser localStorage.
 
 import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
-import { buildMetadataPrompt, buildClassificationPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
+import { buildMetadataPrompt, buildClassificationPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName } from './lib/normalize';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit, enforceTagPolicyWithDna } from './lib/genres';
 import { isTauri } from './lib/platform.js';
@@ -20,9 +20,12 @@ function getSystemPrompt(config) {
   return config?.custom_system_prompt?.trim() || SYSTEM_PROMPT;
 }
 
-/** Get the effective DNA system prompt (custom override or default). */
+/** Get the effective DNA system prompt (custom override or default).
+ *  Uses compact prompt for local AI — fewer fields, ~50% less output. */
 function getDnaSystemPrompt(config) {
-  return config?.custom_dna_prompt?.trim() || BOOK_DNA_SYSTEM_PROMPT;
+  if (config?.custom_dna_prompt?.trim()) return config.custom_dna_prompt.trim();
+  const isLocal = !!(config?.use_local_ai && config?.ollama_model);
+  return isLocal ? BOOK_DNA_SYSTEM_PROMPT_COMPACT : BOOK_DNA_SYSTEM_PROMPT;
 }
 
 // ============================================================================
@@ -385,7 +388,7 @@ const HANDLERS = {
         try {
           emitEvent('pipeline_progress', { current: i + 1, total: books.length, phase: 'dna', message: `DNA for ${book.title}...` });
           const dnaPrompt = buildDnaPrompt(book);
-          const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, isLocalAI ? 500 : 1500);
+          const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, 1500);
           dna_tags = convertDnaToTags(parseAIJson(dnaResponse));
         } catch (e) { console.warn('DNA failed:', e.message); }
 
@@ -536,9 +539,8 @@ If it's part of a series, fill in the name and book number. If standalone, use n
       try {
         const classifyPromise = callAI(config, getSystemPrompt(config),
           buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
-        const dnaMaxTokens = isLocal ? 500 : 1500; // Local: compact DNA (~3s), Cloud: full DNA
         const dnaPromise = dnaEnabled
-            ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), dnaMaxTokens).catch(() => null)
+            ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null)
             : Promise.resolve(null);
 
         const [response, dnaResponse] = await Promise.all([classifyPromise, dnaPromise]);
@@ -728,7 +730,7 @@ Return ONLY valid JSON:
         if (dnaEnabled) {
           try {
             const dnaPrompt = buildDnaPrompt(book);
-            const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, isLocalAI ? 500 : 1500);
+            const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, 1500);
             const dna = parseAIJson(dnaResponse);
             dnaTags = convertDnaToTags(dna);
           } catch (dnaErr) {
@@ -851,7 +853,7 @@ Return JSON: {"year":"2005"}`;
     for (const item of items) {
       try {
         const prompt = buildDnaPrompt(item);
-        const response = await callAI(config, getDnaSystemPrompt(config), prompt, isLocalAI ? 500 : 1500);
+        const response = await callAI(config, getDnaSystemPrompt(config), prompt, 1500);
         const parsed = parseAIJson(response);
         const dnaTags = convertDnaToTags(parsed);
 

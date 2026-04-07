@@ -369,6 +369,39 @@ RULES:
 - Return ONLY valid JSON, no explanation`;
 
 /**
+ * Compact DNA system prompt for local AI — fewer fields, smaller output.
+ * Drops: comp_vibes, spectrums, moods, narrator_performance, comp_authors (verbose/low-value for local).
+ * Keeps: core dimensions, shelves, tropes, themes, ratings.
+ */
+export const BOOK_DNA_SYSTEM_PROMPT_COMPACT = `You analyze audiobook DNA. Return ONLY valid JSON.
+
+{
+  "length": "short|medium|long|epic",
+  "pacing": "slow|measured|moderate|fast|breakneck",
+  "structure": "linear|nonlinear|multiple-timeline|frame-story|epistolary",
+  "pov": "first-person|close-third|omniscient-third|multiple-pov",
+  "series_position": "standalone|series-start|mid-series|series-end",
+  "setting": "urban|rural|fantasy-world|historical|space-station|small-town|multiple-settings",
+  "ending_type": "hea|hfn|bittersweet|ambiguous|open|tragic|cathartic",
+  "humor_type": "dry-wit|absurdist|dark-comedy|satirical|cozy-banter|none",
+  "stakes_level": "personal|local|national|global|cosmic",
+  "protagonist_count": "solo|duo|ensemble",
+  "prose_style": "sparse|conversational|lyrical|dense",
+  "series_dependency": "fully-standalone|works-standalone|needs-prior|must-start-at-one",
+  "production": "single-voice|dual-narrator|full-cast|dramatized",
+  "audio_friendliness": 4,
+  "re_listen_value": 3,
+  "violence_level": 2,
+  "intimacy_level": 1,
+  "shelves": ["epic-fantasy"],
+  "tropes": ["quest", "found-family"],
+  "themes": ["survival", "loyalty"],
+  "relationship_focus": ["friendship"]
+}
+
+RULES: Use lowercase-hyphenated strings. Shelves 1-3, tropes 2-4, themes 2-3. Ratings 0-5. Return ONLY JSON.`;
+
+/**
  * Build the user prompt for DNA generation.
  */
 export function buildDnaPrompt(book) {
