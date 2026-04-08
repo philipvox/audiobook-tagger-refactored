@@ -173,8 +173,14 @@ pub async fn ollama_start() -> Result<String, String> {
         .spawn()
         .map_err(|e| format!("Failed to start Ollama: {}", e))?;
 
+    if let Some(pid) = child.id() {
+        if pid > 0 {
+            if let Ok(mut guard) = OLLAMA_PID.lock() {
+                *guard = Some(pid);
+            }
+        }
+    }
     let pid = child.id().unwrap_or(0);
-    *OLLAMA_PID.lock().unwrap() = Some(pid);
 
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -187,7 +193,7 @@ pub async fn ollama_start() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn ollama_stop() -> Result<String, String> {
-    let pid = OLLAMA_PID.lock().unwrap().take();
+    let pid = OLLAMA_PID.lock().ok().and_then(|mut guard| guard.take());
     if let Some(pid) = pid {
         #[cfg(unix)]
         unsafe { libc::kill(pid as i32, libc::SIGTERM); }
@@ -255,9 +261,9 @@ fn install_from_bytes(bytes: &[u8], binary_path: &PathBuf) -> Result<(), String>
 
     let output = std::process::Command::new("unzip")
         .args(["-q", "-o"])
-        .arg(zip_path.to_str().unwrap())
+        .arg(zip_path.to_str().unwrap_or_default())
         .arg("-d")
-        .arg(temp_dir.path().to_str().unwrap())
+        .arg(temp_dir.path().to_str().unwrap_or_default())
         .output()
         .map_err(|e| format!("Unzip error: {}", e))?;
 
@@ -282,9 +288,9 @@ fn install_from_bytes(bytes: &[u8], binary_path: &PathBuf) -> Result<(), String>
 
     let output = std::process::Command::new("tar")
         .args(["xf"])
-        .arg(archive_path.to_str().unwrap())
+        .arg(archive_path.to_str().unwrap_or_default())
         .arg("-C")
-        .arg(temp_dir.path().to_str().unwrap())
+        .arg(temp_dir.path().to_str().unwrap_or_default())
         .output()
         .map_err(|e| format!("Tar error: {}", e))?;
 
@@ -323,6 +329,10 @@ pub async fn ollama_uninstall() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String) -> Result<String, String> {
+    let model_name = model_name.trim().to_string();
+    if model_name.is_empty() || model_name.len() > 200 || model_name.contains("..") || model_name.contains("/") {
+        return Err("Invalid model name".to_string());
+    }
     if !is_running().await {
         return Err("Ollama is not running. Start it first.".to_string());
     }
@@ -349,6 +359,10 @@ pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String)
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        if buffer.len() > 1_000_000 {
+            buffer.clear(); // Reset if buffer gets too large
+        }
 
         // Process complete JSON lines
         while let Some(newline_pos) = buffer.find('\n') {

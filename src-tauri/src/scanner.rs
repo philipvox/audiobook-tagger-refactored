@@ -57,7 +57,7 @@ fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
     let mut files = Vec::new();
     for root in paths {
         for entry in WalkDir::new(root)
-            .follow_links(true)
+            .follow_links(false)
             .into_iter()
             .filter_entry(|e| {
                 if e.file_type().is_dir() {
