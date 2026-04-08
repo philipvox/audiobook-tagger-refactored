@@ -699,8 +699,10 @@ If it's part of a series, fill in the name and book number. If standalone, use n
       }
     } else {
       // CLOUD AI: Process books individually with high concurrency (parallel)
+      let completed = 0;
       const processBook = async (book) => {
         try {
+          emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: `Classifying: ${book.title}` });
           const [response, dnaResponse] = await Promise.all([
             callAI(config, getSystemPrompt(config),
               buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000),
@@ -711,8 +713,12 @@ If it's part of a series, fill in the name and book number. If standalone, use n
           const parsed = parseAIJson(response);
           let dna_tags = [];
           if (dnaResponse) { try { dna_tags = convertDnaToTags(parseAIJson(dnaResponse)); } catch {} }
+          completed++;
+          emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
           return buildResult(book, parsed, dna_tags);
         } catch (err) {
+          completed++;
+          emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
           return { id: book.id, success: false, error: err.message };
         }
       };
@@ -735,15 +741,21 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
     const results = [];
+    let completed = 0;
 
     const processBook = async (book) => {
       try {
+        emitEvent('batch-progress', { call_type: 'description', current: completed, total: books.length, title: `Processing: ${book.title}` });
         const prompt = buildDescriptionPrompt(book, config.custom_description_validate_rules || null, config.custom_description_generate_rules || null);
         const response = await callAI(config, getSystemPrompt(config), prompt, 800);
         const parsed = parseAIJson(response);
         const action = parsed.action || 'kept';
+        completed++;
+        emitEvent('batch-progress', { call_type: 'description', current: completed, total: books.length, title: book.title });
         return { id: book.id, success: true, fixed: action === 'rewritten' || action === 'generated', new_description: parsed.description || null, action, reason: parsed.reason || null };
       } catch (err) {
+        completed++;
+        emitEvent('batch-progress', { call_type: 'description', current: completed, total: books.length, title: book.title });
         return { id: book.id, success: false, error: err.message };
       }
     };
@@ -762,15 +774,21 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
     const results = [];
+    let completed = 0;
 
     const processBook = async (book) => {
       try {
+        emitEvent('batch-progress', { call_type: 'description', current: completed, total: books.length, title: `Processing: ${book.title}` });
         const prompt = buildDescriptionPrompt(book, config.custom_description_validate_rules || null, config.custom_description_generate_rules || null);
         const response = await callAI(config, getSystemPrompt(config), prompt, 800);
         const parsed = parseAIJson(response);
         const action = parsed.action || 'kept';
+        completed++;
+        emitEvent('batch-progress', { call_type: 'description', current: completed, total: books.length, title: book.title });
         return { id: book.id, success: true, changed: action === 'rewritten' || action === 'generated', description: parsed.description || null, action, reason: parsed.reason || null };
       } catch (err) {
+        completed++;
+        emitEvent('batch-progress', { call_type: 'description', current: completed, total: books.length, title: book.title });
         return { id: book.id, success: false, error: err.message };
       }
     };
@@ -789,9 +807,11 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const config = getLocalConfig();
     const books = args.books || [];
     const results = [];
+    let completed = 0;
 
     for (const book of books) {
       try {
+        emitEvent('batch-progress', { call_type: 'genres', current: completed, total: books.length, title: `Classifying: ${book.title}` });
         const prompt = `Classify the genres for this audiobook. Return 1-3 genres from the APPROVED LIST ONLY.
 
 Title: ${safe(book.title)}
@@ -814,8 +834,12 @@ Return JSON: {"genres":["Genre1","Genre2"]}`;
         const genres = config.genre_enforcement !== false
           ? enforceGenrePolicyWithSplit(parsed.genres || [])
           : (parsed.genres || []).slice(0, 3);
+        completed++;
+        emitEvent('batch-progress', { call_type: 'genres', current: completed, total: books.length, title: book.title });
         results.push({ id: book.id, success: true, genres });
       } catch (err) {
+        completed++;
+        emitEvent('batch-progress', { call_type: 'genres', current: completed, total: books.length, title: book.title });
         results.push({ id: book.id, success: false, error: err.message });
       }
     }
@@ -829,9 +853,11 @@ Return JSON: {"genres":["Genre1","Genre2"]}`;
     const books = args.books || [];
     const dnaEnabled = args.dnaEnabled !== false; // default ON
     const results = [];
+    let completed = 0;
 
     for (const book of books) {
       try {
+        emitEvent('batch-progress', { call_type: 'tags', current: completed, total: books.length, title: `Tagging: ${book.title}` });
         // Accept duration in seconds (book.duration) or minutes (book.duration_minutes)
         const durationSec = book.duration || (book.duration_minutes ? book.duration_minutes * 60 : null);
         const durationStr = durationSec ? `${Math.floor(durationSec / 3600)}h ${Math.floor((durationSec % 3600) / 60)}m` : null;
@@ -860,6 +886,7 @@ Return ONLY valid JSON:
         let dnaTags = [];
         if (dnaEnabled) {
           try {
+            emitEvent('batch-progress', { call_type: 'tags', current: completed + 0.5, total: books.length, title: `DNA: ${book.title}` });
             const dnaPrompt = buildDnaPrompt(book);
             const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, 1500);
             const dna = parseAIJson(dnaResponse);
@@ -871,8 +898,12 @@ Return ONLY valid JSON:
 
         // Merge standard + DNA tags
         const allTags = [...standardTags, ...dnaTags];
+        completed++;
+        emitEvent('batch-progress', { call_type: 'tags', current: completed, total: books.length, title: book.title });
         results.push({ id: book.id, success: true, tags: standardTags, suggested_tags: allTags, dna_tags: dnaTags });
       } catch (err) {
+        completed++;
+        emitEvent('batch-progress', { call_type: 'tags', current: completed, total: books.length, title: book.title });
         results.push({ id: book.id, success: false, tags: [], suggested_tags: [], error: err.message });
       }
     }
@@ -886,9 +917,11 @@ Return ONLY valid JSON:
     const config = getLocalConfig();
     const books = args.books || [];
     const results = [];
+    let completed = 0;
 
     for (const book of books) {
       try {
+        emitEvent('batch-progress', { call_type: 'subtitles', current: completed, total: books.length, title: `Subtitle: ${book.title}` });
         const prompt = `Find the official subtitle for this audiobook, if one exists.
 
 Title: ${safe(book.title)}
@@ -899,8 +932,12 @@ Return JSON: {"subtitle":null}
 If the book has a well-known subtitle (e.g., "Dune: The Desert Planet"), include it. Otherwise null.`;
         const response = await callAI(config, SYSTEM_PROMPT, prompt, 300);
         const parsed = parseAIJson(response);
+        completed++;
+        emitEvent('batch-progress', { call_type: 'subtitles', current: completed, total: books.length, title: book.title });
         results.push({ id: book.id, success: true, subtitle: parsed.subtitle || null });
       } catch (err) {
+        completed++;
+        emitEvent('batch-progress', { call_type: 'subtitles', current: completed, total: books.length, title: book.title });
         results.push({ id: book.id, success: false, error: err.message });
       }
     }
@@ -912,12 +949,18 @@ If the book has a well-known subtitle (e.g., "Dune: The Desert Planet"), include
     const config = getLocalConfig();
     const books = args.books || [];
     const results = [];
+    let completed = 0;
 
     for (const book of books) {
       try {
+        emitEvent('batch-progress', { call_type: 'authors', current: completed, total: books.length, title: `Author: ${book.title}` });
         const cleaned = cleanAuthorName(book.author || '');
+        completed++;
+        emitEvent('batch-progress', { call_type: 'authors', current: completed, total: books.length, title: book.title });
         results.push({ id: book.id, success: true, author: cleaned || book.author });
       } catch (err) {
+        completed++;
+        emitEvent('batch-progress', { call_type: 'authors', current: completed, total: books.length, title: book.title });
         results.push({ id: book.id, success: false, error: err.message });
       }
     }
@@ -931,6 +974,7 @@ If the book has a well-known subtitle (e.g., "Dune: The Desert Planet"), include
     const force = args.force || false;
     const results = [];
     let total_fixed = 0, total_skipped = 0, total_failed = 0;
+    let completed = 0;
 
     const isValidYear = (y) => {
       const n = parseInt(y, 10);
@@ -943,10 +987,13 @@ If the book has a well-known subtitle (e.g., "Dune: The Desert Planet"), include
         const date = `${book.current_year}-01-01`;
         results.push({ id: book.id, year: book.current_year, pub_date: date, pub_tag: `pub-${date}`, source: 'existing', fixed: false, skipped: true });
         total_skipped++;
+        completed++;
+        emitEvent('batch-progress', { call_type: 'years', current: completed, total: books.length, title: book.title });
         continue;
       }
 
       try {
+        emitEvent('batch-progress', { call_type: 'years', current: completed, total: books.length, title: `Year: ${book.title}` });
         const descSnippet = book.description ? `Description: ${safe(book.description.slice(0, 200))}\n` : '';
         const prompt = `You are a librarian. Find the ORIGINAL FIRST publication year for this book.
 
@@ -966,9 +1013,13 @@ Return JSON: {"year":"2005"}`;
           results.push({ id: book.id, year: null, fixed: false, error: 'Invalid year from AI' });
           total_failed++;
         }
+        completed++;
+        emitEvent('batch-progress', { call_type: 'years', current: completed, total: books.length, title: book.title });
       } catch (err) {
         results.push({ id: book.id, year: null, fixed: false, error: err.message });
         total_failed++;
+        completed++;
+        emitEvent('batch-progress', { call_type: 'years', current: completed, total: books.length, title: book.title });
       }
     }
     return { results, total_fixed, total_skipped, total_failed };
@@ -980,6 +1031,7 @@ Return JSON: {"year":"2005"}`;
     const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const items = args.request?.items || args.items || [];
     const results = [];
+    let completed = 0;
 
     for (const item of items) {
       try {
@@ -992,8 +1044,12 @@ Return JSON: {"year":"2005"}`;
         const existingNonDna = (item.tags || []).filter(t => !t.startsWith('dna:'));
         const mergedTags = [...existingNonDna, ...dnaTags];
 
+        completed++;
+        emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, success: true, error: null });
         results.push({ id: item.id, success: true, dna_tags: dnaTags, merged_tags: mergedTags });
       } catch (err) {
+        completed++;
+        emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, success: false, error: err.message });
         results.push({ id: item.id, success: false, dna_tags: [], merged_tags: item.tags || [], error: err.message });
       }
     }
