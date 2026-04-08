@@ -459,7 +459,7 @@ const HANDLERS = {
     const books = args.books || [];
     const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
-    const BATCH_SIZE = isLocalAI ? 5 : 1;
+    const BATCH_SIZE = isLocalAI ? 3 : 1;
     const results = [];
     let completed = 0;
 
@@ -583,7 +583,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const isLocal = !!(config.use_local_ai && config.ollama_model);
     const dnaEnabled = (args.dnaEnabled !== false) && !(isLocal && config.local_skip_dna);
     const CONCURRENCY = isLocal ? 1 : (config.cloud_concurrency || 5);
-    const BATCH_SIZE = isLocal ? 5 : 1; // Local: batch 5 books per prompt
+    const BATCH_SIZE = isLocal ? 3 : 1; // Local: batch 3 books per prompt (small models struggle with 5+)
     const results = [];
 
     // Helper: parse age_rating into tags
@@ -630,7 +630,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
           // Step 1: Batched classification
           emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: `Classifying: ${batchNames}` });
           const batchPrompt = buildBatchClassificationPrompt(batch, config.custom_classification_rules || null);
-          const response = await callAI(config, getSystemPrompt(config), batchPrompt, BATCH_SIZE * 400);
+          const response = await callAI(config, getSystemPrompt(config), batchPrompt, BATCH_SIZE * 600);
           let parsedArray;
           try {
             parsedArray = parseAIJson(response);

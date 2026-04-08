@@ -270,14 +270,14 @@ export function buildBatchClassificationPrompt(books, customInstructions = null)
     booksContext += '\n';
   });
 
-  return `Classify these ${books.length} audiobooks. Return a JSON array with one object per book.
+  return `You MUST classify ALL ${books.length} books below. Return a JSON array with EXACTLY ${books.length} objects.
 
 ${booksContext}
 
 ${instructions}
 
-Return ONLY a JSON array — one object per book in order:
-[{"id":"book-id","genres":["Genre1"],"tags":["tag-1"],"age_rating":{"intended_for_kids":false,"age_category":"Adult","content_rating":"PG-13"},"themes":["Theme1"],"tropes":["Trope1"]},...]`;
+CRITICAL: Return a JSON array with EXACTLY ${books.length} objects, one per book, in order. Do NOT skip any books.
+Example for ${books.length} books: [{"genres":["G1"],"tags":["t1"],"age_rating":{"intended_for_kids":false,"age_category":"Adult","content_rating":"PG-13"},"themes":["T1"],"tropes":["Tr1"]}, ... ${books.length} total objects]`;
 }
 
 /**
