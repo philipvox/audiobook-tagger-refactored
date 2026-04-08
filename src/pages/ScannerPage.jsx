@@ -616,10 +616,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     let unchangedCount = 0;
     let failedCount = 0;
 
+    // Listen for per-book progress events within each chunk
+    let chunkOffset = 0;
+    const unlisten = subscribe('batch-progress', (d) => {
+      if (d.call_type !== 'genres') return;
+      batch.update('genres', { current: chunkOffset + d.current, currentBook: d.title });
+    });
+
     // Process in batches of 25 for efficiency while still showing progress
     const batchSize = 25;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
       const chunk = selectedGroups.slice(i, i + batchSize);
+      chunkOffset = i;
 
       // Update progress with current batch
       batch.update('genres', { current: i, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
@@ -677,6 +685,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       }
     }
 
+    unlisten();
 
     // Clear progress after a short delay
     batch.end('genres', 1500);
@@ -822,10 +831,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     let skippedCount = 0;
     let failedCount = 0;
 
+    // Listen for per-book progress events within each chunk
+    let subtitleChunkOffset = 0;
+    const unlistenSubtitles = subscribe('batch-progress', (d) => {
+      if (d.call_type !== 'subtitles') return;
+      batch.update('subtitles', { current: subtitleChunkOffset + d.current, currentBook: d.title });
+    });
+
     // Process in batches of 10 (lower due to Audible rate limits)
     const batchSize = 10;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
       const chunk = selectedGroups.slice(i, i + batchSize);
+      subtitleChunkOffset = i;
 
       // Update progress with current batch
       batch.update('subtitles', { current: i, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
@@ -882,6 +899,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       }
     }
 
+    unlistenSubtitles();
 
     // Clear progress after a short delay
     batch.end('subtitles', 1500);
@@ -900,10 +918,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     let skippedCount = 0;
     let failedCount = 0;
 
+    // Listen for per-book progress events within each chunk
+    let authorChunkOffset = 0;
+    const unlistenAuthors = subscribe('batch-progress', (d) => {
+      if (d.call_type !== 'authors') return;
+      batch.update('authors', { current: authorChunkOffset + d.current, currentBook: d.title });
+    });
+
     // Process in batches of 10
     const batchSize = 10;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
       const chunk = selectedGroups.slice(i, i + batchSize);
+      authorChunkOffset = i;
 
       // Update progress with current batch
       batch.update('authors', { current: i, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
@@ -959,6 +985,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       }
     }
 
+    unlistenAuthors();
 
     // Clear progress after a short delay
     batch.end('authors', 1500);
@@ -977,10 +1004,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     let skippedCount = 0;
     let failedCount = 0;
 
+    // Listen for per-book progress events within each chunk
+    let yearChunkOffset = 0;
+    const unlistenYears = subscribe('batch-progress', (d) => {
+      if (d.call_type !== 'years') return;
+      batch.update('years', { current: yearChunkOffset + d.current, currentBook: d.title });
+    });
+
     // Process in batches of 50 (backend handles concurrency)
     const batchSize = 50;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
       const chunk = selectedGroups.slice(i, i + batchSize);
+      yearChunkOffset = i;
 
       // Update progress with current batch
       batch.update('years', { current: i, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
@@ -1066,6 +1101,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       }
     }
 
+    unlistenYears();
 
     // Clear progress after a short delay
     batch.end('years', 1500);
@@ -1675,10 +1711,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     let successCount = 0;
     let failedCount = 0;
 
+    // Listen for per-book progress events within each chunk
+    let tagChunkOffset = 0;
+    const unlistenTags = subscribe('batch-progress', (d) => {
+      if (d.call_type !== 'tags') return;
+      batch.update('tags', { current: tagChunkOffset + d.current, currentBook: d.title });
+    });
+
     // Process in batches of 25 for efficiency while still showing progress
     const batchSize = 25;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
       const chunk = selectedGroups.slice(i, i + batchSize);
+      tagChunkOffset = i;
 
       // Update progress with current batch
       batch.update('tags', { current: i, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
@@ -1735,6 +1779,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       }
     }
 
+    unlistenTags();
 
     // Now run age rating lookup for the same books and append age tags
     batch.update('tags', { currentBook: 'Looking up age ratings...' });
@@ -2058,10 +2103,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     let skippedCount = 0;
     let failedCount = 0;
 
+    // Listen for per-book progress events within each chunk
+    let descChunkOffset = 0;
+    const unlistenDescs = subscribe('batch-progress', (d) => {
+      if (d.call_type !== 'description') return;
+      batch.update('descriptions', { current: descChunkOffset + d.current, currentBook: d.title });
+    });
+
     // Process in batches of 25 for efficiency while still showing progress
     const batchSize = 25;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
       const chunk = selectedGroups.slice(i, i + batchSize);
+      descChunkOffset = i;
 
       // Update progress with current batch
       batch.update('descriptions', { current: i, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
@@ -2139,6 +2192,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       }
     }
 
+    unlistenDescs();
 
     // Clear progress after a short delay
     batch.end('descriptions', 1500);
