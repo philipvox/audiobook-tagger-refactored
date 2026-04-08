@@ -2690,6 +2690,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         refreshingCache={refreshingCache}
         hasAbsConnection={!!(config?.abs_base_url && config?.abs_api_token)}
         hasOpenAiKey={!!(config?.openai_api_key || config?.anthropic_api_key || config?.use_local_ai)}
+        useLocalAI={!!(config?.use_local_ai && config?.ollama_model)}
         aiModel={config?.ai_model}
         forceFresh={forceFresh}
         onToggleForceFresh={() => batch.toggleForceFresh()}

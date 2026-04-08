@@ -91,6 +91,7 @@ export function ActionBar({
   refreshingCache = false,
   hasAbsConnection = false,
   hasOpenAiKey = false,
+  useLocalAI = false,
   forceFresh = false,
   onToggleForceFresh,
   dnaEnabled = true,
@@ -112,9 +113,23 @@ export function ActionBar({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const isProcessing = scanning || cleaningGenres || assigningTags || fixingDescriptions || fixingTitles || fixingAuthors || fixingYears || fixingSeries || lookingUpAge || lookingUpISBN || runningAll || generatingDna || classifying || resolvingMetadata || processingDescriptions || pushing || validating || analyzingSeries;
 
+  // Time estimate for local AI: ~15s per book per AI call (classification + DNA sequential)
+  const estimateLocalTime = (count, calls) => {
+    const totalSecs = count * calls * 15;
+    if (totalSecs < 60) return `~${totalSecs}s`;
+    if (totalSecs < 3600) return `~${Math.ceil(totalSecs / 60)}m`;
+    const h = Math.floor(totalSecs / 3600);
+    const m = Math.ceil((totalSecs % 3600) / 60);
+    return `~${h}h ${m}m`;
+  };
+
   // Dropdown menu item
   const MenuItem = ({ onClick, disabled, active, icon: Icon, children, badge = null, aiCalls = 0 }) => {
-    const costStr = aiCalls > 0 ? formatCost(estimateCost(aiModel, selectedCount, aiCalls)) : null;
+    const badgeText = aiCalls > 0 && selectedCount > 0
+      ? (useLocalAI ? estimateLocalTime(selectedCount, aiCalls) : formatCost(estimateCost(aiModel, selectedCount, aiCalls)))
+      : null;
+    const badgeLabel = useLocalAI ? 'Local' : 'AI';
+    const badgeColor = useLocalAI ? 'bg-green-500/15 text-green-400' : 'bg-amber-500/15 text-amber-400';
     return (
       <button
         onClick={(e) => {
@@ -133,9 +148,9 @@ export function ActionBar({
         <Icon className={`w-4 h-4 ${active ? 'animate-pulse' : ''}`} />
         <span className="flex-1">{children}</span>
         {aiCalls > 0 && (
-          <span className="flex items-center gap-1 px-1.5 py-0.5 bg-amber-500/15 text-amber-400 text-[10px] font-medium rounded" title="Uses your AI API key">
-            {costStr && selectedCount > 0 && <span>{costStr}</span>}
-            <span>AI</span>
+          <span className={`flex items-center gap-1 px-1.5 py-0.5 ${badgeColor} text-[10px] font-medium rounded`} title={useLocalAI ? 'Uses local AI (free)' : 'Uses your AI API key'}>
+            {badgeText && <span>{badgeText}</span>}
+            <span>{badgeLabel}</span>
           </span>
         )}
         {badge !== null && badge > 0 && (
@@ -259,9 +274,9 @@ export function ActionBar({
                         <div className="flex items-center gap-2">
                           <Type className={`w-4 h-4 text-blue-400 ${resolvingMetadata ? 'animate-pulse' : ''}`} />
                           <span className="text-sm text-white font-medium">Metadata Resolution</span>
-                          <span className="flex items-center gap-1 px-1.5 py-0.5 bg-amber-500/15 text-amber-400 text-[10px] font-medium rounded ml-auto">
-                            {selectedCount > 0 && <span>{formatCost(estimateCost(aiModel, selectedCount, 1))}</span>}
-                            <span>AI</span>
+                          <span className={`flex items-center gap-1 px-1.5 py-0.5 ${useLocalAI ? 'bg-green-500/15 text-green-400' : 'bg-amber-500/15 text-amber-400'} text-[10px] font-medium rounded ml-auto`}>
+                            {selectedCount > 0 && <span>{useLocalAI ? estimateLocalTime(selectedCount, 1) : formatCost(estimateCost(aiModel, selectedCount, 1))}</span>}
+                            <span>{useLocalAI ? 'Local' : 'AI'}</span>
                           </span>
                         </div>
                         <p className="text-[11px] text-gray-500 mt-0.5 ml-6">
@@ -280,9 +295,9 @@ export function ActionBar({
                         <div className="flex items-center gap-2">
                           <Sparkles className={`w-4 h-4 text-amber-400 ${classifying ? 'animate-pulse' : ''}`} />
                           <span className="text-sm text-white font-medium">Classification & Tagging</span>
-                          <span className="flex items-center gap-1 px-1.5 py-0.5 bg-amber-500/15 text-amber-400 text-[10px] font-medium rounded ml-auto">
-                            {selectedCount > 0 && <span>{formatCost(estimateCost(aiModel, selectedCount, 1))}</span>}
-                            <span>AI</span>
+                          <span className={`flex items-center gap-1 px-1.5 py-0.5 ${useLocalAI ? 'bg-green-500/15 text-green-400' : 'bg-amber-500/15 text-amber-400'} text-[10px] font-medium rounded ml-auto`}>
+                            {selectedCount > 0 && <span>{useLocalAI ? estimateLocalTime(selectedCount, 1) : formatCost(estimateCost(aiModel, selectedCount, 1))}</span>}
+                            <span>{useLocalAI ? 'Local' : 'AI'}</span>
                           </span>
                         </div>
                         <p className="text-[11px] text-gray-500 mt-0.5 ml-6">
@@ -301,9 +316,9 @@ export function ActionBar({
                         <div className="flex items-center gap-2">
                           <FileText className={`w-4 h-4 text-cyan-400 ${processingDescriptions ? 'animate-pulse' : ''}`} />
                           <span className="text-sm text-white font-medium">Description Processing</span>
-                          <span className="flex items-center gap-1 px-1.5 py-0.5 bg-amber-500/15 text-amber-400 text-[10px] font-medium rounded ml-auto">
-                            {selectedCount > 0 && <span>{formatCost(estimateCost(aiModel, selectedCount, 1))}</span>}
-                            <span>AI</span>
+                          <span className={`flex items-center gap-1 px-1.5 py-0.5 ${useLocalAI ? 'bg-green-500/15 text-green-400' : 'bg-amber-500/15 text-amber-400'} text-[10px] font-medium rounded ml-auto`}>
+                            {selectedCount > 0 && <span>{useLocalAI ? estimateLocalTime(selectedCount, 1) : formatCost(estimateCost(aiModel, selectedCount, 1))}</span>}
+                            <span>{useLocalAI ? 'Local' : 'AI'}</span>
                           </span>
                         </div>
                         <p className="text-[11px] text-gray-500 mt-0.5 ml-6">
