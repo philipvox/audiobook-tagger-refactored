@@ -164,7 +164,7 @@ pub async fn ollama_start() -> Result<String, String> {
     let models_dir = ollama_models_dir()?;
     std::fs::create_dir_all(&models_dir).map_err(|e| format!("Failed to create models dir: {}", e))?;
 
-    let child = tokio::process::Command::new(&binary)
+    let mut child = tokio::process::Command::new(&binary)
         .arg("serve")
         .env("OLLAMA_MODELS", models_dir.to_str().unwrap_or(""))
         .env("OLLAMA_HOST", format!("127.0.0.1:{}", OLLAMA_PORT))
@@ -173,14 +173,17 @@ pub async fn ollama_start() -> Result<String, String> {
         .spawn()
         .map_err(|e| format!("Failed to start Ollama: {}", e))?;
 
-    if let Some(pid) = child.id() {
-        if pid > 0 {
-            if let Ok(mut guard) = OLLAMA_PID.lock() {
-                *guard = Some(pid);
-            }
+    let pid = child.id().unwrap_or(0);
+    if pid > 0 {
+        if let Ok(mut guard) = OLLAMA_PID.lock() {
+            *guard = Some(pid);
         }
     }
-    let pid = child.id().unwrap_or(0);
+
+    // Spawn a background task to reap the child process and avoid zombies
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
 
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -234,7 +237,11 @@ pub async fn ollama_install() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     return Err("Windows: Please download Ollama from https://ollama.com/download and install manually.".to_string());
 
-    let resp = reqwest::get(url).await.map_err(|e| format!("Download failed: {}", e))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let resp = client.get(url).send().await.map_err(|e| format!("Download failed: {}", e))?;
     if !resp.status().is_success() {
         return Err(format!("Download failed with status {}", resp.status()));
     }

@@ -1119,9 +1119,9 @@ Return JSON: {"year":"2005"}`;
     const config = getLocalConfig();
     if (!config.abs_base_url || !args.groupId) return null;
     const base = config.abs_base_url.replace(/\/$/, '');
-    const url = `${base}/api/items/${args.groupId}/cover?token=${encodeURIComponent(config.abs_api_token)}`;
+    const url = `${base}/api/items/${args.groupId}/cover`;
     try {
-      const res = await proxyFetch(url, { method: 'GET' });
+      const res = await proxyFetch(url, { method: 'GET', headers: { 'Authorization': `Bearer ${config.abs_api_token}` } });
       if (!res.ok) return null;
       const blob = await res.blob();
       if (!blob.size) return null;
@@ -1314,7 +1314,7 @@ function absItemToBookGroup(item, absBaseUrl) {
       language: meta.language || null,
       isbn: meta.isbn || null,
       asin: meta.asin || null,
-      cover_url: item.id ? `${base}/api/items/${item.id}/cover?token=${encodeURIComponent(getLocalConfig().abs_api_token)}` : null,
+      cover_url: item.id ? `${base}/api/items/${item.id}/cover` : null,
       duration: item.media?.duration || null,
       added_at: item.addedAt || item.createdAt || 0,
     },

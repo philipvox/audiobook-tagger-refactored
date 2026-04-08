@@ -6,11 +6,11 @@ import { X, ArrowRight, ArrowLeft, Shield, Server, Key, Download, Check, Sparkle
 const ONBOARDING_KEY = 'audiobook_tagger_onboarding_completed';
 
 export function hasCompletedOnboarding() {
-  return localStorage.getItem(ONBOARDING_KEY) === 'true';
+  try { return localStorage.getItem(ONBOARDING_KEY) === 'true'; } catch { return false; }
 }
 
 export function markOnboardingComplete() {
-  localStorage.setItem(ONBOARDING_KEY, 'true');
+  try { localStorage.setItem(ONBOARDING_KEY, 'true'); } catch {}
 }
 
 // ============================================================================

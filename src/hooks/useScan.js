@@ -111,7 +111,7 @@ export function useScan() {
             covers_found: progress.covers_found || 0,
           });
         } catch (error) {
-          // Ignore polling errors
+          console.warn('Scan progress polling error:', error);
         }
       }, 1000);
 
@@ -302,7 +302,7 @@ export function useScan() {
             covers_found: progress.covers_found || 0,
           });
         } catch (error) {
-          // Ignore
+          console.warn('Rescan progress polling error:', error);
         }
       }, 1000);
 
