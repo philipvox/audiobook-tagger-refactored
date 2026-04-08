@@ -113,9 +113,9 @@ export function ActionBar({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const isProcessing = scanning || cleaningGenres || assigningTags || fixingDescriptions || fixingTitles || fixingAuthors || fixingYears || fixingSeries || lookingUpAge || lookingUpISBN || runningAll || generatingDna || classifying || resolvingMetadata || processingDescriptions || pushing || validating || analyzingSeries;
 
-  // Time estimate for local AI: ~15s per book per AI call (classification + DNA sequential)
+  // Time estimate for local AI: ~3s per book (batched 5 per prompt) + ~4s DNA per book
   const estimateLocalTime = (count, calls) => {
-    const totalSecs = count * calls * 15;
+    const totalSecs = count * calls * 4; // ~4s per book with batching
     if (totalSecs < 60) return `~${totalSecs}s`;
     if (totalSecs < 3600) return `~${Math.ceil(totalSecs / 60)}m`;
     const h = Math.floor(totalSecs / 3600);

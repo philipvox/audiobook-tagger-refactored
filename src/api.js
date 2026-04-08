@@ -4,7 +4,7 @@
 // Config lives in browser localStorage.
 
 import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
-import { buildMetadataPrompt, buildClassificationPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
+import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName } from './lib/normalize';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit, enforceTagPolicyWithDna } from './lib/genres';
 import { isTauri } from './lib/platform.js';
@@ -458,40 +458,85 @@ const HANDLERS = {
     const config = getLocalConfig();
     const books = args.books || [];
     const isLocalAI = !!(config.use_local_ai && config.ollama_model);
-    const CONCURRENCY = isLocalAI ? (config.local_concurrency || 1) : (config.cloud_concurrency || 5);
+    const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
+    const BATCH_SIZE = isLocalAI ? 5 : 1;
     const results = [];
-
     let completed = 0;
-    const processBook = async (book) => {
-      try {
-        emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: `Resolving: ${book.current_title}...` });
-        const prompt = buildMetadataPrompt(book);
-        const response = await callAI(config, SYSTEM_PROMPT, prompt, 1500);
-        const parsed = parseAIJson(response);
-        const title = parsed.title || book.current_title;
-        const author = parsed.author || book.current_author;
-        const subtitle = parsed.subtitle || null;
-        const series = parsed.series !== undefined ? parsed.series : null;
-        const sequence = parsed.sequence !== undefined ? parsed.sequence : null;
-        const narrator = parsed.narrator || null;
-        const changed = title !== book.current_title || author !== book.current_author
-          || subtitle !== (book.current_subtitle || null)
-          || series !== (book.current_series || null)
-          || sequence !== (book.current_sequence || null);
-        completed++;
-        emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
-        return { id: book.id, title, author, subtitle, series, sequence, narrator, confidence: parsed.confidence || 75, changed };
-      } catch (err) {
-        completed++;
-        emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
-        return { id: book.id, error: err.message, changed: false };
-      }
+
+    // Helper: build result from parsed metadata
+    const buildMetaResult = (book, parsed) => {
+      const title = parsed.title || book.current_title;
+      const author = parsed.author || book.current_author;
+      const subtitle = parsed.subtitle || null;
+      const series = parsed.series !== undefined ? parsed.series : null;
+      const sequence = parsed.sequence !== undefined ? parsed.sequence : null;
+      const narrator = parsed.narrator || null;
+      const changed = title !== book.current_title || author !== book.current_author
+        || subtitle !== (book.current_subtitle || null)
+        || series !== (book.current_series || null)
+        || sequence !== (book.current_sequence || null);
+      return { id: book.id, title, author, subtitle, series, sequence, narrator, confidence: parsed.confidence || 75, changed };
     };
 
-    for (let i = 0; i < books.length; i += CONCURRENCY) {
-      const chunk = books.slice(i, i + CONCURRENCY);
-      results.push(...await Promise.all(chunk.map(processBook)));
+    if (isLocalAI && books.length > 1) {
+      // LOCAL AI: Batch 5 books per prompt
+      for (let i = 0; i < books.length; i += BATCH_SIZE) {
+        const batch = books.slice(i, i + BATCH_SIZE);
+        const batchNames = batch.map(b => b.current_title).join(', ');
+        emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: `Resolving: ${batchNames}` });
+
+        try {
+          const batchPrompt = buildBatchMetadataPrompt(batch);
+          const response = await callAI(config, SYSTEM_PROMPT, batchPrompt, BATCH_SIZE * 200);
+          let parsedArray = parseAIJson(response);
+          if (!Array.isArray(parsedArray)) parsedArray = [parsedArray];
+
+          for (let j = 0; j < batch.length; j++) {
+            const book = batch[j];
+            const parsed = parsedArray[j] || parsedArray.find(p => p.id === book.id) || {};
+            results.push(buildMetaResult(book, parsed));
+            completed++;
+            emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
+          }
+        } catch (err) {
+          // Batch failed — fall back to individual
+          for (const book of batch) {
+            try {
+              const prompt = buildMetadataPrompt(book);
+              const response = await callAI(config, SYSTEM_PROMPT, prompt, 1500);
+              results.push(buildMetaResult(book, parseAIJson(response)));
+            } catch (e) {
+              results.push({ id: book.id, error: e.message, changed: false });
+            }
+            completed++;
+            emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
+          }
+        }
+      }
+    } else {
+      // CLOUD AI or single book: individual processing with concurrency
+      const processBook = async (book) => {
+        try {
+          emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: `Resolving: ${book.current_title}...` });
+          const prompt = buildMetadataPrompt(book);
+          const response = await callAI(config, SYSTEM_PROMPT, prompt, 1500);
+          const result = buildMetaResult(book, parseAIJson(response));
+          completed++;
+          emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
+          return result;
+        } catch (err) {
+          completed++;
+          emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
+          return { id: book.id, error: err.message, changed: false };
+        }
+      };
+
+      for (let i = 0; i < books.length; i += CONCURRENCY) {
+        const chunk = books.slice(i, i + CONCURRENCY);
+        results.push(...await Promise.all(chunk.map(processBook)));
+      }
     }
+
     const total_processed = results.filter(r => !r.error).length;
     const total_failed = results.filter(r => r.error).length;
     return { results, total_processed, total_failed };
@@ -531,90 +576,133 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     return parseAIJson(response);
   },
 
-  // === GPT: Classification (genres + tags + age + DNA + themes/tropes — matching desktop classify_book) ===
+  // === GPT: Classification (genres + tags + age + DNA + themes/tropes) ===
   classify_books_batch: async (args) => {
     const config = getLocalConfig();
     const books = args.books || [];
     const isLocal = !!(config.use_local_ai && config.ollama_model);
     const dnaEnabled = (args.dnaEnabled !== false) && !(isLocal && config.local_skip_dna);
-    const CONCURRENCY = isLocal ? (config.local_concurrency || 1) : (config.cloud_concurrency || 5);
+    const CONCURRENCY = isLocal ? 1 : (config.cloud_concurrency || 5);
+    const BATCH_SIZE = isLocal ? 5 : 1; // Local: batch 5 books per prompt
     const results = [];
 
-    let bookIndex = 0;
-    const processBook = async (book) => {
-      try {
-        let response, dnaResponse = null;
-        bookIndex++;
+    // Helper: parse age_rating into tags
+    const parseAgeTags = (ageRating) => {
+      const age_tags = [];
+      if (ageRating && typeof ageRating === 'object') {
+        age_tags.push(ageRating.intended_for_kids === true ? 'for-kids' : 'not-for-kids');
+        const catMap = { "Children's 0-2": 'age-childrens', "Children's 3-5": 'age-childrens', "Children's 6-8": 'age-childrens', "Children's 9-12": 'age-childrens', 'Teen 13-17': 'age-teens', 'Young Adult': 'age-young-adult', 'Adult': 'age-adult', 'Middle Grade': 'age-middle-grade' };
+        if (catMap[ageRating.age_category]) age_tags.push(catMap[ageRating.age_category]);
+        const ratingMap = { 'G': 'rated-g', 'PG': 'rated-pg', 'PG-13': 'rated-pg13', 'R': 'rated-r', 'X': 'rated-x' };
+        if (ratingMap[ageRating.content_rating]) age_tags.push(ratingMap[ageRating.content_rating]);
+        const recMap = { "Children's 0-2": 'age-rec-0', "Children's 3-5": 'age-rec-3', "Children's 6-8": 'age-rec-6', "Children's 9-12": 'age-rec-10', 'Teen 13-17': 'age-rec-14', 'Young Adult': 'age-rec-16', 'Adult': 'age-rec-18', 'Middle Grade': 'age-rec-8' };
+        if (recMap[ageRating.age_category]) age_tags.push(recMap[ageRating.age_category]);
+      } else if (typeof ageRating === 'number') {
+        if (ageRating <= 6) age_tags.push('age-childrens', 'for-kids', 'rated-g', 'age-rec-0');
+        else if (ageRating <= 9) age_tags.push('age-childrens', 'for-kids', 'rated-g', 'age-rec-6');
+        else if (ageRating <= 12) age_tags.push('age-middle-grade', 'for-kids', 'rated-pg', 'age-rec-10');
+        else if (ageRating <= 15) age_tags.push('age-teens', 'for-teens', 'rated-pg13', 'age-rec-14');
+        else if (ageRating <= 17) age_tags.push('age-young-adult', 'for-ya', 'rated-pg13', 'age-rec-16');
+        else age_tags.push('age-adult', 'not-for-kids', 'rated-r', 'age-rec-18');
+      }
+      return age_tags;
+    };
 
-        if (isLocal) {
-          // Local AI: sequential — avoids GPU contention and model re-loading
-          const steps = dnaEnabled ? 2 : 1;
-          emitEvent('batch-progress', { call_type: 'classify', current: bookIndex - 1, total: books.length, title: `Classifying: ${book.title}...`, substep: `Step 1/${steps}: Classification` });
-          response = await callAI(config, getSystemPrompt(config),
-            buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
-          if (dnaEnabled) {
-            emitEvent('batch-progress', { call_type: 'classify', current: bookIndex - 0.5, total: books.length, title: `DNA: ${book.title}...`, substep: `Step 2/${steps}: DNA Fingerprint` });
-            dnaResponse = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null);
+    // Helper: build result from parsed classification
+    const buildResult = (book, parsed, dna_tags = []) => ({
+      id: book.id, success: true,
+      genres: parsed.genres || [], tags: parsed.tags || [],
+      age_tags: parseAgeTags(parsed.age_rating), dna_tags,
+      themes: parsed.themes || [], tropes: parsed.tropes || [],
+      age_category: parsed.age_rating?.age_category || null,
+      content_rating: parsed.age_rating?.content_rating || null,
+      intended_for_kids: parsed.age_rating?.intended_for_kids || false,
+    });
+
+    if (isLocal) {
+      // LOCAL AI: Batch multiple books per prompt to reduce prompt eval overhead
+      let completed = 0;
+      for (let i = 0; i < books.length; i += BATCH_SIZE) {
+        const batch = books.slice(i, i + BATCH_SIZE);
+        const batchNames = batch.map(b => b.title).join(', ');
+
+        try {
+          // Step 1: Batched classification
+          emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: `Classifying: ${batchNames}` });
+          const batchPrompt = buildBatchClassificationPrompt(batch, config.custom_classification_rules || null);
+          const response = await callAI(config, getSystemPrompt(config), batchPrompt, BATCH_SIZE * 400);
+          let parsedArray;
+          try {
+            parsedArray = parseAIJson(response);
+            if (!Array.isArray(parsedArray)) parsedArray = [parsedArray]; // Single book fallback
+          } catch {
+            // If batch parse fails, fall back to individual processing
+            for (const book of batch) {
+              try {
+                const singleResp = await callAI(config, getSystemPrompt(config),
+                  buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
+                const parsed = parseAIJson(singleResp);
+                results.push(buildResult(book, parsed));
+              } catch (err) {
+                results.push({ id: book.id, success: false, error: err.message });
+              }
+              completed++;
+              emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
+            }
+            continue;
           }
-          emitEvent('batch-progress', { call_type: 'classify', current: bookIndex, total: books.length, title: book.title });
-        } else {
-          // Cloud AI: parallel — APIs handle concurrent requests well
-          const [r, d] = await Promise.all([
+
+          // Step 2: DNA for each book in batch (sequential)
+          for (let j = 0; j < batch.length; j++) {
+            const book = batch[j];
+            const parsed = parsedArray[j] || parsedArray.find(p => p.id === book.id) || {};
+            let dna_tags = [];
+
+            if (dnaEnabled) {
+              emitEvent('batch-progress', { call_type: 'classify', current: completed + 0.5, total: books.length, title: `DNA: ${book.title}` });
+              try {
+                const dnaResp = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500);
+                dna_tags = convertDnaToTags(parseAIJson(dnaResp));
+              } catch {}
+            }
+
+            results.push(buildResult(book, parsed, dna_tags));
+            completed++;
+            emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
+          }
+        } catch (err) {
+          // Entire batch failed
+          for (const book of batch) {
+            results.push({ id: book.id, success: false, error: err.message });
+            completed++;
+          }
+          emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: 'Error' });
+        }
+      }
+    } else {
+      // CLOUD AI: Process books individually with high concurrency (parallel)
+      const processBook = async (book) => {
+        try {
+          const [response, dnaResponse] = await Promise.all([
             callAI(config, getSystemPrompt(config),
               buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000),
             dnaEnabled
               ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null)
               : Promise.resolve(null),
           ]);
-          response = r;
-          dnaResponse = d;
+          const parsed = parseAIJson(response);
+          let dna_tags = [];
+          if (dnaResponse) { try { dna_tags = convertDnaToTags(parseAIJson(dnaResponse)); } catch {} }
+          return buildResult(book, parsed, dna_tags);
+        } catch (err) {
+          return { id: book.id, success: false, error: err.message };
         }
-        const parsed = parseAIJson(response);
+      };
 
-        const age_tags = [];
-        const ageRating = parsed.age_rating;
-        if (ageRating && typeof ageRating === 'object') {
-          if (ageRating.intended_for_kids === true) age_tags.push('for-kids');
-          else age_tags.push('not-for-kids');
-          const catMap = { "Children's 0-2": 'age-childrens', "Children's 3-5": 'age-childrens', "Children's 6-8": 'age-childrens', "Children's 9-12": 'age-childrens', 'Teen 13-17': 'age-teens', 'Young Adult': 'age-young-adult', 'Adult': 'age-adult', 'Middle Grade': 'age-middle-grade' };
-          if (catMap[ageRating.age_category]) age_tags.push(catMap[ageRating.age_category]);
-          const ratingMap = { 'G': 'rated-g', 'PG': 'rated-pg', 'PG-13': 'rated-pg13', 'R': 'rated-r', 'X': 'rated-x' };
-          if (ratingMap[ageRating.content_rating]) age_tags.push(ratingMap[ageRating.content_rating]);
-          const recMap = { "Children's 0-2": 'age-rec-0', "Children's 3-5": 'age-rec-3', "Children's 6-8": 'age-rec-6', "Children's 9-12": 'age-rec-10', 'Teen 13-17': 'age-rec-14', 'Young Adult': 'age-rec-16', 'Adult': 'age-rec-18', 'Middle Grade': 'age-rec-8' };
-          if (recMap[ageRating.age_category]) age_tags.push(recMap[ageRating.age_category]);
-        } else if (typeof ageRating === 'number') {
-          if (ageRating <= 6) { age_tags.push('age-childrens', 'for-kids', 'rated-g', 'age-rec-0'); }
-          else if (ageRating <= 9) { age_tags.push('age-childrens', 'for-kids', 'rated-g', 'age-rec-6'); }
-          else if (ageRating <= 12) { age_tags.push('age-middle-grade', 'for-kids', 'rated-pg', 'age-rec-10'); }
-          else if (ageRating <= 15) { age_tags.push('age-teens', 'for-teens', 'rated-pg13', 'age-rec-14'); }
-          else if (ageRating <= 17) { age_tags.push('age-young-adult', 'for-ya', 'rated-pg13', 'age-rec-16'); }
-          else { age_tags.push('age-adult', 'not-for-kids', 'rated-r', 'age-rec-18'); }
-        }
-
-        let dna_tags = [];
-        if (dnaResponse) {
-          try { dna_tags = convertDnaToTags(parseAIJson(dnaResponse)); } catch {}
-        }
-
-        return {
-          id: book.id, success: true,
-          genres: parsed.genres || [], tags: parsed.tags || [],
-          age_tags, dna_tags,
-          themes: parsed.themes || [], tropes: parsed.tropes || [],
-          age_category: ageRating?.age_category || null,
-          content_rating: ageRating?.content_rating || null,
-          intended_for_kids: ageRating?.intended_for_kids || false,
-        };
-      } catch (err) {
-        return { id: book.id, success: false, error: err.message };
+      for (let i = 0; i < books.length; i += CONCURRENCY) {
+        const chunk = books.slice(i, i + CONCURRENCY);
+        results.push(...await Promise.all(chunk.map(processBook)));
       }
-    };
-
-    // Process in batches of CONCURRENCY
-    for (let i = 0; i < books.length; i += CONCURRENCY) {
-      const chunk = books.slice(i, i + CONCURRENCY);
-      const chunkResults = await Promise.all(chunk.map(processBook));
-      results.push(...chunkResults);
     }
 
     const total_processed = results.filter(r => r.success).length;

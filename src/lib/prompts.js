@@ -252,6 +252,64 @@ Return ONLY valid JSON:
 }
 
 /**
+ * Build a BATCHED classification prompt for multiple books (local AI optimization).
+ * Shares instructions once, reduces prompt eval overhead by ~4x.
+ */
+export function buildBatchClassificationPrompt(books, customInstructions = null) {
+  const instructions = customInstructions || DEFAULT_CLASSIFICATION_INSTRUCTIONS;
+
+  let booksContext = '';
+  books.forEach((book, i) => {
+    booksContext += `\n--- BOOK ${i + 1} (id: ${book.id}) ---\n`;
+    booksContext += `Title: ${safe(book.title)}`;
+    if (book.author) booksContext += `\nAuthor: ${safe(book.author)}`;
+    if (book.description) booksContext += `\nDescription: ${safe(book.description.substring(0, 300))}`;
+    if (book.narrator) booksContext += `\nNarrator: ${safe(book.narrator)}`;
+    if (book.series) booksContext += `\nSeries: ${safe(book.series)}`;
+    if (book.published_year || book.year) booksContext += `\nYear: ${book.published_year || book.year}`;
+    booksContext += '\n';
+  });
+
+  return `Classify these ${books.length} audiobooks. Return a JSON array with one object per book.
+
+${booksContext}
+
+${instructions}
+
+Return ONLY a JSON array — one object per book in order:
+[{"id":"book-id","genres":["Genre1"],"tags":["tag-1"],"age_rating":{"intended_for_kids":false,"age_category":"Adult","content_rating":"PG-13"},"themes":["Theme1"],"tropes":["Trope1"]},...]`;
+}
+
+/**
+ * Build a BATCHED metadata resolution prompt for multiple books (local AI optimization).
+ */
+export function buildBatchMetadataPrompt(books) {
+  let booksContext = '';
+  books.forEach((book, i) => {
+    booksContext += `\n--- BOOK ${i + 1} (id: ${book.id}) ---\n`;
+    if (book.filename) booksContext += `Filename: ${safe(book.filename)}\n`;
+    if (book.folder_name) booksContext += `Folder: ${safe(book.folder_name)}\n`;
+    booksContext += `Title: ${safe(book.current_title)}\n`;
+    booksContext += `Author: ${safe(book.current_author)}\n`;
+    if (book.current_series) booksContext += `Series: ${safe(book.current_series)}\n`;
+    if (book.current_sequence) booksContext += `Sequence: ${safe(book.current_sequence)}\n`;
+  });
+
+  return `Resolve metadata for these ${books.length} audiobooks. Fix titles, authors, series, and sequences.
+
+${booksContext}
+
+RULES:
+- Clean titles: remove "01 -" prefixes, "(Unabridged)", quality markers
+- Use canonical author names: "J.R.R. Tolkien" not "JRR Tolkien"
+- Identify series and sequence numbers from folder structure or knowledge
+- If narrator is embedded in filename ("read by X"), extract it
+
+Return ONLY a JSON array — one object per book in order:
+[{"id":"book-id","title":"Clean Title","author":"Author Name","subtitle":null,"series":null,"sequence":null,"narrator":null,"confidence":85},...]`;
+}
+
+/**
  * Build the description processing prompt (Call C).
  * @param {object} book - Book metadata
  * @param {string|null} customValidateRules - Override validate rules
