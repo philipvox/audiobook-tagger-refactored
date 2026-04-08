@@ -19,8 +19,9 @@ pub fn run() {
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let _ = rt.block_on(ollama::ollama_stop());
+                if let Ok(rt) = tokio::runtime::Runtime::new() {
+                    let _ = rt.block_on(ollama::ollama_stop());
+                }
             }
         })
         .run(tauri::generate_context!())
