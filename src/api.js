@@ -634,7 +634,8 @@ If it's part of a series, fill in the name and book number. If standalone, use n
           let parsedArray;
           try {
             parsedArray = parseAIJson(response);
-            if (!Array.isArray(parsedArray)) parsedArray = [parsedArray]; // Single book fallback
+            if (!Array.isArray(parsedArray)) parsedArray = [parsedArray];
+            console.log(`[Batch] Classification returned ${parsedArray.length} results for ${batch.length} books. Keys: ${parsedArray[0] ? Object.keys(parsedArray[0]).join(',') : 'none'}`);
           } catch {
             // If batch parse fails, fall back to individual processing
             for (const book of batch) {
@@ -653,9 +654,14 @@ If it's part of a series, fill in the name and book number. If standalone, use n
           }
 
           // Step 2: DNA for each book in batch (sequential)
+          // Use positional matching — AI returns array in same order as input
           for (let j = 0; j < batch.length; j++) {
             const book = batch[j];
-            const parsed = parsedArray[j] || parsedArray.find(p => p.id === book.id) || {};
+            const parsed = parsedArray[j] || {};
+            // Log if we got empty results for debugging
+            if (!parsed.genres?.length && !parsed.tags?.length) {
+              console.warn(`[Batch] Empty result for book ${j} "${book.title}" — parsedArray has ${parsedArray.length} items`);
+            }
             let dna_tags = [];
 
             if (dnaEnabled) {
