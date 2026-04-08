@@ -67,7 +67,7 @@ const initialState = {
   active: {},
   progress: {},
   forceFresh: false,
-  dnaEnabled: true,
+  dnaEnabled: false,
 };
 
 export function useBatchOperations() {
