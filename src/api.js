@@ -715,7 +715,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const config = getLocalConfig();
     const books = args.books || [];
     const isLocalAI = !!(config.use_local_ai && config.ollama_model);
-    const CONCURRENCY = isLocalAI ? (config.local_concurrency || 1) : (config.cloud_concurrency || 5);
+    const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
     const results = [];
 
     const processBook = async (book) => {
@@ -742,7 +742,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const config = getLocalConfig();
     const books = args.books || args.request?.books || [];
     const isLocalAI = !!(config.use_local_ai && config.ollama_model);
-    const CONCURRENCY = isLocalAI ? (config.local_concurrency || 1) : (config.cloud_concurrency || 5);
+    const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
     const results = [];
 
     const processBook = async (book) => {
