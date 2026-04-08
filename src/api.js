@@ -49,7 +49,7 @@ const DEFAULT_CONFIG = {
   ollama_model: null,
   local_concurrency: 2,
   cloud_concurrency: 5,
-  local_skip_dna: false,
+  local_skip_dna: true,
   custom_providers: [],
 };
 
