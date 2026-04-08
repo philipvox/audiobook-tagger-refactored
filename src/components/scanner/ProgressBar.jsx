@@ -988,8 +988,13 @@ export function TopProgressBar({ type, progress }) {
 
   const current = progress.current || 0;
   const total = progress.total;
-  const pct = isComplete ? 100 : Math.round((current / total) * 100);
+  const realPct = isComplete ? 100 : Math.round((current / total) * 100);
   const booksLeft = total - current;
+
+  // Fake progress: smoothly crawl toward 90% based on elapsed time when no real progress yet
+  // Uses log curve so it starts fast then slows down — feels natural
+  const fakeProgress = isComplete ? 100 : Math.min(90, Math.round(30 * Math.log(1 + elapsed / 3)));
+  const pct = isComplete ? 100 : Math.max(realPct, fakeProgress);
 
   // Compute ETA from actual throughput: (elapsed / booksCompleted) * booksLeft
   // Use a smoothed rate once we have at least 1 book done
@@ -1041,7 +1046,7 @@ export function TopProgressBar({ type, progress }) {
                 {current === 0 && (
                   <>
                     <span className="text-gray-600">|</span>
-                    <span>Estimating...</span>
+                    <span>Working...</span>
                   </>
                 )}
               </>
@@ -1050,14 +1055,10 @@ export function TopProgressBar({ type, progress }) {
         </div>
 
         <div className="w-full bg-gray-700 rounded-full h-2.5">
-          {current === 0 && !isComplete ? (
-            <div className={`bg-gradient-to-r ${cfg.gradient} h-2.5 rounded-full animate-pulse`} style={{ width: '100%', opacity: 0.4 }}></div>
-          ) : (
-            <div
-              className={`bg-gradient-to-r ${cfg.gradient} h-2.5 rounded-full transition-all duration-300`}
-              style={{ width: `${Math.max(2, pct)}%` }}
-            ></div>
-          )}
+          <div
+            className={`bg-gradient-to-r ${cfg.gradient} h-2.5 rounded-full transition-all duration-1000 ease-out`}
+            style={{ width: `${Math.max(2, pct)}%` }}
+          ></div>
         </div>
 
         {progress.currentBook && !isComplete && (
