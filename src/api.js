@@ -489,7 +489,11 @@ const HANDLERS = {
           const batchPrompt = buildBatchMetadataPrompt(batch);
           const response = await callAI(config, SYSTEM_PROMPT, batchPrompt, BATCH_SIZE * 200);
           let parsedArray = parseAIJson(response);
-          if (!Array.isArray(parsedArray)) parsedArray = [parsedArray];
+          if (!Array.isArray(parsedArray)) {
+            const wrapped = parsedArray.books || parsedArray.results || parsedArray.metadata || parsedArray.data;
+            if (Array.isArray(wrapped)) parsedArray = wrapped;
+            else parsedArray = [parsedArray];
+          }
 
           for (let j = 0; j < batch.length; j++) {
             const book = batch[j];
@@ -634,7 +638,15 @@ If it's part of a series, fill in the name and book number. If standalone, use n
           let parsedArray;
           try {
             parsedArray = parseAIJson(response);
-            if (!Array.isArray(parsedArray)) parsedArray = [parsedArray];
+            // AI might wrap array in an object like {"books": [...]} or {"results": [...]}
+            if (!Array.isArray(parsedArray)) {
+              const wrapped = parsedArray.books || parsedArray.results || parsedArray.classifications || parsedArray.data;
+              if (Array.isArray(wrapped)) {
+                parsedArray = wrapped;
+              } else {
+                parsedArray = [parsedArray];
+              }
+            }
             console.log(`[Batch] Classification returned ${parsedArray.length} results for ${batch.length} books. Keys: ${parsedArray[0] ? Object.keys(parsedArray[0]).join(',') : 'none'}`);
           } catch {
             // If batch parse fails, fall back to individual processing
