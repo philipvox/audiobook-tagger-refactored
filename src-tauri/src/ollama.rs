@@ -66,10 +66,50 @@ async fn is_running() -> bool {
         .unwrap_or(false)
 }
 
+/// Find system-installed Ollama binary via PATH lookup
+fn find_system_ollama() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("which")
+            .arg("ollama")
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("where")
+            .arg("ollama")
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).lines().next()?.trim().to_string();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+    None
+}
+
+/// Find the best available Ollama binary: bundled first, then system PATH
+fn find_best_binary() -> Option<PathBuf> {
+    if let Ok(bundled) = ollama_binary_path() {
+        if bundled.exists() {
+            return Some(bundled);
+        }
+    }
+    find_system_ollama()
+}
+
 #[tauri::command]
 pub async fn ollama_get_status() -> Result<OllamaStatus, String> {
-    let binary = ollama_binary_path()?;
-    let installed = binary.exists();
+    let installed = find_best_binary().is_some();
     let running = is_running().await;
     let mut models = Vec::new();
     let mut version = None;
@@ -93,7 +133,7 @@ pub async fn ollama_get_status() -> Result<OllamaStatus, String> {
         }
     }
 
-    Ok(OllamaStatus { installed, running, models, version })
+    Ok(OllamaStatus { installed: installed || running, running, models, version })
 }
 
 #[tauri::command]
@@ -119,10 +159,8 @@ pub async fn ollama_start() -> Result<String, String> {
     if is_running().await {
         return Ok("Ollama is already running".to_string());
     }
-    let binary = ollama_binary_path()?;
-    if !binary.exists() {
-        return Err("Ollama is not installed. Install it first.".to_string());
-    }
+    let binary = find_best_binary()
+        .ok_or_else(|| "Ollama is not installed. Install it via the button above, or install Ollama system-wide from https://ollama.com/download".to_string())?;
     let models_dir = ollama_models_dir()?;
     std::fs::create_dir_all(&models_dir).map_err(|e| format!("Failed to create models dir: {}", e))?;
 
@@ -184,9 +222,9 @@ pub async fn ollama_install() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     let url = "https://ollama.com/download/Ollama-darwin.zip";
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    let url = "https://ollama.com/download/ollama-linux-amd64.tgz";
+    let url = "https://ollama.com/download/ollama-linux-amd64.tar.zst";
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    let url = "https://ollama.com/download/ollama-linux-arm64.tgz";
+    let url = "https://ollama.com/download/ollama-linux-arm64.tar.zst";
     #[cfg(target_os = "windows")]
     return Err("Windows: Please download Ollama from https://ollama.com/download and install manually.".to_string());
 
@@ -239,12 +277,12 @@ fn install_from_bytes(bytes: &[u8], binary_path: &PathBuf) -> Result<(), String>
 #[cfg(target_os = "linux")]
 fn install_from_bytes(bytes: &[u8], binary_path: &PathBuf) -> Result<(), String> {
     let temp_dir = tempfile::tempdir().map_err(|e| format!("Temp dir error: {}", e))?;
-    let tgz_path = temp_dir.path().join("ollama.tgz");
-    std::fs::write(&tgz_path, bytes).map_err(|e| format!("Write error: {}", e))?;
+    let archive_path = temp_dir.path().join("ollama.tar.zst");
+    std::fs::write(&archive_path, bytes).map_err(|e| format!("Write error: {}", e))?;
 
     let output = std::process::Command::new("tar")
-        .args(["xzf"])
-        .arg(tgz_path.to_str().unwrap())
+        .args(["xf"])
+        .arg(archive_path.to_str().unwrap())
         .arg("-C")
         .arg(temp_dir.path().to_str().unwrap())
         .output()

@@ -461,8 +461,10 @@ const HANDLERS = {
     const CONCURRENCY = isLocalAI ? (config.local_concurrency || 1) : (config.cloud_concurrency || 5);
     const results = [];
 
+    let completed = 0;
     const processBook = async (book) => {
       try {
+        emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: `Resolving: ${book.current_title}...` });
         const prompt = buildMetadataPrompt(book);
         const response = await callAI(config, SYSTEM_PROMPT, prompt, 1500);
         const parsed = parseAIJson(response);
@@ -476,8 +478,12 @@ const HANDLERS = {
           || subtitle !== (book.current_subtitle || null)
           || series !== (book.current_series || null)
           || sequence !== (book.current_sequence || null);
+        completed++;
+        emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
         return { id: book.id, title, author, subtitle, series, sequence, narrator, confidence: parsed.confidence || 75, changed };
       } catch (err) {
+        completed++;
+        emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
         return { id: book.id, error: err.message, changed: false };
       }
     };
