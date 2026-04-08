@@ -225,6 +225,12 @@ pub async fn ollama_stop() -> Result<String, String> {
 #[tauri::command]
 pub async fn ollama_install() -> Result<String, String> {
     let dir = ollama_dir()?;
+    // Windows: bundled install not supported — tell user to install manually
+    #[cfg(target_os = "windows")]
+    return Err("Windows: Please download Ollama from https://ollama.com/download and install manually.".to_string());
+
+    #[cfg(not(target_os = "windows"))]
+    {
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create ollama dir: {}", e))?;
     let binary_path = ollama_binary_path()?;
 
@@ -234,8 +240,6 @@ pub async fn ollama_install() -> Result<String, String> {
     let url = "https://ollama.com/download/ollama-linux-amd64.tar.zst";
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     let url = "https://ollama.com/download/ollama-linux-arm64.tar.zst";
-    #[cfg(target_os = "windows")]
-    return Err("Windows: Please download Ollama from https://ollama.com/download and install manually.".to_string());
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -258,6 +262,7 @@ pub async fn ollama_install() -> Result<String, String> {
 
     std::fs::create_dir_all(ollama_models_dir()?).map_err(|e| format!("Failed to create models dir: {}", e))?;
     Ok("Ollama installed successfully".to_string())
+    } // end #[cfg(not(target_os = "windows"))]
 }
 
 #[cfg(target_os = "macos")]
