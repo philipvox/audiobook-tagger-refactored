@@ -58,9 +58,9 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS: skip signing for CI builds (users can run unsigned)
-          APPLE_SIGNING_IDENTITY: ''
-          TAURI_SIGNING_PRIVATE_KEY: ''
+          # macOS: skip code signing for CI builds
+          APPLE_SIGNING_IDENTITY: '-'
+          CI: true
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Audiobook Tagger ${{ github.ref_name }}'
