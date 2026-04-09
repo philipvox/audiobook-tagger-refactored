@@ -242,7 +242,7 @@ export function SetupWizard({ onClose }) {
                 label="Server URL"
                 value={localConfig.abs_base_url}
                 onChange={(v) => { setLocalConfig({ ...localConfig, abs_base_url: v }); setConnectionStatus(null); }}
-                placeholder="https://your-abs-server.com"
+                placeholder="http://192.168.1.100:13378"
               />
               <WizardInput
                 label="API Token"

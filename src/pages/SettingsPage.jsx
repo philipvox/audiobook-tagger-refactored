@@ -22,7 +22,7 @@ const PRESETS = {
   extreme: { label: 'Extreme', multiplier: 4.0 },
 };
 
-const BASE_VALUES = { metadata: 15, super_scanner: 5, json_writes: 100, abs_push: 60, file_scan: 10 };
+const BASE_VALUES = { metadata: 15, super_scanner: 5, json_writes: 100, abs_push: 5, file_scan: 10 };
 const getPresetValue = (preset, op) => Math.max(1, Math.round(BASE_VALUES[op] * (PRESETS[preset]?.multiplier || 1.0)));
 
 // Pricing in USD per 1M tokens [input, output]
@@ -115,20 +115,17 @@ const PromptEditor = ({ label, subtitle, value, defaultValue, onChange, rows = 6
   );
 };
 
-/** Validate ABS server URL — must be HTTPS (or localhost for dev). */
+/** Validate ABS server URL format. Desktop app supports both HTTP and HTTPS. */
 function validateAbsUrl(url) {
   if (!url || !url.trim()) return null; // empty is OK (not configured yet)
   try {
     const parsed = new URL(url.trim());
-    if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
-      return 'Server URL must use HTTPS (except localhost for local development)';
-    }
-    if (parsed.pathname !== '/' && parsed.pathname !== '') {
-      // Allow trailing slash but warn about paths
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return 'Server URL must start with http:// or https://';
     }
     return null; // valid
   } catch {
-    return 'Invalid URL format. Example: https://your-abs-server.com';
+    return 'Invalid URL format. Example: http://192.168.1.100:13378';
   }
 }
 
@@ -460,7 +457,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
               label="Server URL"
               value={localConfig.abs_base_url}
               onChange={(v) => setLocalConfig({ ...localConfig, abs_base_url: v })}
-              placeholder="https://your-abs-server.com"
+              placeholder="http://192.168.1.100:13378"
             />
             <div>
               <div className="flex items-center justify-between mb-1.5">
@@ -740,6 +737,28 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                     </select>
                     <p className="text-xs text-gray-600 mt-1">Cloud APIs handle parallel requests well. Higher = faster batch processing.</p>
                   </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-sm text-gray-500">ABS Push Workers</label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={localConfig.concurrency_abs_push || 5}
+                      onChange={(e) => { const v = parseInt(e.target.value); if (v > 0) setLocalConfig({ ...localConfig, concurrency_abs_push: v }); }}
+                      className="w-16 px-2 py-1 bg-neutral-800 border border-neutral-700 rounded text-sm text-white text-center focus:outline-none"
+                    />
+                  </div>
+                  <input
+                    type="range"
+                    min={1}
+                    max={50}
+                    value={Math.min(localConfig.concurrency_abs_push || 5, 50)}
+                    onChange={(e) => setLocalConfig({ ...localConfig, concurrency_abs_push: parseInt(e.target.value) })}
+                    className="w-full h-1.5 bg-neutral-700 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full"
+                  />
+                  <p className="text-xs text-gray-600 mt-1">Concurrent requests when pushing to ABS. Default 5. Use 1-2 for NAS.</p>
                 </div>
 
                 <div className="flex items-center justify-between">
