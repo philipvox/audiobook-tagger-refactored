@@ -66,10 +66,18 @@ async fn is_running() -> bool {
         .unwrap_or(false)
 }
 
-/// Find system-installed Ollama binary via PATH lookup
+/// Find system-installed Ollama binary via PATH lookup and common install locations
 fn find_system_ollama() -> Option<PathBuf> {
     #[cfg(unix)]
     {
+        // Check common install paths first (AppImage/Flatpak may have limited PATH)
+        for path in &["/usr/local/bin/ollama", "/usr/bin/ollama", "/snap/bin/ollama"] {
+            let p = PathBuf::from(path);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        // Fall back to PATH lookup
         let output = std::process::Command::new("which")
             .arg("ollama")
             .output()
