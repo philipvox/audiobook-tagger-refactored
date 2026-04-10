@@ -1,6 +1,7 @@
 // src/context/AppContext.jsx
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { callBackend, subscribe } from '../api';
+import { isTauri } from '../lib/platform.js';
 
 const AppContext = createContext(null);
 
@@ -36,6 +37,29 @@ export function AppProvider({ children }) {
   useEffect(() => {
     loadConfig();
   }, []);
+
+  // Auto-detect system Ollama on startup (Tauri only)
+  // If no AI is configured and Ollama is running with models, auto-enable local AI
+  useEffect(() => {
+    if (!isTauri() || !config || isLoadingConfig) return;
+    const hasAnyAI = config.openai_api_key || config.anthropic_api_key || config.use_local_ai;
+    if (hasAnyAI) return;
+
+    (async () => {
+      try {
+        const status = await callBackend('ollama_get_status');
+        if (status?.running && status?.models?.length > 0) {
+          const model = status.models[0].name;
+          const newConfig = { ...config, use_local_ai: true, ollama_model: model };
+          await callBackend('save_config', { config: newConfig });
+          setConfig(newConfig);
+          console.log(`Auto-detected Ollama with model "${model}" — enabled Local AI`);
+        }
+      } catch (e) {
+        // Silent — auto-detection is best-effort
+      }
+    })();
+  }, [config, isLoadingConfig]);
 
   // Listen for write progress events
   useEffect(() => {

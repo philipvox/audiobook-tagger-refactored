@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { callBackend } from '../api';
 import { isTauri } from '../lib/platform.js';
 import {
@@ -151,6 +151,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   const [ollamaStatus, setOllamaStatus] = useState(null);
   const [modelPresets, setModelPresets] = useState([]);
   const [selectedPreset, setSelectedPreset] = useState('gemma4');
+  const ollamaAutoDetectedRef = useRef(false);
   const [installing, setInstalling] = useState(false);
   const [pulling, setPulling] = useState(false);
   const [pullProgress, setPullProgress] = useState(null); // { completed, total, status }
@@ -200,6 +201,17 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
         setDiskUsage(usage || 0);
         if (status?.models?.length > 0) {
           setSelectedPreset(status.models[0].name);
+          // Auto-enable local AI if Ollama is running with models and no AI is configured (once only)
+          if (!ollamaAutoDetectedRef.current && status.running) {
+            const hasAnyAI = localConfig?.openai_api_key || localConfig?.anthropic_api_key || localConfig?.use_local_ai;
+            if (!hasAnyAI) {
+              ollamaAutoDetectedRef.current = true;
+              const model = status.models[0].name;
+              const newConfig = { ...localConfig, use_local_ai: true, ollama_model: model };
+              setLocalConfig(newConfig);
+              await saveConfig(newConfig);
+            }
+          }
         }
       } catch (err) {
         console.warn('Failed to load Ollama state:', err);
