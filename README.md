@@ -8,13 +8,13 @@ AI-powered metadata manager for [AudiobookShelf](https://www.audiobookshelf.org/
 
 | Platform | Download |
 |----------|----------|
-| macOS (Apple Silicon) | [Audiobook.Tagger_aarch64.dmg](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.0_aarch64.dmg) |
-| macOS (Intel) | [Audiobook.Tagger_x64.dmg](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.0_x64.dmg) |
-| Windows (installer) | [Audiobook.Tagger_x64-setup.exe](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.0_x64-setup.exe) |
-| Windows (MSI) | [Audiobook.Tagger_x64.msi](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.0_x64_en-US.msi) |
-| Linux (Debian/Ubuntu) | [Audiobook.Tagger_amd64.deb](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.0_amd64.deb) |
-| Linux (AppImage) | [Audiobook.Tagger_amd64.AppImage](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.0_amd64.AppImage) |
-| Linux (RPM) | [Audiobook.Tagger_x86_64.rpm](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger-2.0.0-1.x86_64.rpm) |
+| macOS (Apple Silicon) | [Audiobook.Tagger_aarch64.dmg](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.3_aarch64.dmg) |
+| macOS (Intel) | [Audiobook.Tagger_x64.dmg](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.3_x64.dmg) |
+| Windows (installer) | [Audiobook.Tagger_x64-setup.exe](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.3_x64-setup.exe) |
+| Windows (MSI) | [Audiobook.Tagger_x64.msi](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.3_x64_en-US.msi) |
+| Linux (Debian/Ubuntu) | [Audiobook.Tagger_amd64.deb](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.3_amd64.deb) |
+| Linux (AppImage) | [Audiobook.Tagger_amd64.AppImage](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger_2.0.3_amd64.AppImage) |
+| Linux (RPM) | [Audiobook.Tagger_x86_64.rpm](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest/download/Audiobook.Tagger-2.0.3-1.x86_64.rpm) |
 
 [All releases](https://github.com/philipvox/audiobook-tagger-refactored/releases)
 
