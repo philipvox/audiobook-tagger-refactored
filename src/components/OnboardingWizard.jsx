@@ -159,8 +159,13 @@ export function SetupWizard({ onClose }) {
       if (libs.length > 0 && !localConfig.abs_library_id) {
         setLocalConfig(prev => ({ ...prev, abs_library_id: libs[0].id }));
       }
-    } catch {
+    } catch (e) {
       setConnectionStatus('error');
+      const msg = e?.message || String(e);
+      const detail = msg.includes('Failed to fetch') ? 'Could not reach server. Check the URL, firewall, and that ABS is running.'
+        : msg.includes('AbortError') ? 'Connection timed out. Is the server reachable from this machine?'
+        : msg;
+      toast.error('Connection Failed', detail);
     }
   };
 

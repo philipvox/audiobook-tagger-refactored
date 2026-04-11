@@ -585,7 +585,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const config = getLocalConfig();
     const books = args.books || [];
     const isLocal = !!(config.use_local_ai && config.ollama_model);
-    const dnaEnabled = (args.dnaEnabled !== false) && !(isLocal && config.local_skip_dna);
+    const dnaEnabled = args.dnaEnabled !== false;
     const CONCURRENCY = isLocal ? 1 : (config.cloud_concurrency || 5);
     const BATCH_SIZE = isLocal ? 3 : 1; // Local: batch 3 books per prompt (small models struggle with 5+)
     const results = [];

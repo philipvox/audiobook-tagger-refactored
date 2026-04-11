@@ -38,7 +38,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
   // Consolidated modal and batch operation state
   const modals = useModals();
-  const batch = useBatchOperations();
+  const batch = useBatchOperations({ dnaEnabledDefault: !config?.local_skip_dna });
 
   // Toast notifications
   const toast = useToast();
