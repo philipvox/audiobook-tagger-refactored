@@ -70,8 +70,8 @@ const initialState = {
   dnaEnabled: false,
 };
 
-export function useBatchOperations() {
-  const [state, dispatch] = useReducer(reducer, initialState);
+export function useBatchOperations({ dnaEnabledDefault = false } = {}) {
+  const [state, dispatch] = useReducer(reducer, { ...initialState, dnaEnabled: dnaEnabledDefault });
   const timersRef = useRef({});
 
   const start = useCallback((op, initial = {}) => {

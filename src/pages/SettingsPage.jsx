@@ -318,7 +318,11 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       }
     } catch (e) {
       setConnectionStatus('error');
-      console.error('Connection failed:', e);
+      const msg = e?.message || String(e);
+      const detail = msg.includes('Failed to fetch') ? 'Could not reach server. Check the URL, firewall, and that ABS is running.'
+        : msg.includes('AbortError') ? 'Connection timed out. Is the server reachable from this machine?'
+        : msg;
+      toast.error('Connection Failed', detail);
     }
   };
 

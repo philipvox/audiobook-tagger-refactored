@@ -91,8 +91,11 @@ fn find_system_ollama() -> Option<PathBuf> {
     }
     #[cfg(windows)]
     {
+        #[cfg(windows)]
+        use std::os::windows::process::CommandExt;
         let output = std::process::Command::new("where")
             .arg("ollama")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .output()
             .ok()?;
         if output.status.success() {
@@ -172,13 +175,18 @@ pub async fn ollama_start() -> Result<String, String> {
     let models_dir = ollama_models_dir()?;
     std::fs::create_dir_all(&models_dir).map_err(|e| format!("Failed to create models dir: {}", e))?;
 
-    let mut child = tokio::process::Command::new(&binary)
-        .arg("serve")
+    let mut cmd = tokio::process::Command::new(&binary);
+    cmd.arg("serve")
         .env("OLLAMA_MODELS", models_dir.to_str().unwrap_or(""))
         .env("OLLAMA_HOST", format!("127.0.0.1:{}", OLLAMA_PORT))
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let mut child = cmd.spawn()
         .map_err(|e| format!("Failed to start Ollama: {}", e))?;
 
     let pid = child.id().unwrap_or(0);
@@ -210,8 +218,10 @@ pub async fn ollama_stop() -> Result<String, String> {
         unsafe { libc::kill(pid as i32, libc::SIGTERM); }
         #[cfg(windows)]
         {
+            use std::os::windows::process::CommandExt;
             let _ = tokio::process::Command::new("taskkill")
                 .args(["/PID", &pid.to_string(), "/F"])
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW
                 .output().await;
         }
     }
