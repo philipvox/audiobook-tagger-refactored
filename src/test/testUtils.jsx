@@ -157,8 +157,6 @@ export const createMockInvoke = () => {
         return { current: 0, total: 0, current_file: '' };
       case 'write_tags':
         return { success: true, results: [] };
-      case 'get_abs_cache_status':
-        return { is_loaded: false, is_stale: true, stats: null };
       case 'import_from_abs':
         return { groups: [], total_imported: 0 };
       default:
