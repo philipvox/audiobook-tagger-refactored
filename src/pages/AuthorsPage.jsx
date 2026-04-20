@@ -549,7 +549,7 @@ function AuthorDetail({ detail, issues, pendingChanges, onRename, onMerge, onFix
         const binary = Array.from(uint8).map(b => String.fromCharCode(b)).join('');
         setImageData(`data:image/jpeg;base64,${btoa(binary)}`);
       })
-      .catch(() => {})
+      .catch(err => console.warn('Author image fetch failed:', detail.name, err))
       .finally(() => { if (!cancelled) setImageLoading(false); });
     return () => { cancelled = true; };
   }, [detail.id, detail.has_image]);
