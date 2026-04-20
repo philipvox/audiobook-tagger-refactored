@@ -10,7 +10,46 @@ permissions:
   contents: write  # Required for creating releases
 
 jobs:
+  test-js:
+    name: Test (JS)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Run JS tests
+        run: npm run test:run
+
+  test-rust:
+    name: Test (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # libwebkit2gtk-4.1-dev etc. are required build-time dependencies for the tauri crate —
+      # cargo test fails at compile time without them, even though scanner tests don't exercise webkit.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
   build:
+    needs: [test-js, test-rust]
     strategy:
       fail-fast: false
       matrix:
