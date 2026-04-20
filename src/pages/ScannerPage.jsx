@@ -1150,6 +1150,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       openai_api_key: config?.openai_api_key || null,
       use_local_ai: config?.use_local_ai || false,
       ollama_model: config?.ollama_model || null,
+      ollama_base_url: config?.ollama_base_url || null,
       use_local_whisper: config?.use_local_whisper || false,
       whisper_model: config?.whisper_model || 'base',
     }));

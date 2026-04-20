@@ -217,8 +217,17 @@ export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, max
  * Call local Ollama server for chat completions.
  * Uses Ollama's native /api/chat endpoint (not OpenAI-compat).
  */
-export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b', maxTokens = 1000 } = {}) {
-  const url = 'http://127.0.0.1:11434/api/chat';
+export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b', maxTokens = 1000, baseUrl } = {}) {
+  // baseUrl falls back to getLocalConfig().ollama_base_url (or localhost default).
+  // Lazy import avoids circular dep with api.js; keep in sync with getOllamaBaseUrl() there.
+  let resolvedBase = (baseUrl || '').trim();
+  if (!resolvedBase) {
+    try {
+      const mod = await import('../api.js');
+      resolvedBase = mod.getOllamaBaseUrl();
+    } catch { resolvedBase = 'http://127.0.0.1:11434'; }
+  }
+  const url = `${resolvedBase.replace(/\/+$/, '')}/api/chat`;
   const t0 = performance.now();
 
   const promptChars = systemPrompt.length + userPrompt.length;

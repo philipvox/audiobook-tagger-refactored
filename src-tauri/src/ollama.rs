@@ -4,7 +4,14 @@ use std::sync::Mutex;
 use tauri::Emitter;
 
 const OLLAMA_PORT: u16 = 11434;
-const OLLAMA_BASE: &str = "http://127.0.0.1:11434";
+const OLLAMA_DEFAULT_BASE: &str = "http://127.0.0.1:11434";
+
+// Returns the effective Ollama base URL. Empty input = localhost default.
+// Trims any trailing slashes so callers can safely do format!("{}/api/...", base).
+pub fn effective_base(base: &str) -> String {
+    let trimmed = base.trim().trim_end_matches('/');
+    if trimmed.is_empty() { OLLAMA_DEFAULT_BASE.to_string() } else { trimmed.to_string() }
+}
 
 static OLLAMA_PID: Mutex<Option<u32>> = Mutex::new(None);
 
@@ -59,8 +66,9 @@ fn ollama_models_dir() -> Result<PathBuf, String> {
     Ok(ollama_dir()?.join("models"))
 }
 
-async fn is_running() -> bool {
-    reqwest::get(format!("{}/api/tags", OLLAMA_BASE))
+async fn is_running(base: &str) -> bool {
+    let base = effective_base(base);
+    reqwest::get(format!("{}/api/tags", base))
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
@@ -119,14 +127,15 @@ fn find_best_binary() -> Option<PathBuf> {
 }
 
 #[tauri::command]
-pub async fn ollama_get_status() -> Result<OllamaStatus, String> {
+pub async fn ollama_get_status(base_url: Option<String>) -> Result<OllamaStatus, String> {
+    let base = effective_base(base_url.as_deref().unwrap_or(""));
     let installed = find_best_binary().is_some();
-    let running = is_running().await;
+    let running = is_running(&base).await;
     let mut models = Vec::new();
     let mut version = None;
 
     if running {
-        if let Ok(resp) = reqwest::get(format!("{}/api/tags", OLLAMA_BASE)).await {
+        if let Ok(resp) = reqwest::get(format!("{}/api/tags", base)).await {
             if let Ok(data) = resp.json::<serde_json::Value>().await {
                 if let Some(model_list) = data["models"].as_array() {
                     for m in model_list {
@@ -137,7 +146,7 @@ pub async fn ollama_get_status() -> Result<OllamaStatus, String> {
                 }
             }
         }
-        if let Ok(resp) = reqwest::get(format!("{}/api/version", OLLAMA_BASE)).await {
+        if let Ok(resp) = reqwest::get(format!("{}/api/version", base)).await {
             if let Ok(data) = resp.json::<serde_json::Value>().await {
                 version = data["version"].as_str().map(|s| s.to_string());
             }
@@ -166,8 +175,9 @@ pub async fn ollama_get_disk_usage() -> Result<u64, String> {
 }
 
 #[tauri::command]
-pub async fn ollama_start() -> Result<String, String> {
-    if is_running().await {
+pub async fn ollama_start(base_url: Option<String>) -> Result<String, String> {
+    let base = effective_base(base_url.as_deref().unwrap_or(""));
+    if is_running(&base).await {
         return Ok("Ollama is already running".to_string());
     }
     let binary = find_best_binary()
@@ -203,7 +213,7 @@ pub async fn ollama_start() -> Result<String, String> {
 
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if is_running().await {
+        if is_running(&base).await {
             return Ok(format!("Ollama started (PID {})", pid));
         }
     }
@@ -233,7 +243,7 @@ pub async fn ollama_stop() -> Result<String, String> {
     }
     for _ in 0..10 {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        if !is_running().await {
+        if !is_running(OLLAMA_DEFAULT_BASE).await {
             return Ok("Ollama stopped".to_string());
         }
     }
@@ -358,17 +368,18 @@ pub async fn ollama_uninstall() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String) -> Result<String, String> {
+pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String, base_url: Option<String>) -> Result<String, String> {
+    let base = effective_base(base_url.as_deref().unwrap_or(""));
     let model_name = model_name.trim().to_string();
     if model_name.is_empty() || model_name.len() > 200 || model_name.contains("..") || model_name.contains("/") {
         return Err("Invalid model name".to_string());
     }
-    if !is_running().await {
+    if !is_running(&base).await {
         return Err("Ollama is not running. Start it first.".to_string());
     }
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/api/pull", OLLAMA_BASE))
+        .post(format!("{}/api/pull", base))
         .json(&serde_json::json!({ "name": model_name, "stream": true }))
         .timeout(std::time::Duration::from_secs(1200))
         .send().await
@@ -419,13 +430,14 @@ pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String)
 }
 
 #[tauri::command]
-pub async fn ollama_delete_model(model_name: String) -> Result<String, String> {
-    if !is_running().await {
+pub async fn ollama_delete_model(model_name: String, base_url: Option<String>) -> Result<String, String> {
+    let base = effective_base(base_url.as_deref().unwrap_or(""));
+    if !is_running(&base).await {
         return Err("Ollama is not running".to_string());
     }
     let client = reqwest::Client::new();
     let resp = client
-        .delete(format!("{}/api/delete", OLLAMA_BASE))
+        .delete(format!("{}/api/delete", base))
         .json(&serde_json::json!({ "name": model_name }))
         .send().await
         .map_err(|e| format!("Delete failed: {}", e))?;

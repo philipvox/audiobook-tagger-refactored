@@ -1,6 +1,6 @@
 // src/context/AppContext.jsx
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import { callBackend, subscribe } from '../api';
+import { callBackend, ollamaCall, subscribe } from '../api';
 import { isTauri } from '../lib/platform.js';
 
 const AppContext = createContext(null);
@@ -47,7 +47,7 @@ export function AppProvider({ children }) {
 
     (async () => {
       try {
-        const status = await callBackend('ollama_get_status');
+        const status = await ollamaCall('ollama_get_status');
         if (status?.running && status?.models?.length > 0) {
           const model = status.models[0].name;
           const newConfig = { ...config, use_local_ai: true, ollama_model: model };

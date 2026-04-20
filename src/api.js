@@ -47,6 +47,7 @@ const DEFAULT_CONFIG = {
   ai_base_url: 'https://api.openai.com',
   use_local_ai: false,
   ollama_model: null,
+  ollama_base_url: '',
   local_concurrency: 2,
   cloud_concurrency: 5,
   local_skip_dna: true,
@@ -61,6 +62,21 @@ export function getLocalConfig() {
     console.warn('Failed to load config:', e);
   }
   return { ...DEFAULT_CONFIG };
+}
+
+// Default Ollama base URL when user has not configured a remote instance.
+// Keep in sync with effective_base() in src-tauri/src/ollama.rs and whisper.rs.
+export const DEFAULT_OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
+
+// Returns the configured Ollama base URL, falling back to localhost default.
+export function getOllamaBaseUrl() {
+  const configured = getLocalConfig().ollama_base_url?.trim();
+  return configured || DEFAULT_OLLAMA_BASE_URL;
+}
+
+// Wrapper for Ollama-touching Tauri commands — injects baseUrl from config.
+export async function ollamaCall(cmd, args = {}) {
+  return callBackend(cmd, { baseUrl: getOllamaBaseUrl(), ...args });
 }
 
 export function saveLocalConfig(config) {
