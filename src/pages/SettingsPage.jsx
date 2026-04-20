@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { callBackend } from '../api';
+import { callBackend, ollamaCall } from '../api';
 import { isTauri } from '../lib/platform.js';
 import {
   SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT,
@@ -201,7 +201,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
     const loadOllamaState = async () => {
       try {
         const [status, presets, usage] = await Promise.all([
-          callBackend('ollama_get_status'),
+          ollamaCall('ollama_get_status'),
           callBackend('ollama_get_model_presets'),
           callBackend('ollama_get_disk_usage'),
         ]);
@@ -442,17 +442,17 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       toast.info('Installing Ollama...');
       await callBackend('ollama_install');
       toast.info('Starting Ollama...');
-      await callBackend('ollama_start');
+      await ollamaCall('ollama_start');
       if (selectedPreset) {
         setPulling(true);
         toast.info(`Downloading model ${selectedPreset}...`);
-        await callBackend('ollama_pull_model', { modelName: selectedPreset });
+        await ollamaCall('ollama_pull_model', { modelName: selectedPreset });
         setPulling(false); setPullProgress(null);
       }
       const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset };
       setLocalConfig(newConfig);
       await saveConfig(newConfig);
-      const status = await callBackend('ollama_get_status');
+      const status = await ollamaCall('ollama_get_status');
       setOllamaStatus(status);
       toast.success('Local AI installed and running!');
     } catch (err) {
@@ -472,13 +472,13 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
         await saveConfig(newConfig);
         toast.info('Local AI stopped');
       } else {
-        await callBackend('ollama_start');
+        await ollamaCall('ollama_start');
         const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset };
         setLocalConfig(newConfig);
         await saveConfig(newConfig);
         toast.success('Local AI started');
       }
-      const status = await callBackend('ollama_get_status');
+      const status = await ollamaCall('ollama_get_status');
       setOllamaStatus(status);
     } catch (err) {
       toast.error(`Failed: ${err.message || err}`);
@@ -492,7 +492,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       setPulling(true);
       try {
         toast.info(`Downloading model ${modelId}...`);
-        await callBackend('ollama_pull_model', { modelName: modelId });
+        await ollamaCall('ollama_pull_model', { modelName: modelId });
         toast.success(`Model ${modelId} ready`);
       } catch (err) {
         toast.error(`Model pull failed: ${err.message || err}`);
@@ -504,7 +504,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
     const newConfig = { ...localConfig, ollama_model: modelId };
     setLocalConfig(newConfig);
     await saveConfig(newConfig);
-    const status = await callBackend('ollama_get_status');
+    const status = await ollamaCall('ollama_get_status');
     setOllamaStatus(status);
   };
 
@@ -774,6 +774,25 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                       <span className="text-xs text-yellow-400">Stopped</span>
                     </div>
                   )}
+                </div>
+
+                {/* Server URL (supports remote Ollama) */}
+                <div>
+                  <label className="block text-sm text-gray-500 mb-1.5">Ollama server URL</label>
+                  <input
+                    type="text"
+                    value={localConfig?.ollama_base_url || ''}
+                    onChange={(e) => {
+                      const newConfig = { ...localConfig, ollama_base_url: e.target.value };
+                      setLocalConfig(newConfig);
+                    }}
+                    onBlur={() => saveConfig(localConfig)}
+                    placeholder="http://127.0.0.1:11434"
+                    className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Leave empty to use local Ollama. For a remote instance (e.g. another machine on your network), enter the full URL including http:// and port.
+                  </p>
                 </div>
 
                 {/* Not installed */}

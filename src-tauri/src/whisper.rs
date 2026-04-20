@@ -42,6 +42,7 @@ pub struct AudioIntroRequest {
     pub openai_api_key: Option<String>,
     pub use_local_ai: Option<bool>,
     pub ollama_model: Option<String>,
+    pub ollama_base_url: Option<String>,
     pub use_local_whisper: Option<bool>,
     pub whisper_model: Option<String>,
 }
@@ -642,7 +643,7 @@ Transcript: "{}""#,
         });
 
         let response = client
-            .post("http://127.0.0.1:11434/v1/chat/completions")
+            .post(format!("{}/v1/chat/completions", crate::ollama::effective_base(request.ollama_base_url.as_deref().unwrap_or(""))))
             .json(&body)
             .send().await?;
 
