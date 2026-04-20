@@ -10,12 +10,13 @@ import { AppProvider, useApp } from './AppContext';
 const mockInvoke = vi.fn();
 const mockListen = vi.fn(() => Promise.resolve(() => {}));
 
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: (...args) => mockInvoke(...args),
-}));
-
-vi.mock('@tauri-apps/api/event', () => ({
-  listen: (...args) => mockListen(...args),
+// mockInvoke spies on callBackend — historical name preserved to minimize churn when the harness was fixed (C7a step 2)
+vi.mock('../api', () => ({
+  callBackend: (...args) => mockInvoke(...args),
+  subscribe: (event, callback) => {
+    mockListen(event, callback);
+    return () => {};
+  },
 }));
 
 describe('AppContext', () => {
@@ -102,7 +103,7 @@ describe('AppContext', () => {
         expect(result.current.config).not.toBe(null);
       });
 
-      expect(result.current.config.abs_base_url).toBe('http://localhost:13378');
+      expect(result.current.config.abs_base_url).toBe('http://localhost:8000');
     });
 
     it('should provide setGroups function', async () => {
