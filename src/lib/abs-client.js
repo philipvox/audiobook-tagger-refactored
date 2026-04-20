@@ -111,6 +111,11 @@ function absItemToBookGroup(item, absBaseUrl) {
   const meta = item.media?.metadata || {};
   const audioFiles = item.media?.audioFiles || [];
 
+  // ABS exposes embedded ID3/M4B tags on each audioFile. When the book's
+  // top-level metadata is empty, these tags often still carry the truth.
+  const firstTags = audioFiles[0]?.metaTags || {};
+  const fromTags = (s) => (s && String(s).trim()) || null;
+
   // Extract series info
   const series = (meta.series || []).map(s => ({
     name: s.name,
@@ -121,26 +126,42 @@ function absItemToBookGroup(item, absBaseUrl) {
   // Build cover URL
   const coverUrl = item.id ? `${absBaseUrl}/api/items/${item.id}/cover` : null;
 
+  const author = fromTags((meta.authors || []).map(a => a.name).join(', '))
+    || fromTags(meta.authorName)
+    || fromTags(firstTags.tagAlbumArtist)
+    || fromTags(firstTags.tagArtist)
+    || 'Unknown';
+
+  const narrator = fromTags((meta.narrators || []).join(', '))
+    || fromTags(meta.narratorName)
+    || fromTags(firstTags.tagComposer)
+    || null;
+
+  const title = fromTags(meta.title)
+    || fromTags(firstTags.tagAlbum)
+    || fromTags(firstTags.tagTitle)
+    || 'Unknown';
+
   return {
     id: item.id || crypto.randomUUID(),
     abs_id: item.id,
     source: 'abs',
     metadata: {
-      title: meta.title || 'Unknown',
-      author: (meta.authors || []).map(a => a.name).join(', ') || 'Unknown',
-      narrator: (meta.narrators || []).join(', ') || null,
+      title,
+      author,
+      narrator,
       subtitle: meta.subtitle || null,
-      series: series.length > 0 ? series[0].name : null,
-      sequence: series.length > 0 ? series[0].sequence : null,
+      series: series.length > 0 ? series[0].name : fromTags(firstTags.tagSeries),
+      sequence: series.length > 0 ? series[0].sequence : fromTags(firstTags.tagSeriesPart),
       all_series: series,
       genres: meta.genres || [],
       tags: (item.media?.tags || []),
       description: meta.description || null,
-      publisher: meta.publisher || null,
-      published_year: meta.publishedYear || null,
-      language: meta.language || null,
-      isbn: meta.isbn || null,
-      asin: meta.asin || null,
+      publisher: meta.publisher || fromTags(firstTags.tagPublisher) || null,
+      published_year: meta.publishedYear || (firstTags.tagDate && String(firstTags.tagDate).substring(0, 4)) || firstTags.tagYear || null,
+      language: meta.language || fromTags(firstTags.tagLanguage) || null,
+      isbn: meta.isbn || fromTags(firstTags.tagIsbn) || null,
+      asin: meta.asin || fromTags(firstTags.tagAsin) || null,
       cover_url: coverUrl,
       duration: item.media?.duration || null,
     },
@@ -149,6 +170,7 @@ function absItemToBookGroup(item, absBaseUrl) {
       filename: f.metadata?.filename || '',
       duration: f.duration || 0,
       size: f.metadata?.size || 0,
+      ino: f.ino || null,
     })),
   };
 }

@@ -101,6 +101,16 @@ const TAURI_COMMANDS = new Set([
   'ollama_uninstall',
   'ollama_pull_model',
   'ollama_delete_model',
+  'extract_audio_intro',
+  'batch_extract_audio_intros',
+  'cancel_audio_extraction',
+  'whisper_local_get_status',
+  'whisper_local_get_model_presets',
+  'whisper_local_install',
+  'whisper_local_download_model',
+  'whisper_local_delete_model',
+  'whisper_local_get_disk_usage',
+  'whisper_local_uninstall',
 ]);
 
 // ============================================================================
@@ -437,19 +447,126 @@ const HANDLERS = {
     return { books: results, processed, failed };
   },
 
-  // === ABS Cache (client-side in-memory) ===
-  get_abs_cache_status: () => ({ stats: { total_items: 0 }, stale: true }),
-  refresh_abs_cache: async () => ({ refreshed: true, stats: { total_items: 0 } }),
-  get_cached_items: () => [],
-  clear_abs_full_cache: () => 'Cache cleared',
-  clear_abs_library_cache: () => 'Cache cleared',
-
-  // === External Data Gathering (stub — desktop-only feature, calls Audible/Goodreads via Rust) ===
+  // === External Data Gathering ===
+  // Two-tier lookup:
+  //   1. If book has an ASIN, hit Audnexus (api.audnex.us) — authoritative audiobook DB with CORS.
+  //   2. Otherwise search OpenLibrary by title (+author) — good recall, CORS, free.
+  // Results are keyed by book id and shaped with `abs_*` field names because that's
+  // what handleMetadataResolution already consumes.
   gather_external_data: async (args) => {
-    // Web can't call these APIs directly (no CORS). Return empty results.
-    // handleRunAll catches this gracefully and continues without gathered data.
     const books = args.books || [];
-    return { results: books.map(b => ({ id: b.id, gathered: false })) };
+    const CONCURRENCY = 3; // polite — these are free public APIs
+    const results = [];
+
+    const asJoinedNames = (arr) => {
+      if (!Array.isArray(arr)) return null;
+      const names = arr
+        .map(x => typeof x === 'string' ? x : x?.name)
+        .filter(s => s && String(s).trim());
+      return names.length ? names.join(', ') : null;
+    };
+
+    const lookupByAsin = async (asin) => {
+      try {
+        const res = await fetch(`https://api.audnex.us/books/${encodeURIComponent(asin)}`, {
+          headers: { 'Accept': 'application/json' },
+        });
+        if (!res.ok) return null;
+        const d = await res.json();
+        return {
+          abs_title: d.title || null,
+          abs_subtitle: d.subtitle || null,
+          abs_author: asJoinedNames(d.authors),
+          abs_narrator: asJoinedNames(d.narrators),
+          abs_series: d.seriesPrimary?.name || null,
+          abs_sequence: d.seriesPrimary?.position || null,
+          abs_description: d.description || (d.summary && String(d.summary).replace(/<[^>]+>/g, '').trim()) || null,
+          abs_publisher: d.publisherName || null,
+          abs_language: d.language || null,
+          abs_year: d.releaseDate ? String(d.releaseDate).substring(0, 4) : null,
+          source: 'audnexus',
+        };
+      } catch {
+        return null;
+      }
+    };
+
+    const lookupByTitle = async (title, author) => {
+      if (!title || !String(title).trim()) return null;
+      try {
+        const hasAuthor = author && String(author).trim() && !/^unknown$/i.test(author);
+        const params = new URLSearchParams({
+          title: String(title).trim(),
+          limit: '5',
+          fields: 'title,subtitle,author_name,isbn,first_publish_year,publisher',
+        });
+        if (hasAuthor) params.set('author', String(author).trim());
+        const res = await fetch(`https://openlibrary.org/search.json?${params}`, {
+          headers: { 'Accept': 'application/json' },
+        });
+        if (!res.ok) return null;
+        const d = await res.json();
+        const docs = (d.docs || []).slice(0, 5);
+        if (docs.length === 0) return null;
+
+        const candidates = docs.map(doc => ({
+          title: doc.title || null,
+          subtitle: doc.subtitle || null,
+          author: asJoinedNames(doc.author_name),
+          year: doc.first_publish_year ? String(doc.first_publish_year) : null,
+          isbn: (doc.isbn || []).find(i => i.length === 13) || (doc.isbn || [])[0] || null,
+          publisher: Array.isArray(doc.publisher) ? doc.publisher[0] : (doc.publisher || null),
+        })).filter(c => c.author);
+
+        if (candidates.length === 0) return null;
+
+        // If we got the author parameter, we can be confident in the top hit.
+        // Otherwise (title-only search) the first hit is often wrong for common
+        // titles — surface ALL candidates and let the downstream AI disambiguate
+        // using other signals (narrator, year, publisher).
+        const top = candidates[0];
+        const baseFields = {
+          abs_title: top.title,
+          abs_subtitle: top.subtitle,
+          abs_year: top.year,
+          abs_isbn: top.isbn,
+          source: 'openlibrary',
+          abs_candidate_count: candidates.length,
+        };
+
+        if (hasAuthor || candidates.length === 1) {
+          return { ...baseFields, abs_author: top.author };
+        }
+
+        // Ambiguous: pass candidates instead of a single answer.
+        return {
+          ...baseFields,
+          abs_author: null,
+          abs_candidates: candidates.map(c => ({
+            author: c.author,
+            year: c.year,
+            publisher: c.publisher,
+            subtitle: c.subtitle,
+          })),
+        };
+      } catch {
+        return null;
+      }
+    };
+
+    const processBook = async (book) => {
+      let found = null;
+      if (book.asin) found = await lookupByAsin(book.asin);
+      if (!found) found = await lookupByTitle(book.title, book.author);
+      return { id: book.id, gathered: !!found, ...(found || {}) };
+    };
+
+    for (let i = 0; i < books.length; i += CONCURRENCY) {
+      const chunk = books.slice(i, i + CONCURRENCY);
+      results.push(...await Promise.all(chunk.map(processBook)));
+    }
+
+    return { results };
   },
   get_unprocessed_abs_items: async () => ({ items: [] }),
 
@@ -945,26 +1062,95 @@ If the book has a well-known subtitle (e.g., "Dune: The Desert Planet"), include
   },
 
   // === GPT: Author Fix ===
+  // Strategy: if the current author is a valid name, just normalize it
+  // (fast, free). Otherwise (empty / "Unknown" / path fragment) ask the AI
+  // to derive the author from title + description + narrator + year + ids.
   fix_authors_batch: async (args) => {
     const config = getLocalConfig();
     const books = args.books || [];
+    const force = !!args.force;
     const results = [];
     let completed = 0;
+    let total_fixed = 0, total_skipped = 0, total_failed = 0;
 
-    for (const book of books) {
-      try {
-        emitEvent('batch-progress', { call_type: 'authors', current: completed, total: books.length, title: `Author: ${book.title}` });
-        const cleaned = cleanAuthorName(book.author || '');
+    const isBadAuthor = (a) => {
+      if (!a) return true;
+      const s = String(a).trim();
+      if (!s) return true;
+      if (/^unknown$/i.test(s)) return true;
+      if (s.includes('/') || s.includes('\\')) return true;
+      return false;
+    };
+
+    const isLocal = !!(config.use_local_ai && config.ollama_model);
+    const CONCURRENCY = isLocal ? 1 : (config.cloud_concurrency || 5);
+
+    const processBook = async (book) => {
+      emitEvent('batch-progress', { call_type: 'authors', current: completed, total: books.length, title: `Author: ${book.title}` });
+
+      const current = book.current_author ?? book.author ?? '';
+      const needsAi = force || isBadAuthor(current);
+
+      if (!needsAi) {
+        const cleaned = cleanAuthorName(current) || current;
+        const fixed = cleaned !== current;
         completed++;
         emitEvent('batch-progress', { call_type: 'authors', current: completed, total: books.length, title: book.title });
-        results.push({ id: book.id, success: true, author: cleaned || book.author });
+        if (fixed) total_fixed++; else total_skipped++;
+        return { id: book.id, success: true, author: cleaned, fixed, source: fixed ? 'clean' : 'existing' };
+      }
+
+      try {
+        const desc = book.description ? String(book.description).slice(0, 800) : '';
+        const lines = [
+          `Title: ${safe(book.title)}`,
+          book.subtitle ? `Subtitle: ${safe(book.subtitle)}` : '',
+          book.series ? `Series: ${safe(book.series)}` : '',
+          book.narrator ? `Narrator: ${safe(book.narrator)}` : '',
+          book.publisher ? `Publisher: ${safe(book.publisher)}` : '',
+          book.year || book.published_year ? `Year: ${book.year || book.published_year}` : '',
+          book.isbn ? `ISBN: ${safe(book.isbn)}` : '',
+          book.asin ? `ASIN: ${safe(book.asin)}` : '',
+          desc ? `Description (truncated): ${safe(desc)}` : '',
+        ].filter(Boolean).join('\n');
+        const prompt = `Identify the AUTHOR of this audiobook.
+
+${lines}
+
+Rules:
+- If the description names the author ("Louise Erdrich's latest novel..."), extract that name.
+- If the title + year + publisher uniquely identifies a real book you know, return the author.
+- Use canonical form: "J.R.R. Tolkien", not "JRR Tolkien".
+- Multiple co-authors: comma-separated, e.g. "Stephen King, Peter Straub".
+- Return null ONLY if you truly have no grounded signal.
+
+Return JSON: {"author":"Author Name","confidence":90}`;
+        const response = await callAI(config, getSystemPrompt(config), prompt, 200);
+        const parsed = parseAIJson(response);
+        const raw = parsed?.author ? String(parsed.author).trim() : '';
+        const author = raw && !isBadAuthor(raw) ? cleanAuthorName(raw) || raw : '';
+        completed++;
+        emitEvent('batch-progress', { call_type: 'authors', current: completed, total: books.length, title: book.title });
+        if (author && author !== current) {
+          total_fixed++;
+          return { id: book.id, success: true, author, fixed: true, source: 'ai', confidence: parsed?.confidence };
+        }
+        total_failed++;
+        return { id: book.id, success: true, author: current, fixed: false, source: 'ai-empty' };
       } catch (err) {
         completed++;
         emitEvent('batch-progress', { call_type: 'authors', current: completed, total: books.length, title: book.title });
-        results.push({ id: book.id, success: false, error: err.message });
+        total_failed++;
+        return { id: book.id, success: false, error: err.message, fixed: false };
       }
+    };
+
+    for (let i = 0; i < books.length; i += CONCURRENCY) {
+      const chunk = books.slice(i, i + CONCURRENCY);
+      results.push(...await Promise.all(chunk.map(processBook)));
     }
-    return { results };
+
+    return { results, total_fixed, total_skipped, total_failed };
   },
 
   // === GPT: Year Fix ===
@@ -1261,7 +1447,7 @@ Return JSON: {"year":"2005"}`;
     } catch { return null; }
   },
 
-  // === ISBN/ASIN Lookup (via Caddy proxy to Audible + Open Library) ===
+  // === ISBN/ASIN Lookup via Audible + Open Library (Tauri HTTP plugin) ===
   lookup_book_isbn: async (args) => {
     const { title, author } = args.request || args;
     if (!title) return { success: false, error: 'No title' };
@@ -1269,11 +1455,12 @@ Return JSON: {"year":"2005"}`;
     let isbn = null;
     let asin = null;
 
-    // ASIN via Audible public catalog API (proxied through Caddy)
+    // ASIN via Audible public catalog API
     try {
       const titleParam = encodeURIComponent(title);
       const authorParam = encodeURIComponent(author || '');
-      const audibleRes = await fetch(`/api/audible/1.0/catalog/products?title=${titleParam}&author=${authorParam}&num_results=3&response_groups=product_desc`);
+      // Audible catalog (Tauri http plugin bypasses CORS; web variant deferred — see issue #53)
+      const audibleRes = await proxyFetch(`https://api.audible.com/1.0/catalog/products?title=${titleParam}&author=${authorParam}&num_results=3&response_groups=product_desc`);
       if (audibleRes.ok) {
         const data = await audibleRes.json();
         const products = data.products || [];
@@ -1285,10 +1472,10 @@ Return JSON: {"year":"2005"}`;
       }
     } catch {}
 
-    // ISBN via Open Library (proxied through Caddy)
+    // ISBN via Open Library
     try {
       const query = encodeURIComponent(`${title} ${author || ''}`);
-      const olRes = await fetch(`/api/openlibrary/search.json?q=${query}&limit=5&fields=isbn,title,author_name`);
+      const olRes = await proxyFetch(`https://openlibrary.org/search.json?q=${query}&limit=5&fields=isbn,title,author_name`);
       if (olRes.ok) {
         const data = await olRes.json();
         for (const doc of (data.docs || [])) {
@@ -1334,13 +1521,23 @@ function absItemToBookGroup(item, absBaseUrl) {
   const meta = item.media?.metadata || {};
   const base = absBaseUrl.replace(/\/$/, '');
 
+  // ABS exposes embedded ID3/M4B tags on each audioFile. When the book's
+  // top-level metadata is empty (common when no Audible match and no sidecar),
+  // these tags often still carry the truth. Use the first file's tags as a
+  // fallback for author / narrator / series.
+  const firstTags = item.media?.audioFiles?.[0]?.metaTags || {};
+  const fromTags = (s) => (s && String(s).trim()) || null;
+
   // ABS returns authors as both `authorName` (string) and `authors` (array of {id, name})
-  const author = meta.authorName
-    || (meta.authors || []).map(a => typeof a === 'string' ? a : a.name).join(', ')
+  const author = fromTags(meta.authorName)
+    || fromTags((meta.authors || []).map(a => typeof a === 'string' ? a : a.name).join(', '))
+    || fromTags(firstTags.tagAlbumArtist)
+    || fromTags(firstTags.tagArtist)
     || 'Unknown';
 
-  const narrator = meta.narratorName
-    || (meta.narrators || []).map(n => typeof n === 'string' ? n : n.name).join(', ')
+  const narrator = fromTags(meta.narratorName)
+    || fromTags((meta.narrators || []).map(n => typeof n === 'string' ? n : n.name).join(', '))
+    || fromTags(firstTags.tagComposer)
     || null;
 
   // Series can be in metadata.series (array) or metadata.seriesName (string)
@@ -1350,26 +1547,37 @@ function absItemToBookGroup(item, absBaseUrl) {
     source: 'abs',
   }));
 
+  const title = fromTags(meta.title)
+    || fromTags(firstTags.tagAlbum)
+    || fromTags(firstTags.tagTitle)
+    || 'Unknown';
+
+  const publishedYear = meta.publishedYear
+    || meta.publishedDate?.substring(0, 4)
+    || (firstTags.tagDate && String(firstTags.tagDate).substring(0, 4))
+    || firstTags.tagYear
+    || null;
+
   return {
     id: item.id || crypto.randomUUID(),
     abs_id: item.id,
     source: 'abs',
     metadata: {
-      title: meta.title || 'Unknown',
+      title,
       author,
       narrator,
       subtitle: meta.subtitle || null,
-      series: seriesArr[0]?.name || meta.seriesName || null,
-      sequence: seriesArr[0]?.sequence || meta.seriesSequence || null,
+      series: seriesArr[0]?.name || meta.seriesName || fromTags(firstTags.tagSeries) || null,
+      sequence: seriesArr[0]?.sequence || meta.seriesSequence || fromTags(firstTags.tagSeriesPart) || null,
       all_series: seriesArr,
       genres: meta.genres || [],
       tags: item.media?.tags || [],
       description: meta.description || null,
-      publisher: meta.publisher || null,
-      published_year: meta.publishedYear || meta.publishedDate?.substring(0, 4) || null,
-      language: meta.language || null,
-      isbn: meta.isbn || null,
-      asin: meta.asin || null,
+      publisher: meta.publisher || fromTags(firstTags.tagPublisher) || null,
+      published_year: publishedYear,
+      language: meta.language || fromTags(firstTags.tagLanguage) || null,
+      isbn: meta.isbn || fromTags(firstTags.tagIsbn) || null,
+      asin: meta.asin || fromTags(firstTags.tagAsin) || null,
       cover_url: item.id ? `${base}/api/items/${item.id}/cover` : null,
       duration: item.media?.duration || null,
       added_at: item.addedAt || item.createdAt || 0,

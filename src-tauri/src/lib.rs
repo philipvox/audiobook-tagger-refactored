@@ -1,5 +1,7 @@
 mod scanner;
 mod ollama;
+mod whisper;
+mod whisper_local;
 
 pub fn run() {
     tauri::Builder::default()
@@ -16,6 +18,16 @@ pub fn run() {
             ollama::ollama_uninstall,
             ollama::ollama_pull_model,
             ollama::ollama_delete_model,
+            whisper::extract_audio_intro,
+            whisper::batch_extract_audio_intros,
+            whisper::cancel_audio_extraction,
+            whisper_local::whisper_local_get_status,
+            whisper_local::whisper_local_get_model_presets,
+            whisper_local::whisper_local_install,
+            whisper_local::whisper_local_download_model,
+            whisper_local::whisper_local_delete_model,
+            whisper_local::whisper_local_get_disk_usage,
+            whisper_local::whisper_local_uninstall,
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::Destroyed = event {

@@ -20,7 +20,6 @@ import { useToast } from '../components/Toast';
 import { useScan } from '../hooks/useScan';
 import { useFileSelection } from '../hooks/useFileSelection';
 import { useTagOperations } from '../hooks/useTagOperations';
-import { useAbsCache } from '../hooks/useAbsCache';
 import { useBatchOperations } from '../hooks/useBatchOperations';
 import { useModals } from '../hooks/useModals';
 import { useApp } from '../context/AppContext';
@@ -143,12 +142,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     renameFiles,
     pushToAudiobookShelf
   } = useTagOperations();
-
-  const {
-    refreshing: refreshingCache,
-    refreshCache,
-    cacheStatus,
-  } = useAbsCache();
 
   // FIXED: Prevent text selection on Shift+Click and properly handle range selection
   // filteredGroups is passed from BookList when filters are applied
@@ -939,6 +932,14 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           id: g.id,
           title: g.metadata?.title || '',
           current_author: g.metadata?.author || '',
+          subtitle: g.metadata?.subtitle || null,
+          series: g.metadata?.series || null,
+          narrator: g.metadata?.narrator || null,
+          publisher: g.metadata?.publisher || null,
+          year: g.metadata?.published_year || g.metadata?.year || null,
+          isbn: g.metadata?.isbn || null,
+          asin: g.metadata?.asin || null,
+          description: g.metadata?.description || null,
         }));
 
         const result = await callBackend('fix_authors_batch', { books, config, force: forceFresh });
@@ -1105,6 +1106,136 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Clear progress after a short delay
     batch.end('years', 1500);
+  };
+
+  // ✅ Check by Audio - extract metadata from audio intros via Whisper
+  const extractingByAudio = batch.isActive('audio_check');
+  const handleExtractByAudio = async (field = 'all') => {
+    const fieldLabels = { all: 'All Fields', narrator: 'Narrator', author: 'Author', title: 'Title', publisher: 'Publisher', language: 'Language' };
+    const label = fieldLabels[field] || field;
+
+    const selectedCount = getSelectedCount(groups, selectedGroupIds);
+    if (selectedCount === 0) return;
+
+    const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+
+    // Smart skip: only process books missing the requested field (unless forceFresh)
+    const needsProcessing = forceFresh ? selectedGroups : selectedGroups.filter(g => {
+      const m = g.metadata || {};
+      if (field === 'narrator') return !m.narrator && (!m.narrators || m.narrators.length === 0);
+      if (field === 'author') return !m.author;
+      if (field === 'title') return !m.title;
+      if (field === 'publisher') return !m.publisher;
+      if (field === 'language') return !m.language;
+      // 'all': process if missing any of these
+      return !m.narrator || !m.author || !m.publisher || !m.language;
+    });
+
+    if (needsProcessing.length === 0) {
+      toast.success(`Check ${label}`, `All selected books already have ${label.toLowerCase()}`);
+      return;
+    }
+
+    batch.start('audio_check', { total: needsProcessing.length });
+
+    const items = needsProcessing.map(g => ({
+      item_id: g.id || g.group_name,
+      source: g.id ? 'abs' : 'local',
+      title: g.metadata?.title || null,
+      author: g.metadata?.author || null,
+      file_ino: g.files?.[0]?.ino || null,
+      file_path: g.files?.[0]?.path || null,
+      abs_base_url: config?.abs_base_url || null,
+      abs_api_token: config?.abs_api_token || null,
+      openai_api_key: config?.openai_api_key || null,
+      use_local_ai: config?.use_local_ai || false,
+      ollama_model: config?.ollama_model || null,
+      use_local_whisper: config?.use_local_whisper || false,
+      whisper_model: config?.whisper_model || 'base',
+    }));
+
+    // Listen for Tauri progress events with stage tracking
+    let tauriUnlisten = null;
+    try {
+      if (typeof window.__TAURI__ !== 'undefined') {
+        const { listen } = await import('@tauri-apps/api/event');
+        tauriUnlisten = await listen('audio_intro_progress', (event) => {
+          const { current, total, status, stage, found, cached } = event.payload;
+          const stageLabels = { downloading: 'Downloading', extracting: 'FFmpeg', transcribing: 'Whisper', parsing: 'Parsing', cached: 'Cached' };
+          const stageText = stageLabels[stage] || stage || '';
+          batch.update('audio_check', {
+            current,
+            success: found || 0,
+            currentBook: `[${stageText}] ${status}`,
+          });
+        });
+      }
+    } catch (e) { /* not in Tauri */ }
+
+    try {
+      const results = await callBackend('batch_extract_audio_intros', { items, force: forceFresh });
+
+      const resultMap = new Map(results.map(r => [r.item_id, r]));
+      let updatedCount = 0;
+
+      setGroups(prevGroups => prevGroups.map(g => {
+        const key = g.id || g.group_name;
+        const result = resultMap.get(key);
+        if (!result) return g;
+
+        // Build merge object based on requested field
+        const merge = {};
+        const shouldMerge = (f, value) => value && (forceFresh || !g.metadata?.[f]);
+
+        if ((field === 'all' || field === 'narrator') && result.narrators.length > 0) {
+          if (forceFresh || !g.metadata?.narrator) {
+            merge.narrators = result.narrators;
+            merge.narrator = result.narrators[0];
+          }
+        }
+        if ((field === 'all' || field === 'author') && result.authors.length > 0) {
+          if (forceFresh || !g.metadata?.author) {
+            merge.author = result.authors[0];
+          }
+        }
+        if ((field === 'all' || field === 'title') && result.title) {
+          if (forceFresh || !g.metadata?.title || g.metadata?.title === 'Untitled') {
+            merge.title = result.title;
+          }
+          if (result.subtitle && (forceFresh || !g.metadata?.subtitle)) {
+            merge.subtitle = result.subtitle;
+          }
+        }
+        if (field === 'all' || field === 'publisher') {
+          const pub = result.publisher || result.audio_publisher;
+          if (pub && (forceFresh || !g.metadata?.publisher)) {
+            merge.publisher = pub;
+          }
+        }
+        // Language from Whisper detection
+        if ((field === 'all' || field === 'language') && result.language) {
+          if (forceFresh || !g.metadata?.language) {
+            merge.language = result.language;
+          }
+        }
+
+        if (Object.keys(merge).length === 0) return g;
+        updatedCount++;
+
+        return {
+          ...g,
+          metadata: { ...g.metadata, ...merge },
+          total_changes: (g.total_changes || 0) + 1,
+        };
+      }));
+
+      toast.success(`Check ${label}`, `Updated ${updatedCount} of ${needsProcessing.length} books from audio`);
+    } catch (error) {
+      toast.error(`Check ${label}`, String(error));
+    } finally {
+      if (tauriUnlisten) tauriUnlisten();
+      batch.end('audio_check', 1500);
+    }
   };
 
   // ✅ Series fixing via Audible + GPT for selected books
@@ -1431,6 +1562,32 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     batch.start('metadata', { total: booksToProcess.length, currentBook: 'Resolving metadata via ABS + GPT...' });
 
+    // If there's no pre-fetched gather data (i.e. user hit Fix Metadata standalone,
+    // not Run All), pull external data inline for books with missing/Unknown author.
+    // This is what lets a book like "The Sentence" get Louise Erdrich back even
+    // when ABS itself has no author stored.
+    const needsLookup = booksToProcess.filter(g => {
+      const a = g.metadata?.author;
+      return !a || !String(a).trim() || /^unknown$/i.test(a);
+    });
+    if (!gatheredDataRef.current && needsLookup.length > 0) {
+      try {
+        const lookupBooks = needsLookup.map(g => ({
+          id: g.id,
+          title: g.metadata?.title || g.group_name || '',
+          author: g.metadata?.author || '',
+          asin: g.metadata?.asin || null,
+          isbn: g.metadata?.isbn || null,
+        }));
+        const lookupResult = await callBackend('gather_external_data', { books: lookupBooks, config });
+        const dataMap = new Map();
+        for (const item of (lookupResult.results || [])) dataMap.set(item.id, item);
+        gatheredDataRef.current = dataMap;
+      } catch (e) {
+        console.error('Inline gather failed:', e);
+      }
+    }
+
     const books = booksToProcess.map(g => {
       // Use pre-fetched ABS data from gather phase if available
       const gathered = gatheredDataRef.current?.get(g.id);
@@ -1444,11 +1601,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         current_subtitle: g.metadata?.subtitle || null,
         current_series: g.metadata?.series || null,
         current_sequence: g.metadata?.sequence || null,
+        current_narrator: g.metadata?.narrator || null,
+        current_publisher: g.metadata?.publisher || null,
+        current_year: g.metadata?.published_year || g.metadata?.year || null,
+        current_isbn: g.metadata?.isbn || null,
+        current_asin: g.metadata?.asin || null,
+        current_description: g.metadata?.description || null,
         audible_title: gathered?.abs_title || null,
         audible_author: gathered?.abs_author || null,
         audible_subtitle: gathered?.abs_subtitle || null,
         audible_series: gathered?.abs_series || null,
         audible_sequence: gathered?.abs_sequence || null,
+        audible_candidates: gathered?.abs_candidates || null,
       };
     });
 
@@ -1628,6 +1792,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         id: g.id,
         title: g.metadata?.title || g.group_name || '',
         author: g.metadata?.author || '',
+        asin: g.metadata?.asin || null,
+        isbn: g.metadata?.isbn || null,
       }));
 
       const gatherResult = await callBackend('gather_external_data', { books: gatherBooks, config });
@@ -1971,19 +2137,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       return;
     }
 
-    // When Force is on, clear existing classification data so stale tags don't persist
-    if (forceFresh) {
-      const idsToProcess = new Set(booksToProcess.map(g => g.id));
-      setGroups(prev => prev.map(g => {
-        if (!idsToProcess.has(g.id)) return g;
-        const m = { ...g.metadata };
-        m.genres = [];
-        m.tags = [];
-        m.themes = [];
-        m.tropes = [];
-        return { ...g, metadata: m, changedFields: [] };
-      }));
-    }
+    // When Force is on, we want to clear stale classification data — but only AFTER the AI
+    // call succeeds. Clearing eagerly (a) strips the tag signal the prompt builder reads back
+    // via books[].tags and (b) permanently loses the user's existing tags if the API fails.
+    // We record the ids to reset and apply the reset inside the success branch.
+    const idsToForceReset = forceFresh ? new Set(booksToProcess.map(g => g.id)) : null;
 
     batch.start('classify', { total: booksToProcess.length, currentBook: 'Starting classification...' });
 
@@ -2027,7 +2185,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           const r = result.results?.find(r => r.id === g.id);
           if (!r || r.error) return g;
 
+          const isForceReset = idsToForceReset?.has(g.id);
           const updatedMeta = { ...g.metadata };
+
+          // On a successful force-classify, wipe stale arrays before repopulating so that
+          // books whose AI response is empty/partial don't keep old genres/tags/themes/tropes.
+          if (isForceReset) {
+            updatedMeta.genres = [];
+            updatedMeta.tags = [];
+            updatedMeta.themes = [];
+            updatedMeta.tropes = [];
+          }
 
           // Genres
           if (r.genres?.length > 0) updatedMeta.genres = r.genres;
@@ -2049,7 +2217,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             updatedMeta.description = r.description;
           }
 
-          const fields = new Set(g.changedFields || []);
+          const fields = new Set(isForceReset ? [] : (g.changedFields || []));
           if (r.genres?.length > 0) fields.add('genres');
           if (allTags.size > 0) fields.add('tags');
           if (r.themes?.length > 0) fields.add('themes');
@@ -2692,7 +2860,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         onRename={handleRenameClick}
         onPush={handlePushClick}
         onPull={handleImportFromAbs}
-        onRefreshCache={refreshCache}
         onBulkEdit={() => modals.open('bulkEdit')}
         onBulkCover={() => modals.open('bulkCover')}
         onOpenRescanModal={() => modals.open('rescan')}
@@ -2703,6 +2870,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         onFixSubtitles={handleFixSubtitles}
         onFixAuthors={handleFixAuthors}
         onFixYears={handleFixYears}
+        onExtractByAudio={handleExtractByAudio}
+        extractingByAudio={extractingByAudio}
+        useLocalWhisper={!!config?.use_local_whisper}
         onFixSeries={handleFixSeries}
         onLookupAge={handleLookupAge}
         onLookupISBN={handleLookupISBN}
@@ -2741,7 +2911,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         lookingUpISBN={lookingUpISBN}
         runningAll={runningAll}
         generatingDna={generatingDna}
-        refreshingCache={refreshingCache}
         hasAbsConnection={!!(config?.abs_base_url && config?.abs_api_token)}
         hasOpenAiKey={!!(config?.openai_api_key || config?.anthropic_api_key || config?.use_local_ai)}
         useLocalAI={!!(config?.use_local_ai && config?.ollama_model)}
@@ -2918,6 +3087,19 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="descriptionProcessing"
           progress={descriptionProgress}
+        />
+      )}
+
+      {extractingByAudio && batch.getProgress('audio_check').total > 0 && (
+        <ProgressBar
+          type="audio_check"
+          progress={batch.getProgress('audio_check')}
+          onCancel={async () => {
+            try {
+              await callBackend('cancel_audio_extraction');
+              toast.info('Cancelling audio extraction...');
+            } catch (e) { console.error(e); }
+          }}
         />
       )}
 

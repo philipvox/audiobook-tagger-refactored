@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Download, Upload, Tag, CheckCircle, Sparkles, FileText, Type, Library, X, Zap, RefreshCw, AlertTriangle, User, Search, Wrench, BookOpen, Users, Hash, Dna, ChevronDown, MoreHorizontal, Calendar, Settings } from 'lucide-react';
+import { Download, Upload, Tag, CheckCircle, Sparkles, FileText, Type, Library, X, Zap, RefreshCw, AlertTriangle, User, Search, Wrench, BookOpen, Users, Hash, Dna, ChevronDown, MoreHorizontal, Calendar, Settings, Mic } from 'lucide-react';
 
 // Per-book cost estimate (input ~2000 tokens, output ~1000 tokens)
 const MODEL_PRICES = {
@@ -44,7 +44,6 @@ export function ActionBar({
   onRename,
   onPush,
   onPull,
-  onRefreshCache,
   onFullSync,
   onBulkEdit,
   onBulkCover,
@@ -88,7 +87,9 @@ export function ActionBar({
   lookingUpISBN = false,
   runningAll = false,
   generatingDna = false,
-  refreshingCache = false,
+  onExtractByAudio,
+  extractingByAudio = false,
+  useLocalWhisper = false,
   hasAbsConnection = false,
   hasOpenAiKey = false,
   useLocalAI = false,
@@ -111,7 +112,7 @@ export function ActionBar({
   const selectedCount = allSelected ? totalGroupCount : selectedGroupCount;
   const hasSelection = selectedCount > 0;
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const isProcessing = scanning || cleaningGenres || assigningTags || fixingDescriptions || fixingTitles || fixingAuthors || fixingYears || fixingSeries || lookingUpAge || lookingUpISBN || runningAll || generatingDna || classifying || resolvingMetadata || processingDescriptions || pushing || validating || analyzingSeries;
+  const isProcessing = scanning || cleaningGenres || assigningTags || fixingDescriptions || fixingTitles || fixingAuthors || fixingYears || fixingSeries || lookingUpAge || lookingUpISBN || runningAll || generatingDna || classifying || resolvingMetadata || processingDescriptions || pushing || validating || analyzingSeries || extractingByAudio;
 
   // Time estimate for local AI: ~3s per book (batched 5 per prompt) + ~4s DNA per book
   const estimateLocalTime = (count, calls) => {
@@ -124,12 +125,34 @@ export function ActionBar({
   };
 
   // Dropdown menu item
-  const MenuItem = ({ onClick, disabled, active, icon: Icon, children, badge = null, aiCalls = 0 }) => {
-    const badgeText = aiCalls > 0 && selectedCount > 0
-      ? (useLocalAI ? estimateLocalTime(selectedCount, aiCalls) : formatCost(estimateCost(aiModel, selectedCount, aiCalls)))
-      : null;
-    const badgeLabel = useLocalAI ? 'Local' : 'AI';
-    const badgeColor = useLocalAI ? 'bg-green-500/15 text-green-400' : 'bg-amber-500/15 text-amber-400';
+  const MenuItem = ({ onClick, disabled, active, icon: Icon, children, badge = null, aiCalls = 0, whisperCost = false }) => {
+    let badgeText, badgeLabel, badgeColor;
+    if (whisperCost) {
+      if (useLocalWhisper && useLocalAI) {
+        // Fully local: free transcription + free LLM
+        badgeText = 'Free';
+        badgeLabel = 'Local';
+        badgeColor = 'bg-green-500/15 text-green-400';
+      } else if (useLocalWhisper) {
+        // Local whisper + cloud LLM: ~$0.001/book for LLM only
+        const cost = selectedCount > 0 ? selectedCount * 0.001 : null;
+        badgeText = cost != null ? formatCost(cost) : null;
+        badgeLabel = 'Local+AI';
+        badgeColor = 'bg-green-500/15 text-green-400';
+      } else {
+        // Cloud whisper ($0.006/min) + cloud LLM ($0.001)
+        const cost = selectedCount > 0 ? selectedCount * 0.007 : null;
+        badgeText = cost != null ? formatCost(cost) : null;
+        badgeLabel = 'Whisper';
+        badgeColor = 'bg-violet-500/15 text-violet-400';
+      }
+    } else {
+      badgeText = aiCalls > 0 && selectedCount > 0
+        ? (useLocalAI ? estimateLocalTime(selectedCount, aiCalls) : formatCost(estimateCost(aiModel, selectedCount, aiCalls)))
+        : null;
+      badgeLabel = useLocalAI ? 'Local' : 'AI';
+      badgeColor = useLocalAI ? 'bg-green-500/15 text-green-400' : 'bg-amber-500/15 text-amber-400';
+    }
     return (
       <button
         onClick={(e) => {
@@ -147,8 +170,8 @@ export function ActionBar({
       >
         <Icon className={`w-4 h-4 ${active ? 'animate-pulse' : ''}`} />
         <span className="flex-1">{children}</span>
-        {aiCalls > 0 && (
-          <span className={`flex items-center gap-1 px-1.5 py-0.5 ${badgeColor} text-[10px] font-medium rounded`} title={useLocalAI ? 'Uses local AI (free)' : 'Uses your AI API key'}>
+        {(aiCalls > 0 || whisperCost) && (
+          <span className={`flex items-center gap-1 px-1.5 py-0.5 ${badgeColor} text-[10px] font-medium rounded`} title={whisperCost ? 'OpenAI Whisper ($0.006/min)' : useLocalAI ? 'Uses local AI (free)' : 'Uses your AI API key'}>
             {badgeText && <span>{badgeText}</span>}
             <span>{badgeLabel}</span>
           </span>
@@ -337,6 +360,30 @@ export function ActionBar({
                       </MenuItem>
                       <MenuItem onClick={onFixYears} disabled={!hasSelection} active={fixingYears} icon={Calendar}>
                         Fix Pub Date
+                      </MenuItem>
+
+                      {/* Check by Audio — Whisper-based extraction */}
+                      <div className="h-px bg-neutral-800 my-1" />
+                      <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-gray-600 font-semibold">
+                        Check by Audio
+                      </div>
+                      <MenuItem onClick={() => onExtractByAudio?.('all')} disabled={!hasSelection} active={extractingByAudio} icon={Mic} whisperCost>
+                        Check All (Audio)
+                      </MenuItem>
+                      <MenuItem onClick={() => onExtractByAudio?.('narrator')} disabled={!hasSelection} active={extractingByAudio} icon={Mic} whisperCost>
+                        Check Narrator
+                      </MenuItem>
+                      <MenuItem onClick={() => onExtractByAudio?.('author')} disabled={!hasSelection} active={extractingByAudio} icon={Mic} whisperCost>
+                        Check Author
+                      </MenuItem>
+                      <MenuItem onClick={() => onExtractByAudio?.('title')} disabled={!hasSelection} active={extractingByAudio} icon={Mic} whisperCost>
+                        Check Title
+                      </MenuItem>
+                      <MenuItem onClick={() => onExtractByAudio?.('publisher')} disabled={!hasSelection} active={extractingByAudio} icon={Mic} whisperCost>
+                        Check Publisher
+                      </MenuItem>
+                      <MenuItem onClick={() => onExtractByAudio?.('language')} disabled={!hasSelection} active={extractingByAudio} icon={Mic} whisperCost>
+                        Check Language
                       </MenuItem>
 
                       {/* Advanced — individual operations */}
