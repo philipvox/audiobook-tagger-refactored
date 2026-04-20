@@ -864,11 +864,12 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
     );
   }
 
-  // Consolidated GPT operations (metadata, classify, descriptionProcessing)
+  // Consolidated GPT operations (metadata, classify, descriptionProcessing, narrators)
   const CONSOLIDATED_CONFIGS = {
     metadata: { label: 'Metadata Resolution', icon: '📝', gradient: 'from-blue-600 to-blue-400', border: 'border-blue-700/50', spinner: 'text-blue-500' },
     classify: { label: 'Classification & Tagging', icon: '🤖', gradient: 'from-amber-600 to-amber-400', border: 'border-amber-700/50', spinner: 'text-amber-500' },
     descriptionProcessing: { label: 'Description Processing', icon: '📖', gradient: 'from-cyan-600 to-cyan-400', border: 'border-cyan-700/50', spinner: 'text-cyan-500' },
+    audio_check: { label: 'Check by Audio', icon: '🎤', gradient: 'from-violet-600 to-violet-400', border: 'border-violet-700/50', spinner: 'text-violet-500' },
   };
 
   const consolidated = CONSOLIDATED_CONFIGS[type];
@@ -898,10 +899,18 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
               )}
             </div>
 
-            <div className="text-right">
+            <div className="flex items-center gap-3">
               <div className="text-sm text-gray-400">
                 {Math.round((progress.current / progress.total) * 100)}%
               </div>
+              {onCancel && (
+                <button
+                  onClick={onCancel}
+                  className="px-3 py-1 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors border border-red-500/20"
+                >
+                  Cancel
+                </button>
+              )}
             </div>
           </div>
 

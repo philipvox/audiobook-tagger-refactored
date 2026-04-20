@@ -10,7 +10,7 @@ import {
   BOOK_DNA_SYSTEM_PROMPT as DEFAULT_DNA_PROMPT,
 } from '../lib/prompts';
 import { APPROVED_GENRES } from '../lib/genres';
-import { ChevronDown, Check, X, Plus, Trash2, AlertCircle, Library, Settings, Sparkles, Cpu, Download, HardDrive } from 'lucide-react';
+import { ChevronDown, Check, X, Plus, Trash2, AlertCircle, Library, Settings, Sparkles, Cpu, Download, HardDrive, Mic } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { useToast } from '../components/Toast';
 import { ConfirmModal } from '../components/ConfirmModal';
@@ -157,6 +157,15 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   const [pullProgress, setPullProgress] = useState(null); // { completed, total, status }
   const [diskUsage, setDiskUsage] = useState(0);
 
+  // Local Whisper state (only used in Tauri)
+  const [whisperStatus, setWhisperStatus] = useState(null);
+  const [whisperPresets, setWhisperPresets] = useState([]);
+  const [selectedWhisperModel, setSelectedWhisperModel] = useState('base');
+  const [whisperInstalling, setWhisperInstalling] = useState(false);
+  const [whisperDownloading, setWhisperDownloading] = useState(false);
+  const [whisperDownloadProgress, setWhisperDownloadProgress] = useState(null);
+  const [whisperDiskUsage, setWhisperDiskUsage] = useState(0);
+
   // Auto-fetch libraries when URL + token are both set
   useEffect(() => {
     const url = localConfig.abs_base_url;
@@ -235,6 +244,98 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
     })();
     return () => { if (unlisten) unlisten(); };
   }, []);
+
+  // Load Local Whisper state
+  useEffect(() => {
+    if (!isTauri()) return;
+    const loadWhisperState = async () => {
+      try {
+        const [status, presets, usage] = await Promise.all([
+          callBackend('whisper_local_get_status'),
+          callBackend('whisper_local_get_model_presets'),
+          callBackend('whisper_local_get_disk_usage'),
+        ]);
+        setWhisperStatus(status);
+        setWhisperPresets(presets || []);
+        setWhisperDiskUsage(usage || 0);
+      } catch (e) { /* whisper commands not available */ }
+    };
+    loadWhisperState();
+  }, []);
+
+  // Listen for whisper install/download progress events
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten;
+    (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen('whisper_install_progress', (event) => {
+        const { stage, status, percent, downloaded, total } = event.payload;
+        setWhisperDownloadProgress({ stage, status, percent, downloaded, total });
+        if (stage === 'complete') {
+          setWhisperInstalling(false);
+          setWhisperDownloading(false);
+          // Reload status
+          callBackend('whisper_local_get_status').then(setWhisperStatus).catch(err => console.warn('Whisper post-install reload failed: status', err));
+          callBackend('whisper_local_get_disk_usage').then(setWhisperDiskUsage).catch(err => console.warn('Whisper post-install reload failed: disk usage', err));
+        }
+      });
+    })();
+    return () => { if (unlisten) unlisten(); };
+  }, []);
+
+  const handleInstallWhisper = async () => {
+    setWhisperInstalling(true);
+    try {
+      await callBackend('whisper_local_install');
+      const status = await callBackend('whisper_local_get_status');
+      setWhisperStatus(status);
+      toast.success('whisper-cpp installed!');
+    } catch (e) {
+      toast.error('Install failed', String(e));
+    }
+    setWhisperInstalling(false);
+  };
+
+  const handleDownloadWhisperModel = async () => {
+    setWhisperDownloading(true);
+    try {
+      await callBackend('whisper_local_download_model', { modelId: selectedWhisperModel });
+      const status = await callBackend('whisper_local_get_status');
+      setWhisperStatus(status);
+      setWhisperDiskUsage(await callBackend('whisper_local_get_disk_usage'));
+      // Auto-enable local whisper
+      setLocalConfig(prev => ({ ...prev, use_local_whisper: true, whisper_model: selectedWhisperModel }));
+      toast.success('Whisper model downloaded!');
+    } catch (e) {
+      toast.error('Download failed', String(e));
+    }
+    setWhisperDownloading(false);
+  };
+
+  const handleDeleteWhisperModel = async (modelId) => {
+    try {
+      await callBackend('whisper_local_delete_model', { modelId });
+      const status = await callBackend('whisper_local_get_status');
+      setWhisperStatus(status);
+      setWhisperDiskUsage(await callBackend('whisper_local_get_disk_usage'));
+      toast.info(`Model ${modelId} deleted`);
+    } catch (e) {
+      toast.error('Delete failed', String(e));
+    }
+  };
+
+  const handleUninstallWhisper = async () => {
+    try {
+      await callBackend('whisper_local_uninstall');
+      setWhisperStatus({ installed: false, binary_path: null, models: [], active_model: null });
+      setWhisperDiskUsage(0);
+      setLocalConfig(prev => ({ ...prev, use_local_whisper: false, whisper_model: null }));
+      toast.info('Local Whisper removed');
+    } catch (e) {
+      toast.error('Uninstall failed', String(e));
+    }
+  };
 
   const loadProviders = async () => {
     try { setCustomProviders(await callBackend('get_custom_providers')); } catch (e) { console.error(e); }
@@ -526,9 +627,132 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
             >
               {connectionStatus === 'success' ? 'Connected' : connectionStatus === 'error' ? 'Connection Failed — Retry' : 'Connect & Detect Libraries'}
             </button>
+
+            {/* AI Provider */}
+            <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
+              <h3 className="text-lg font-semibold text-white mb-3">AI Provider</h3>
+              <p className="text-sm text-gray-400">Enter your API key for OpenAI or Anthropic Claude. Keys are stored in your browser only.</p>
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-sm text-gray-400">OpenAI API Key</label>
+                      <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300">Get a key</a>
+                    </div>
+                    <Input
+                      type="password"
+                      value={localConfig.openai_api_key}
+                      onChange={(v) => setLocalConfig({ ...localConfig, openai_api_key: v })}
+                      placeholder="sk-..."
+                    />
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-sm text-gray-400">Anthropic (Claude) API Key</label>
+                      <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300">Get a key</a>
+                    </div>
+                    <Input
+                      type="password"
+                      value={localConfig.anthropic_api_key}
+                      onChange={(v) => setLocalConfig({ ...localConfig, anthropic_api_key: v })}
+                      placeholder="sk-ant-..."
+                    />
+                  </div>
+                  <div className="text-xs text-amber-500/70 mt-1 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3 flex-shrink-0" />
+                    <span>API keys are stored in your browser's local storage. Do not use this on shared computers.</span>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1.5">AI Model</label>
+                    <select
+                      value={localConfig.ai_model || 'gpt-5-nano'}
+                      onChange={(e) => {
+                          const model = AI_MODELS.find(m => m.id === e.target.value);
+                          const isAnthropic = model?.provider === 'anthropic';
+                          setLocalConfig({
+                            ...localConfig,
+                            ai_model: e.target.value,
+                            ai_base_url: isAnthropic ? 'https://api.anthropic.com' : 'https://api.openai.com',
+                          });
+                      }}
+                      className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
+                    >
+                      <optgroup label="OpenAI">
+                        {AI_MODELS.filter(m => m.provider === 'openai').map(m => {
+                          const libCost = libraryBookCount > 0 ? estimateCost(m, libraryBookCount) * 3 : null;
+                          const costStr = libCost != null ? ` - Run All: ${formatCost(libCost)}` : '';
+                          return <option key={m.id} value={m.id}>{m.label}{costStr}</option>;
+                        })}
+                      </optgroup>
+                      <optgroup label="Anthropic Claude">
+                        {AI_MODELS.filter(m => m.provider === 'anthropic').map(m => {
+                          const libCost = libraryBookCount > 0 ? estimateCost(m, libraryBookCount) * 3 : null;
+                          const costStr = libCost != null ? ` - Run All: ${formatCost(libCost)}` : '';
+                          return <option key={m.id} value={m.id}>{m.label}{costStr}</option>;
+                        })}
+                      </optgroup>
+                    </select>
+                  </div>
+            </div>
+
+            {/* Performance Controls */}
+            {isTauri() && (
+              <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
+                <div className="flex items-center gap-2">
+                  <Settings className="w-4 h-4 text-gray-400" />
+                  <h3 className="text-lg font-semibold text-white">Performance</h3>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm text-gray-500 mb-1.5">Local AI Workers</label>
+                    <select
+                      value={localConfig.local_concurrency || 1}
+                      onChange={(e) => setLocalConfig({ ...localConfig, local_concurrency: parseInt(e.target.value) })}
+                      className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
+                    >
+                      <option value={1}>1 (Sequential)</option>
+                      <option value={2}>2 books at once</option>
+                      <option value={3}>3 books at once</option>
+                      <option value={5}>5 books at once</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-500 mb-1.5">Cloud AI Workers</label>
+                    <select
+                      value={localConfig.cloud_concurrency || 5}
+                      onChange={(e) => setLocalConfig({ ...localConfig, cloud_concurrency: parseInt(e.target.value) })}
+                      className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
+                    >
+                      <option value={1}>1 (Slowest)</option>
+                      <option value={3}>3</option>
+                      <option value={5}>5 (Default)</option>
+                      <option value={10}>10 (Fast)</option>
+                      <option value={15}>15 (Aggressive)</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-sm text-gray-500">ABS Push Workers</label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={localConfig.concurrency_abs_push || 5}
+                      onChange={(e) => { const v = parseInt(e.target.value); if (v > 0) setLocalConfig({ ...localConfig, concurrency_abs_push: v }); }}
+                      className="w-16 px-2 py-1 bg-neutral-800 border border-neutral-700 rounded text-sm text-white text-center focus:outline-none"
+                    />
+                  </div>
+                  <input
+                    type="range" min={1} max={50}
+                    value={Math.min(localConfig.concurrency_abs_push || 5, 50)}
+                    onChange={(e) => setLocalConfig({ ...localConfig, concurrency_abs_push: parseInt(e.target.value) })}
+                    className="w-full h-1.5 bg-neutral-700 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full"
+                  />
+                  <p className="text-xs text-gray-600 mt-1">Use 1-2 for NAS.</p>
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* Right: AI & Processing */}
+          {/* Right: Local AI & Whisper */}
           <div className="space-y-6">
 
             {isTauri() && (
@@ -715,173 +939,160 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
               </div>
             )}
 
-            {/* Performance Controls */}
+            {/* Local Whisper - Speech-to-Text */}
             {isTauri() && (
               <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
-                <div className="flex items-center gap-2">
-                  <Settings className="w-4 h-4 text-gray-400" />
-                  <h3 className="text-lg font-semibold text-white">Performance</h3>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-gray-500 mb-1.5">Local AI Workers</label>
-                    <select
-                      value={localConfig.local_concurrency || 1}
-                      onChange={(e) => setLocalConfig({ ...localConfig, local_concurrency: parseInt(e.target.value) })}
-                      className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
-                    >
-                      <option value={1}>1 (Sequential)</option>
-                      <option value={2}>2 books at once</option>
-                      <option value={3}>3 books at once</option>
-                      <option value={5}>5 books at once</option>
-                    </select>
-                    <p className="text-xs text-gray-600 mt-1">Ollama queues requests internally. Higher values reduce wait time between books.</p>
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-500 mb-1.5">Cloud AI Workers</label>
-                    <select
-                      value={localConfig.cloud_concurrency || 5}
-                      onChange={(e) => setLocalConfig({ ...localConfig, cloud_concurrency: parseInt(e.target.value) })}
-                      className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
-                    >
-                      <option value={1}>1 (Slowest)</option>
-                      <option value={3}>3</option>
-                      <option value={5}>5 (Default)</option>
-                      <option value={10}>10 (Fast)</option>
-                      <option value={15}>15 (Aggressive)</option>
-                    </select>
-                    <p className="text-xs text-gray-600 mt-1">Cloud APIs handle parallel requests well. Higher = faster batch processing.</p>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-sm text-gray-500">ABS Push Workers</label>
-                    <input
-                      type="number"
-                      min={1}
-                      value={localConfig.concurrency_abs_push || 5}
-                      onChange={(e) => { const v = parseInt(e.target.value); if (v > 0) setLocalConfig({ ...localConfig, concurrency_abs_push: v }); }}
-                      className="w-16 px-2 py-1 bg-neutral-800 border border-neutral-700 rounded text-sm text-white text-center focus:outline-none"
-                    />
-                  </div>
-                  <input
-                    type="range"
-                    min={1}
-                    max={50}
-                    value={Math.min(localConfig.concurrency_abs_push || 5, 50)}
-                    onChange={(e) => setLocalConfig({ ...localConfig, concurrency_abs_push: parseInt(e.target.value) })}
-                    className="w-full h-1.5 bg-neutral-700 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full"
-                  />
-                  <p className="text-xs text-gray-600 mt-1">Concurrent requests when pushing to ABS. Default 5. Use 1-2 for NAS.</p>
-                </div>
-
                 <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-sm text-gray-400">Skip DNA for Local AI</span>
-                    <p className="text-xs text-gray-600">DNA fingerprints are complex — skip them to speed up local classification by ~50%.</p>
+                  <div className="flex items-center gap-2">
+                    <Mic className="w-4 h-4 text-violet-400" />
+                    <h3 className="text-lg font-semibold text-white">Local Whisper</h3>
                   </div>
-                  <button
-                    onClick={() => setLocalConfig({ ...localConfig, local_skip_dna: !localConfig.local_skip_dna })}
-                    className={`relative w-10 h-5 rounded-full transition-colors ${localConfig.local_skip_dna ? 'bg-blue-600' : 'bg-neutral-700'}`}
-                  >
-                    <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${localConfig.local_skip_dna ? 'translate-x-5' : 'translate-x-0.5'}`} />
-                  </button>
+                  {whisperStatus?.installed && (
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-2 h-2 rounded-full bg-green-400" />
+                      <span className="text-xs text-green-400">Installed</span>
+                    </div>
+                  )}
                 </div>
+
+                {/* Not installed */}
+                {!whisperStatus?.installed && !whisperInstalling && (
+                  <div className="space-y-3">
+                    <p className="text-sm text-gray-400">
+                      Run speech-to-text locally. Free, private, no API key needed for audio transcription.
+                    </p>
+                    <button
+                      onClick={handleInstallWhisper}
+                      className="w-full py-2.5 bg-violet-600 text-white text-sm font-medium rounded-lg hover:bg-violet-500 transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Download className="w-4 h-4" />
+                      Install Local Whisper
+                    </button>
+                  </div>
+                )}
+
+                {/* Installing */}
+                {whisperInstalling && (
+                  <div className="py-4">
+                    <div className="flex items-center gap-2 text-sm text-violet-400">
+                      <div className="w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
+                      {whisperDownloadProgress?.status || 'Installing whisper-cpp...'}
+                    </div>
+                  </div>
+                )}
+
+                {/* Installed - show models */}
+                {whisperStatus?.installed && (
+                  <div className="space-y-3">
+                    {/* Toggle */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-gray-400">Use Local Whisper</span>
+                      <button
+                        onClick={() => setLocalConfig({ ...localConfig, use_local_whisper: !localConfig.use_local_whisper })}
+                        className={`relative w-10 h-5 rounded-full transition-colors ${localConfig.use_local_whisper ? 'bg-violet-600' : 'bg-neutral-700'}`}
+                      >
+                        <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${localConfig.use_local_whisper ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                      </button>
+                    </div>
+
+                    {/* Downloaded models */}
+                    {whisperStatus.models?.length > 0 && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1.5">Downloaded Models</label>
+                        {whisperStatus.models.map(m => (
+                          <div key={m.id} className="flex items-center justify-between py-1.5 px-2 rounded hover:bg-neutral-800">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="whisper_model"
+                                checked={localConfig.whisper_model === m.id}
+                                onChange={() => setLocalConfig({ ...localConfig, whisper_model: m.id })}
+                                className="accent-violet-500"
+                              />
+                              <span className="text-sm text-white">{m.id}</span>
+                              <span className="text-xs text-gray-500">{(m.size_bytes / 1e6).toFixed(0)} MB</span>
+                            </div>
+                            <button
+                              onClick={() => handleDeleteWhisperModel(m.id)}
+                              className="text-xs text-gray-600 hover:text-red-400"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Download new model */}
+                    {!whisperDownloading && (
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1.5">Download a Model</label>
+                        <div className="space-y-1.5">
+                          {whisperPresets.filter(p => !whisperStatus.models?.some(m => m.id === p.id)).map(preset => (
+                            <button
+                              key={preset.id}
+                              onClick={() => setSelectedWhisperModel(preset.id)}
+                              className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors border ${
+                                selectedWhisperModel === preset.id
+                                  ? 'border-violet-500 bg-violet-500/10 text-white'
+                                  : 'border-neutral-700 bg-neutral-800 text-gray-400 hover:border-neutral-600'
+                              }`}
+                            >
+                              <div className="flex justify-between items-center">
+                                <span className="font-medium">{preset.label}</span>
+                                <span className="text-gray-500">{preset.size_mb} MB</span>
+                              </div>
+                              <div className="text-xs text-gray-500 mt-0.5">{preset.description}</div>
+                            </button>
+                          ))}
+                        </div>
+                        {whisperPresets.some(p => !whisperStatus.models?.some(m => m.id === p.id)) && (
+                          <button
+                            onClick={handleDownloadWhisperModel}
+                            className="mt-2 w-full py-2 bg-violet-600/20 text-violet-400 text-sm font-medium rounded-lg hover:bg-violet-600/30 transition-colors flex items-center justify-center gap-2"
+                          >
+                            <Download className="w-4 h-4" />
+                            Download Model
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Downloading */}
+                    {whisperDownloading && whisperDownloadProgress && (
+                      <div className="space-y-2">
+                        <div className="w-full bg-neutral-800 rounded-full h-2 overflow-hidden">
+                          <div
+                            className="bg-violet-500 h-full rounded-full transition-all duration-300"
+                            style={{ width: `${whisperDownloadProgress.percent || 0}%` }}
+                          />
+                        </div>
+                        <div className="text-xs text-gray-500">{whisperDownloadProgress.status}</div>
+                      </div>
+                    )}
+
+                    {/* Disk usage */}
+                    {whisperDiskUsage > 0 && (
+                      <div className="text-xs text-gray-600">
+                        Disk usage: {(whisperDiskUsage / 1e6).toFixed(0)} MB
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs text-gray-600">
+                        Binary: {whisperStatus.binary_path || 'Not found'}
+                      </p>
+                      <button
+                        onClick={handleUninstallWhisper}
+                        className="text-xs text-red-500/60 hover:text-red-400 transition-colors"
+                      >
+                        Remove Local Whisper
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
-
-            <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
-              <h3 className="text-lg font-semibold text-white mb-3">AI Provider</h3>
-              <p className="text-sm text-gray-400">Enter your API key for OpenAI or Anthropic Claude. Keys are stored in your browser only — never sent to our server.</p>
-                  <div>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <label className="text-sm text-gray-400">OpenAI API Key</label>
-                      <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300">Get a key →</a>
-                    </div>
-                    <Input
-                      type="password"
-                      value={localConfig.openai_api_key}
-                      onChange={(v) => setLocalConfig({ ...localConfig, openai_api_key: v })}
-                      placeholder="sk-..."
-                    />
-                  </div>
-                  <div>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <label className="text-sm text-gray-400">Anthropic (Claude) API Key</label>
-                      <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300">Get a key →</a>
-                    </div>
-                    <Input
-                      type="password"
-                      value={localConfig.anthropic_api_key}
-                      onChange={(v) => setLocalConfig({ ...localConfig, anthropic_api_key: v })}
-                      placeholder="sk-ant-..."
-                    />
-                  </div>
-                  <div className="text-xs text-amber-500/70 mt-1 flex items-center gap-1">
-                    <AlertCircle className="w-3 h-3 flex-shrink-0" />
-                    <span>API keys are stored in your browser's local storage. Do not use this on shared computers.</span>
-                  </div>
-                  <p className="text-sm text-gray-400">Enter one or both. The model you select below determines which key is used.</p>
-                  <div>
-                    <label className="block text-sm text-gray-400 mb-1.5">AI Model</label>
-                    <select
-                      value={localConfig.ai_model || 'gpt-5-nano'}
-                      onChange={(e) => {
-                          const model = AI_MODELS.find(m => m.id === e.target.value);
-                          const isAnthropic = model?.provider === 'anthropic';
-                          setLocalConfig({
-                            ...localConfig,
-                            ai_model: e.target.value,
-                            ai_base_url: isAnthropic ? 'https://api.anthropic.com' : 'https://api.openai.com',
-                          });
-                      }}
-                      className="w-full px-4 py-3 bg-neutral-800 border border-neutral-700 rounded-lg text-base text-white focus:outline-none cursor-pointer"
-                    >
-                      <optgroup label="OpenAI">
-                        {AI_MODELS.filter(m => m.provider === 'openai').map(m => {
-                          const libCost = libraryBookCount > 0 ? estimateCost(m, libraryBookCount) * 3 : null;
-                          const costStr = libCost != null ? ` — Run All: ${formatCost(libCost)}` : '';
-                          return <option key={m.id} value={m.id}>{m.label}{costStr}</option>;
-                        })}
-                      </optgroup>
-                      <optgroup label="Anthropic Claude">
-                        {AI_MODELS.filter(m => m.provider === 'anthropic').map(m => {
-                          const libCost = libraryBookCount > 0 ? estimateCost(m, libraryBookCount) * 3 : null;
-                          const costStr = libCost != null ? ` — Run All: ${formatCost(libCost)}` : '';
-                          return <option key={m.id} value={m.id}>{m.label}{costStr}</option>;
-                        })}
-                      </optgroup>
-                    </select>
-                    {(() => {
-                      const m = AI_MODELS.find(m => m.id === (localConfig.ai_model || 'gpt-5-nano'));
-                      if (!m) return null;
-                      const perBook = estimateCost(m, 1);
-                      const libSize = libraryBookCount;
-                      const runAllPerBook = estimateCost(m, 1) * 3; // 3 AI calls per book
-                      const runAllLib = libSize > 0 ? estimateCost(m, libSize) * 3 : null;
-                      return (
-                        <div className="mt-3 text-sm space-y-2">
-                          <div className="text-gray-500">
-                            <span className="text-gray-300">${m.inputPrice.toFixed(2)} / ${m.outputPrice.toFixed(2)}</span> per 1M tokens (input/output)
-                          </div>
-                          <div className="text-gray-400">
-                            Per book: <span className="text-white font-medium">{formatCost(perBook)}</span> (single operation)
-                            {' '}&middot;{' '}
-                            <span className="text-white font-medium">{formatCost(runAllPerBook)}</span> (Run All)
-                          </div>
-                          {libSize > 0 && (
-                            <div className="bg-neutral-800/50 rounded-lg px-3 py-2 text-gray-400">
-                              Full library Run All ({libSize} books): <span className="text-green-400 font-semibold">{formatCost(runAllLib)}</span>
-                            </div>
-                          )}
-                          <div className="text-gray-500">{m.desc}</div>
-                        </div>
-                      );
-                    })()}
-                  </div>
-            </div>
 
           </div>
         </div>

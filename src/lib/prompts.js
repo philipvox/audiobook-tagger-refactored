@@ -139,6 +139,15 @@ export function buildMetadataPrompt(input) {
   if (input.current_subtitle) context += `Current subtitle: ${safe(input.current_subtitle)}\n`;
   if (input.current_series) context += `Current series: ${safe(input.current_series)}\n`;
   if (input.current_sequence) context += `Current sequence: ${safe(input.current_sequence)}\n`;
+  if (input.current_narrator) context += `Current narrator: ${safe(input.current_narrator)}\n`;
+  if (input.current_publisher) context += `Current publisher: ${safe(input.current_publisher)}\n`;
+  if (input.current_year) context += `Current year: ${safe(input.current_year)}\n`;
+  if (input.current_isbn) context += `ISBN: ${safe(input.current_isbn)}\n`;
+  if (input.current_asin) context += `ASIN: ${safe(input.current_asin)}\n`;
+  if (input.current_description) {
+    const desc = String(input.current_description).slice(0, 600);
+    context += `Description (truncated): ${safe(desc)}\n`;
+  }
 
   const hasAudible = input.audible_title || input.audible_series;
   if (hasAudible) {
@@ -148,6 +157,21 @@ export function buildMetadataPrompt(input) {
     if (input.audible_subtitle) context += `Audible subtitle: ${safe(input.audible_subtitle)}\n`;
     if (input.audible_series) context += `Audible series: ${safe(input.audible_series)}\n`;
     if (input.audible_sequence) context += `Audible sequence: ${safe(input.audible_sequence)}\n`;
+  }
+
+  // When the external lookup was ambiguous (e.g. OpenLibrary title-only search
+  // returned several books with that title), pass the candidates and let the
+  // model pick the one that best matches narrator / year / publisher.
+  if (Array.isArray(input.audible_candidates) && input.audible_candidates.length > 0) {
+    context += '\n--- Ambiguous External Matches (PICK ONE that matches narrator/year/publisher) ---\n';
+    input.audible_candidates.slice(0, 5).forEach((c, i) => {
+      const bits = [];
+      if (c.author) bits.push(`author=${c.author}`);
+      if (c.year) bits.push(`year=${c.year}`);
+      if (c.publisher) bits.push(`publisher=${c.publisher}`);
+      if (c.subtitle) bits.push(`subtitle=${c.subtitle}`);
+      context += `${i + 1}. ${bits.join(' | ')}\n`;
+    });
   }
 
   const hasFolderData = input.folder_author || input.folder_series;
@@ -188,6 +212,11 @@ ${context}
 - For co-authors: "Stephen King, Peter Straub"
 - Prefer Folder author > Audible author > current_author
 - If folder_author looks valid (has first+last name), trust it
+- If current_author is empty or "Unknown", derive the author from any available
+  signal: the DESCRIPTION usually names the author ("Louise Erdrich's latest
+  novel..."), the ISBN/ASIN uniquely identifies a real book, or the title +
+  year + publisher combination narrows it. Do NOT return null/empty/"Unknown"
+  for author if ANY of these are present — extract the name.
 
 ═══ SERIES RULES (CRITICAL — CONSISTENCY FIRST) ═══
 - If "Author's Known Series" is provided, use EXACTLY that series name
