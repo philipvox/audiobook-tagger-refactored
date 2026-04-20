@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { callBackend } from '../../api';
+import { proxyFetch } from '../../lib/proxy';
 import { Book, Edit, X, Database, Folder, Bot, FileAudio, Globe, Music, Library, FolderOpen, Search } from 'lucide-react';
 import { useToast } from '../Toast';
 
@@ -238,7 +239,8 @@ export function MetadataPanel({ group, onEdit, onInlineEdit }) {
         // Audible public catalog API — no auth needed
         const titleParam = encodeURIComponent(title);
         const authorParam = encodeURIComponent(author);
-        const res = await fetch(`/api/audible/1.0/catalog/products?title=${titleParam}&author=${authorParam}&num_results=5&response_groups=product_desc`);
+        // Audible catalog (Tauri http plugin bypasses CORS; web variant deferred — see issue #53)
+        const res = await proxyFetch(`https://api.audible.com/1.0/catalog/products?title=${titleParam}&author=${authorParam}&num_results=5&response_groups=product_desc`);
         if (res.ok) {
           const data = await res.json();
           const products = data.products || [];
@@ -252,7 +254,7 @@ export function MetadataPanel({ group, onEdit, onInlineEdit }) {
       } else {
         // ISBN via Open Library
         const query = encodeURIComponent(`${title} ${author}`);
-        const res = await fetch(`/api/openlibrary/search.json?q=${query}&limit=5&fields=isbn,title,author_name`);
+        const res = await proxyFetch(`https://openlibrary.org/search.json?q=${query}&limit=5&fields=isbn,title,author_name`);
         if (res.ok) {
           const data = await res.json();
           for (const doc of (data.docs || [])) {
