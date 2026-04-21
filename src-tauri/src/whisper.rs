@@ -427,7 +427,8 @@ fn extract_audio_from_url_with_offset(
 
     args.push(output_path.to_string());
 
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_cmd()
+        .ok_or("FFmpeg not found")?
         .args(&args)
         .output()?;
 
@@ -463,7 +464,8 @@ fn extract_audio_segment(
 
     args.push(output_path.to_string());
 
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_cmd()
+        .ok_or("FFmpeg not found")?
         .args(&args)
         .output()?;
 
@@ -477,9 +479,12 @@ fn extract_audio_segment(
     Ok(())
 }
 
+fn ffmpeg_cmd() -> Option<Command> {
+    crate::whisper_local::find_ffmpeg_binary().map(Command::new)
+}
+
 fn check_ffmpeg_available() -> bool {
-    Command::new("ffmpeg").arg("-version").output()
-        .map(|o| o.status.success()).unwrap_or(false)
+    crate::whisper_local::find_ffmpeg_binary().is_some()
 }
 
 // ---- Whisper API ----
