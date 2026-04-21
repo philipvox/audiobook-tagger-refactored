@@ -58,6 +58,72 @@ fn bundled_binary_path() -> Result<PathBuf, String> {
     { Ok(dir.join("whisper-cpp")) }
 }
 
+fn bundled_ffmpeg_path() -> Result<PathBuf, String> {
+    let dir = whisper_dir()?;
+    #[cfg(target_os = "windows")]
+    { Ok(dir.join("ffmpeg.exe")) }
+    #[cfg(not(target_os = "windows"))]
+    { Ok(dir.join("ffmpeg")) }
+}
+
+/// Find ffmpeg: bundled first, then common system paths, then PATH.
+/// GUI apps on macOS don't inherit shell PATH, so /opt/homebrew/bin isn't visible.
+pub fn find_ffmpeg_binary() -> Option<PathBuf> {
+    if let Ok(bundled) = bundled_ffmpeg_path() {
+        if bundled.exists() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&bundled) {
+                    if meta.permissions().mode() & 0o111 != 0 && meta.len() > 1000 {
+                        return Some(bundled);
+                    }
+                }
+            }
+            #[cfg(windows)]
+            return Some(bundled);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for name in &[
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ] {
+        let p = PathBuf::from(name);
+        if p.exists() { return Some(p); }
+    }
+
+    #[cfg(target_os = "linux")]
+    for name in &["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+        let p = PathBuf::from(name);
+        if p.exists() { return Some(p); }
+    }
+
+    #[cfg(unix)]
+    {
+        if let Ok(output) = std::process::Command::new("which").arg("ffmpeg").output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() { return Some(PathBuf::from(path)); }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Ok(output) = std::process::Command::new("where").arg("ffmpeg").output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).lines().next().unwrap_or("").trim().to_string();
+                if !path.is_empty() { return Some(PathBuf::from(path)); }
+            }
+        }
+    }
+
+    None
+}
+
 /// Find whisper binary: bundled first, then system PATH
 /// Brew installs it as "whisper-cli", older versions as "whisper-cpp"
 fn find_whisper_binary() -> Option<PathBuf> {
@@ -185,6 +251,16 @@ pub fn whisper_local_get_model_presets() -> Vec<WhisperModelPreset> {
 pub async fn whisper_local_install(window: tauri::Window) -> Result<String, String> {
     use tauri::Emitter;
 
+    // Ensure ffmpeg is available (bundled or system). Download if missing.
+    if find_ffmpeg_binary().is_none() {
+        let _ = window.emit("whisper_install_progress", serde_json::json!({
+            "stage": "downloading", "status": "Downloading FFmpeg...",
+        }));
+        if let Err(e) = install_ffmpeg(&window).await {
+            return Err(format!("FFmpeg install failed: {}. Install manually with 'brew install ffmpeg' (macOS) or download from ffmpeg.org.", e));
+        }
+    }
+
     if find_whisper_binary().is_some() {
         return Ok("whisper-cpp is already installed".to_string());
     }
@@ -231,6 +307,104 @@ pub async fn whisper_local_install(window: tauri::Window) -> Result<String, Stri
     }));
 
     download_and_install_binary(url, &window).await
+}
+
+/// Download and install a static ffmpeg binary into `whisper_dir()`.
+/// macOS: evermeet.cx (universal). Windows: gyan.dev essentials build.
+async fn install_ffmpeg(window: &tauri::Window) -> Result<String, String> {
+    use tauri::Emitter;
+
+    let dir = whisper_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Dir error: {}", e))?;
+
+    #[cfg(target_os = "macos")]
+    let url = "https://evermeet.cx/ffmpeg/getrelease/zip";
+    #[cfg(target_os = "windows")]
+    let url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+    #[cfg(target_os = "linux")]
+    let url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz";
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build().map_err(|e| format!("HTTP error: {}", e))?;
+
+    let resp = client.get(url).send().await.map_err(|e| format!("Download failed: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Download failed: HTTP {}", resp.status()));
+    }
+
+    let bytes = resp.bytes().await.map_err(|e| format!("Read error: {}", e))?;
+
+    let _ = window.emit("whisper_install_progress", serde_json::json!({
+        "stage": "extracting", "status": "Extracting FFmpeg...",
+    }));
+
+    let temp_dir = tempfile::tempdir().map_err(|e| format!("Temp error: {}", e))?;
+    let target_path = bundled_ffmpeg_path()?;
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let archive_path = temp_dir.path().join("ffmpeg.zip");
+        std::fs::write(&archive_path, &bytes).map_err(|e| format!("Write error: {}", e))?;
+
+        let output = std::process::Command::new("unzip")
+            .args(["-q", "-o"])
+            .arg(archive_path.to_str().unwrap_or_default())
+            .arg("-d")
+            .arg(temp_dir.path().to_str().unwrap_or_default())
+            .output()
+            .map_err(|e| format!("Unzip error: {}. On Windows, ensure 'unzip' is available or use 7-Zip.", e))?;
+
+        if !output.status.success() {
+            return Err(format!("Unzip failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let archive_path = temp_dir.path().join("ffmpeg.tar.xz");
+        std::fs::write(&archive_path, &bytes).map_err(|e| format!("Write error: {}", e))?;
+        let output = std::process::Command::new("tar")
+            .args(["-xJf"])
+            .arg(archive_path.to_str().unwrap_or_default())
+            .arg("-C")
+            .arg(temp_dir.path().to_str().unwrap_or_default())
+            .output()
+            .map_err(|e| format!("Tar error: {}", e))?;
+        if !output.status.success() {
+            return Err(format!("Tar failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+    }
+
+    // Walk the extracted tree to find the ffmpeg binary
+    let mut found: Option<PathBuf> = None;
+    for entry in walkdir::WalkDir::new(temp_dir.path()).max_depth(5) {
+        if let Ok(e) = entry {
+            if let Some(name) = e.file_name().to_str() {
+                let is_ffmpeg = name == "ffmpeg" || name == "ffmpeg.exe";
+                if is_ffmpeg && e.file_type().is_file() {
+                    found = Some(e.path().to_path_buf());
+                    break;
+                }
+            }
+        }
+    }
+
+    let source = found.ok_or("Could not find ffmpeg binary in downloaded archive")?;
+    std::fs::copy(&source, &target_path).map_err(|e| format!("Copy error: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("Permission error: {}", e))?;
+    }
+
+    let _ = window.emit("whisper_install_progress", serde_json::json!({
+        "stage": "ffmpeg_done", "status": "FFmpeg installed",
+    }));
+
+    Ok("FFmpeg installed".to_string())
 }
 
 async fn download_and_install_binary(url: &str, window: &tauri::Window) -> Result<String, String> {

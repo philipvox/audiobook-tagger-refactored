@@ -1,6 +1,6 @@
 [package]
 name = "audiobook-tagger-v2"
-version = "2.0.6"
+version = "2.0.7"
 description = "Audiobook metadata manager — desktop edition"
 edition = "2021"
 
