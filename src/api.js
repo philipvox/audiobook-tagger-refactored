@@ -848,23 +848,38 @@ If it's part of a series, fill in the name and book number. If standalone, use n
       const processBook = async (book) => {
         try {
           emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: `Classifying: ${book.title}` });
+          // Race the classification and DNA calls. The classification result owns the
+          // book's success; the DNA sub-step may fail independently and is surfaced via
+          // errorDetail when it does, without demoting the book to success:false.
+          let dnaError = null;
+          const dnaPromise = dnaEnabled
+            ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch((err) => {
+                dnaError = errorDetailFromException(err, { stage: 'dna' });
+                return null;
+              })
+            : Promise.resolve(null);
           const [response, dnaResponse] = await Promise.all([
             callAI(config, getSystemPrompt(config),
               buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000),
-            dnaEnabled
-              ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null)
-              : Promise.resolve(null),
+            dnaPromise,
           ]);
           const parsed = parseAIJson(response);
           let dna_tags = [];
           if (dnaResponse) { try { dna_tags = convertDnaToTags(parseAIJson(dnaResponse)); } catch {} }
           completed++;
           emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
-          return buildResult(book, parsed, dna_tags);
+          const bookResult = buildResult(book, parsed, dna_tags);
+          if (dnaError) bookResult.errorDetail = dnaError;
+          return bookResult;
         } catch (err) {
           completed++;
           emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
-          return { id: book.id, success: false, error: err.message };
+          return {
+            id: book.id,
+            success: false,
+            error: err.message,
+            errorDetail: errorDetailFromException(err, { stage: 'classify' }),
+          };
         }
       };
 
