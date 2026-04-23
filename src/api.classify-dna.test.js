@@ -12,17 +12,18 @@ vi.mock('./lib/proxy', async (importOriginal) => {
 });
 
 // Force local-AI code path in classify_books_batch.
+const { callBackend } = await import('./api.js');
+const { callAI, parseAIJson } = await import('./lib/proxy');
+
 beforeEach(() => {
   localStorage.clear();
   localStorage.setItem('audiobook_tagger_config', JSON.stringify({
     use_local_ai: true,
     ollama_model: 'qwen3:1.7b',
   }));
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  parseAIJson.mockImplementation((s) => JSON.parse(s));
 });
-
-const { callBackend } = await import('./api.js');
-const { callAI } = await import('./lib/proxy');
 
 describe('classify_books_batch — local DNA swallow adopts errorDetail (commit 2)', () => {
   it('attaches errorDetail when DNA parseAIJson throws on a small-model malformed response', async () => {
@@ -122,6 +123,40 @@ describe('classify_books_batch — local DNA swallow adopts errorDetail (commit 
     expect(r.errorDetail).toBeDefined();
     expect(r.errorDetail.stage).toBe('classify');
     expect(r.errorDetail.kind).toBe('http');
+  });
+
+  it('cloud path: attaches errorDetail when DNA response arrives but parseAIJson fails', async () => {
+    localStorage.setItem('audiobook_tagger_config', JSON.stringify({
+      openai_api_key: 'sk-fake',
+      ai_model: 'gpt-5-nano',
+    }));
+    const { parseAIJson } = await import('./lib/proxy');
+    // parseAIJson is already vi-mocked to JSON.parse(s). Feed it bad JSON on the
+    // 2nd call (the DNA parse). The 1st call is the classification parse.
+    let callCount = 0;
+    parseAIJson.mockImplementation((s) => {
+      callCount++;
+      if (callCount === 1) return { genres: ['Fantasy'], tags: [] }; // classification
+      throw new Error('Failed to parse AI response as JSON: Unexpected end of input');
+    });
+    callAI.mockImplementation((config, sys, user, maxTokens) => {
+      if (maxTokens === 1500) return Promise.resolve('{"pacing":"slow'); // truncated
+      return Promise.resolve('{"genres":["Fantasy"]}');
+    });
+
+    const result = await callBackend('classify_books_batch', {
+      books: [{ id: 'b1', title: 'A Wizard of Earthsea' }],
+      dnaEnabled: true,
+      forceFresh: false,
+      includeDescription: false,
+    });
+
+    const r = result.results[0];
+    expect(r.success).toBe(true);
+    expect(r.errorDetail).toBeDefined();
+    expect(r.errorDetail.stage).toBe('dna');
+    expect(r.errorDetail.kind).toBe('parse');
+    expect(r.errorDetail.responsePreview).toContain('pacing');
   });
 
   it('does NOT attach errorDetail when DNA is disabled', async () => {
