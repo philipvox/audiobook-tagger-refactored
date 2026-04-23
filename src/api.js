@@ -518,18 +518,26 @@ const HANDLERS = {
 
     const lookupByTitle = async (title, author) => {
       if (!title || !String(title).trim()) return null;
+      const hasAuthor = author && String(author).trim() && !/^unknown$/i.test(author);
+      const params = new URLSearchParams({
+        title: String(title).trim(),
+        limit: '5',
+        fields: 'title,subtitle,author_name,isbn,first_publish_year,publisher',
+      });
+      if (hasAuthor) params.set('author', String(author).trim());
+      const url = `https://openlibrary.org/search.json?${params}`;
       try {
-        const hasAuthor = author && String(author).trim() && !/^unknown$/i.test(author);
-        const params = new URLSearchParams({
-          title: String(title).trim(),
-          limit: '5',
-          fields: 'title,subtitle,author_name,isbn,first_publish_year,publisher',
-        });
-        if (hasAuthor) params.set('author', String(author).trim());
-        const res = await fetch(`https://openlibrary.org/search.json?${params}`, {
+        const res = await fetch(url, {
           headers: { 'Accept': 'application/json' },
         });
-        if (!res.ok) return null;
+        if (!res.ok) {
+          const preview = await res.text().catch(() => '');
+          return { _error: makeErrorDetail({
+            stage: 'gather-openlibrary', kind: 'http',
+            message: `OpenLibrary lookup failed: HTTP ${res.status}`,
+            statusCode: res.status, url, responsePreview: preview,
+          }) };
+        }
         const d = await res.json();
         const docs = (d.docs || []).slice(0, 5);
         if (docs.length === 0) return null;
@@ -574,8 +582,8 @@ const HANDLERS = {
             subtitle: c.subtitle,
           })),
         };
-      } catch {
-        return null;
+      } catch (err) {
+        return { _error: errorDetailFromException(err, { stage: 'gather-openlibrary', url }) };
       }
     };
 
