@@ -484,11 +484,19 @@ const HANDLERS = {
     };
 
     const lookupByAsin = async (asin) => {
+      const url = `https://api.audnex.us/books/${encodeURIComponent(asin)}`;
       try {
-        const res = await fetch(`https://api.audnex.us/books/${encodeURIComponent(asin)}`, {
+        const res = await fetch(url, {
           headers: { 'Accept': 'application/json' },
         });
-        if (!res.ok) return null;
+        if (!res.ok) {
+          const preview = await res.text().catch(() => '');
+          return { _error: makeErrorDetail({
+            stage: 'gather-audnexus', kind: 'http',
+            message: `Audnexus lookup failed: HTTP ${res.status}`,
+            statusCode: res.status, url, responsePreview: preview,
+          }) };
+        }
         const d = await res.json();
         return {
           abs_title: d.title || null,
@@ -503,8 +511,8 @@ const HANDLERS = {
           abs_year: d.releaseDate ? String(d.releaseDate).substring(0, 4) : null,
           source: 'audnexus',
         };
-      } catch {
-        return null;
+      } catch (err) {
+        return { _error: errorDetailFromException(err, { stage: 'gather-audnexus', url }) };
       }
     };
 
@@ -573,9 +581,25 @@ const HANDLERS = {
 
     const processBook = async (book) => {
       let found = null;
-      if (book.asin) found = await lookupByAsin(book.asin);
-      if (!found) found = await lookupByTitle(book.title, book.author);
-      return { id: book.id, gathered: !!found, ...(found || {}) };
+      let errorDetail = null;
+      if (book.asin) {
+        const res = await lookupByAsin(book.asin);
+        if (res?._error) errorDetail = res._error;
+        else if (res) found = res;
+      }
+      if (!found) {
+        const res = await lookupByTitle(book.title, book.author);
+        if (res?._error) {
+          // Title lookup error only surfaces if we have no prior ASIN success.
+          if (!errorDetail) errorDetail = res._error;
+        } else if (res) {
+          found = res;
+          errorDetail = null; // title lookup rescued the ASIN failure
+        }
+      }
+      const result = { id: book.id, gathered: !!found, ...(found || {}) };
+      if (!found && errorDetail) result.errorDetail = errorDetail;
+      return result;
     };
 
     for (let i = 0; i < books.length; i += CONCURRENCY) {
