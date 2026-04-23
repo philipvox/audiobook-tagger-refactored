@@ -7,6 +7,55 @@ beforeEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('gather_external_data — OpenLibrary (cluster 1)', () => {
+  it('surfaces errorDetail when OpenLibrary returns 503 and there is no ASIN fallback', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (String(url).includes('openlibrary.org')) {
+        return new Response('maintenance', { status: 503 });
+      }
+      return new Response('', { status: 404 });
+    });
+
+    const result = await callBackend('gather_external_data', {
+      books: [{ id: 'b1', title: 'The Sentence', author: 'Louise Erdrich' }],
+    });
+
+    const r = result.results[0];
+    expect(r.gathered).toBe(false);
+    expect(r.errorDetail).toBeDefined();
+    expect(r.errorDetail.stage).toBe('gather-openlibrary');
+    expect(r.errorDetail.kind).toBe('http');
+    expect(r.errorDetail.statusCode).toBe(503);
+    expect(r.errorDetail.url).toContain('openlibrary.org/search.json');
+  });
+
+  it('surfaces errorDetail when OpenLibrary fetch throws', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (String(url).includes('openlibrary.org')) throw new TypeError('Failed to fetch');
+      return new Response('', { status: 404 });
+    });
+
+    const result = await callBackend('gather_external_data', {
+      books: [{ id: 'b1', title: 'The Sentence', author: 'Louise Erdrich' }],
+    });
+
+    expect(result.results[0].errorDetail.stage).toBe('gather-openlibrary');
+    expect(result.results[0].errorDetail.kind).toBe('network');
+  });
+
+  it('does not attach errorDetail on a clean OpenLibrary hit', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({ docs: [{ title: 'T', author_name: ['A'], isbn: ['9781234567897'] }] }), { status: 200 }));
+
+    const result = await callBackend('gather_external_data', {
+      books: [{ id: 'b1', title: 'T', author: 'A' }],
+    });
+
+    expect(result.results[0].gathered).toBe(true);
+    expect(result.results[0].errorDetail).toBeUndefined();
+  });
+});
+
 describe('gather_external_data — Audnexus (cluster 1)', () => {
   it('surfaces errorDetail when Audnexus returns a 429', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
