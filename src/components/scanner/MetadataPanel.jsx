@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { callBackend } from '../../api';
 import { proxyFetch } from '../../lib/proxy';
+import { performLookup } from './performLookup';
 import { Book, Edit, X, Database, Folder, Bot, FileAudio, Globe, Music, Library, FolderOpen, Search } from 'lucide-react';
 import { useToast } from '../Toast';
 
@@ -232,47 +233,16 @@ export function MetadataPanel({ group, onEdit, onInlineEdit }) {
     if (!title) { toast.error('Lookup Failed', 'No title to search for'); return; }
 
     setLookingUp(field);
-    try {
-      let found = null;
-
-      if (field === 'asin') {
-        // Audible public catalog API — no auth needed
-        const titleParam = encodeURIComponent(title);
-        const authorParam = encodeURIComponent(author);
-        // Audible catalog (Tauri http plugin bypasses CORS; web variant deferred — see issue #53)
-        const res = await proxyFetch(`https://api.audible.com/1.0/catalog/products?title=${titleParam}&author=${authorParam}&num_results=5&response_groups=product_desc`);
-        if (res.ok) {
-          const data = await res.json();
-          const products = data.products || [];
-          if (products.length > 0) {
-            // Try exact title match first, then take first result
-            const titleLower = title.toLowerCase();
-            const match = products.find(p => p.title?.toLowerCase() === titleLower) || products[0];
-            found = match.asin;
-          }
-        }
-      } else {
-        // ISBN via Open Library
-        const query = encodeURIComponent(`${title} ${author}`);
-        const res = await proxyFetch(`https://openlibrary.org/search.json?q=${query}&limit=5&fields=isbn,title,author_name`);
-        if (res.ok) {
-          const data = await res.json();
-          for (const doc of (data.docs || [])) {
-            if (!doc.isbn || doc.isbn.length === 0) continue;
-            found = doc.isbn.find(i => i.length === 13) || doc.isbn[0];
-            if (found) break;
-          }
-        }
-      }
-
-      if (found) {
-        onInlineEdit(group.id, field, found);
-        toast.success('Found', `${field.toUpperCase()}: ${found}`);
-      } else {
-        toast.error('Not Found', `No ${field.toUpperCase()} found for "${title}"`);
-      }
-    } catch (e) {
-      toast.error('Lookup Failed', e.message);
+    const outcome = await performLookup({ field, title, author, fetcher: proxyFetch });
+    if (outcome.kind === 'found') {
+      onInlineEdit(group.id, field, outcome.value);
+      toast.success('Found', `${field.toUpperCase()}: ${outcome.value}`);
+    } else if (outcome.kind === 'not-found') {
+      toast.error('Not Found', `No ${field.toUpperCase()} found for "${title}"`);
+    } else {
+      // 'error' — kind includes url/status/bodyPreview so @kyleviloria can
+      // actually see what the CORS fallback returned (e.g. "<!DOCTYPE ...").
+      toast.error('Lookup Failed', outcome.detail);
     }
     setLookingUp(null);
   };
