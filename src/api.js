@@ -1341,13 +1341,32 @@ Return JSON: {"year":"2005"}`;
           results.push({ id: book.id, year, pub_date: date, pub_tag: `pub-${date}`, source: 'ai', fixed: true });
           total_fixed++;
         } else {
-          results.push({ id: book.id, year: null, fixed: false, error: 'Invalid year from AI' });
+          results.push({
+            id: book.id,
+            year: null,
+            fixed: false,
+            error: 'Invalid year from AI',
+            errorDetail: makeErrorDetail({
+              stage: 'fix-year',
+              kind: 'schema',
+              message: year
+                ? `AI returned an invalid year: "${year}" (outside 1000..current+2).`
+                : 'AI returned no year for this book.',
+              responsePreview: response,
+            }),
+          });
           total_failed++;
         }
         completed++;
         emitEvent('batch-progress', { call_type: 'years', current: completed, total: books.length, title: book.title });
       } catch (err) {
-        results.push({ id: book.id, year: null, fixed: false, error: err.message });
+        results.push({
+          id: book.id,
+          year: null,
+          fixed: false,
+          error: err.message,
+          errorDetail: errorDetailFromException(err, { stage: 'fix-year' }),
+        });
         total_failed++;
         completed++;
         emitEvent('batch-progress', { call_type: 'years', current: completed, total: books.length, title: book.title });
