@@ -62,6 +62,26 @@ export function makeErrorDetail({ stage, kind, message, responsePreview, statusC
   return detail;
 }
 
+// Map an errorDetail kind to its default UI severity. Callers may still
+// override the severity prop on <ErrorPill> for contextual nuance (e.g. a
+// batch-failed classify that still gave the book partial tags could be a
+// warn not an error), but in general handlers should use this.
+export function severityForKind(kind) {
+  switch (kind) {
+    case 'empty-response':
+    case 'empty-content':
+      return 'warn';
+    case 'network':
+    case 'http':
+    case 'parse':
+    case 'schema':
+      return 'error';
+    default:
+      // Unknown kinds default to error so they're visible, not silent.
+      return 'error';
+  }
+}
+
 // Derive a short, one-line errorDetail from a caught exception. Falls back to
 // kind='network' if we can't tell — caller can override by passing kind.
 export function errorDetailFromException(err, { stage, kind, url, responsePreview } = {}) {

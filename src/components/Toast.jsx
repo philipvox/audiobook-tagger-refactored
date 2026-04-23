@@ -36,7 +36,7 @@ const TOAST_TYPES = {
 };
 
 // Individual Toast component
-function ToastItem({ id, type = 'info', title, message, duration = 5000, onDismiss }) {
+function ToastItem({ id, type = 'info', title, message, duration = 5000, action, onDismiss }) {
   const [isVisible, setIsVisible] = useState(false);
   const [isLeaving, setIsLeaving] = useState(false);
   const config = TOAST_TYPES[type] || TOAST_TYPES.info;
@@ -64,6 +64,9 @@ function ToastItem({ id, type = 'info', title, message, duration = 5000, onDismi
 
   return (
     <div
+      role="alert"
+      aria-live={type === 'error' ? 'assertive' : 'polite'}
+      data-testid={`toast-${type}`}
       className={`
         ${config.bgColor} ${config.borderColor} border rounded-lg shadow-xl
         px-4 py-3 min-w-[300px] max-w-[450px] flex items-start gap-3
@@ -71,7 +74,7 @@ function ToastItem({ id, type = 'info', title, message, duration = 5000, onDismi
         ${isVisible && !isLeaving ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0'}
       `}
     >
-      <Icon className={`w-5 h-5 flex-shrink-0 mt-0.5 ${config.iconColor}`} />
+      <Icon className={`w-5 h-5 flex-shrink-0 mt-0.5 ${config.iconColor}`} aria-hidden="true" />
       <div className="flex-1 min-w-0">
         {title && (
           <div className={`font-medium text-sm ${config.textColor}`}>
@@ -83,12 +86,22 @@ function ToastItem({ id, type = 'info', title, message, duration = 5000, onDismi
             {message}
           </div>
         )}
+        {action?.label && action?.onClick && (
+          <button
+            type="button"
+            onClick={() => { action.onClick(); handleDismiss(); }}
+            className={`mt-2 text-xs font-semibold underline ${config.textColor} hover:opacity-80`}
+          >
+            {action.label}
+          </button>
+        )}
       </div>
       <button
         onClick={handleDismiss}
+        aria-label="Dismiss"
         className="p-1 hover:bg-white/10 rounded transition-colors flex-shrink-0"
       >
-        <X className="w-4 h-4 text-gray-400" />
+        <X className="w-4 h-4 text-gray-400" aria-hidden="true" />
       </button>
     </div>
   );
@@ -119,9 +132,9 @@ let toastIdCounter = 0;
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
 
-  const addToast = useCallback(({ type = 'info', title, message, duration = 5000 }) => {
+  const addToast = useCallback(({ type = 'info', title, message, duration = 5000, action }) => {
     const id = ++toastIdCounter;
-    setToasts((prev) => [...prev, { id, type, title, message, duration }]);
+    setToasts((prev) => [...prev, { id, type, title, message, duration, action }]);
     return id;
   }, []);
 
@@ -129,11 +142,18 @@ export function ToastProvider({ children }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  // Callers may pass (title, message, duration) like before, OR
+  // (title, message, { duration?, action? }) for the enriched variant.
+  const normalize = (duration) =>
+    typeof duration === 'object' && duration !== null
+      ? { duration: duration.duration, action: duration.action }
+      : { duration };
+
   const toast = {
-    success: (title, message, duration) => addToast({ type: 'success', title, message, duration }),
-    error: (title, message, duration) => addToast({ type: 'error', title, message, duration }),
-    warning: (title, message, duration) => addToast({ type: 'warning', title, message, duration }),
-    info: (title, message, duration) => addToast({ type: 'info', title, message, duration }),
+    success: (title, message, opts) => addToast({ type: 'success', title, message, ...normalize(opts) }),
+    error: (title, message, opts) => addToast({ type: 'error', title, message, ...normalize(opts) }),
+    warning: (title, message, opts) => addToast({ type: 'warning', title, message, ...normalize(opts) }),
+    info: (title, message, opts) => addToast({ type: 'info', title, message, ...normalize(opts) }),
     dismiss: removeToast,
   };
 

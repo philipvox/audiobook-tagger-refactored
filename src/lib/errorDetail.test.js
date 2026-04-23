@@ -4,6 +4,7 @@ import {
   ERROR_KINDS,
   makeErrorDetail,
   errorDetailFromException,
+  severityForKind,
 } from './errorDetail.js';
 
 describe('makeErrorDetail', () => {
@@ -68,6 +69,26 @@ describe('makeErrorDetail', () => {
     expect(ERROR_KINDS).toHaveLength(6);
     expect(Object.isFrozen(ERROR_STAGES)).toBe(true);
     expect(Object.isFrozen(ERROR_KINDS)).toBe(true);
+  });
+});
+
+describe('severityForKind', () => {
+  it('maps empty-response and empty-content to warn', () => {
+    expect(severityForKind('empty-response')).toBe('warn');
+    expect(severityForKind('empty-content')).toBe('warn');
+  });
+
+  it('maps network/http/parse/schema to error', () => {
+    expect(severityForKind('network')).toBe('error');
+    expect(severityForKind('http')).toBe('error');
+    expect(severityForKind('parse')).toBe('error');
+    expect(severityForKind('schema')).toBe('error');
+  });
+
+  it('falls back to error for unknown kinds so they stay visible', () => {
+    expect(severityForKind('bogus')).toBe('error');
+    expect(severityForKind(undefined)).toBe('error');
+    expect(severityForKind(null)).toBe('error');
   });
 });
 

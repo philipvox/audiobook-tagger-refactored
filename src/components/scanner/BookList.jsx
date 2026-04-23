@@ -897,6 +897,7 @@ export function BookList({
               return (
                 <div
                   key={group.id}
+                  data-book-id={group.id}
                   className={`border-b border-neutral-800/50 transition-colors cursor-pointer ${
                     isSelected
                       ? 'bg-neutral-800/50'
