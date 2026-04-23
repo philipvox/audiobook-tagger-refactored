@@ -23,6 +23,8 @@ import { useTagOperations } from '../hooks/useTagOperations';
 import { useBatchOperations } from '../hooks/useBatchOperations';
 import { useModals } from '../hooks/useModals';
 import { useApp } from '../context/AppContext';
+import { severityForKind } from '../lib/errorDetail';
+import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
 
 export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoSvg }) {
   const {
@@ -944,14 +946,19 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
         const result = await callBackend('fix_authors_batch', { books, config, force: forceFresh });
 
-        // Update groups with new authors
+        // Update groups with new authors (and route errorDetail to lastError
+        // so ai-empty / hard failures render an amber/red pill per commit 8).
         if (result.results && result.results.length > 0) {
           setGroups(prevGroups => {
             return prevGroups.map(g => {
               const authResult = result.results.find(r => r.id === g.id);
-              if (!authResult || !authResult.fixed || !authResult.author) return g;
-
-
+              if (!authResult) return g;
+              const lastError = authResult.errorDetail
+                ? { ...authResult.errorDetail, severity: severityForKind(authResult.errorDetail.kind) }
+                : undefined;
+              if (!authResult.fixed || !authResult.author) {
+                return lastError ? { ...g, lastError } : g;
+              }
               return {
                 ...g,
                 metadata: {
@@ -959,6 +966,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
                   author: authResult.author,
                 },
                 total_changes: (g.total_changes || 0) + 1,
+                lastError, // undefined clears; preserved only if the AI errored on this book (unlikely on a fixed path, but safe)
               };
             });
           });
@@ -987,6 +995,19 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     unlistenAuthors();
+
+    // Per D4, Fix Authors stays toast-silent on all-success. summarizeBatch
+    // returns null for {0,0,0,0}, and for {fixed=N, skipped=M, 0 failed, 0
+    // warnings} we skip the success toast too — progress bar already showed
+    // counts. Only surface V2/V3 when there's something to flag.
+    const authorWarnings = 0; // fix_authors_batch ai-empty is failed, not warn (commit 8 normalization)
+    if (failedCount > 0 || authorWarnings > 0) {
+      const summary = summarizeBatch({ op: 'authors', succeeded: fixedCount, skipped: skippedCount, warnings: authorWarnings, failed: failedCount });
+      if (summary) {
+        const opts = { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(groups, summary.hasFailures ? 'error' : 'warn') } };
+        toast[summary.type](summary.title, summary.message, opts);
+      }
+    }
 
     // Clear progress after a short delay
     batch.end('authors', 1500);
@@ -1042,12 +1063,19 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
         const result = await callBackend('fix_years_batch', { books, config, force: forceFresh });
 
-        // Update groups with new years and pub tags
+        // Update groups with new years and pub tags (and route errorDetail to
+        // lastError for invalid-year / hard-failure cases per commit 9).
         if (result.results && result.results.length > 0) {
           setGroups(prevGroups => {
             return prevGroups.map(g => {
               const yearResult = result.results.find(r => r.id === g.id);
-              if (!yearResult || !yearResult.year) return g;
+              if (!yearResult) return g;
+              const lastError = yearResult.errorDetail
+                ? { ...yearResult.errorDetail, severity: severityForKind(yearResult.errorDetail.kind) }
+                : undefined;
+              if (!yearResult.year) {
+                return lastError ? { ...g, lastError } : g;
+              }
 
               // Add pub_tag to tags if we have one (even for skipped - they have valid years)
               let newTags = g.metadata?.tags || [];
@@ -1103,6 +1131,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     unlistenYears();
+
+    // Per D4, toast-silent on all-success (progress bar suffices). Surface V2/V3
+    // only when there's something to flag. fix_years_batch emits kind='schema'
+    // for invalid-year, which maps to severity=error — so these are failures,
+    // not warnings.
+    if (failedCount > 0) {
+      const summary = summarizeBatch({ op: 'years', succeeded: fixedCount, skipped: skippedCount, warnings: 0, failed: failedCount });
+      if (summary) {
+        const opts = { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(groups, 'error') } };
+        toast[summary.type](summary.title, summary.message, opts);
+      }
+    }
 
     // Clear progress after a short delay
     batch.end('years', 1500);
@@ -1678,13 +1718,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       unlisten();
       const processed = result.total_processed || 0;
       const failed = result.total_failed || 0;
+      // Count warnings by scanning the fresh result (sub-step warnings surface as
+      // severity=warn on the book but don't live in result.total_failed).
+      const warnings = (result.results || []).filter(r =>
+        r.errorDetail && !r.error && r.success !== false && severityForKind(r.errorDetail.kind) === 'warn'
+      ).length;
       batch.update('metadata', { current: booksToProcess.length, success: processed, failed, currentBook: 'Complete' });
-      if (processed > 0 || skipped > 0) {
-        const parts = [];
-        if (processed > 0) parts.push(`${processed} resolved`);
-        if (skipped > 0) parts.push(`${skipped} already ok`);
-        if (failed > 0) parts.push(`${failed} failed`);
-        toast.success('Metadata Resolution Complete', parts.join(', '));
+      const summary = summarizeBatch({ op: 'resolve', succeeded: processed, skipped, warnings, failed });
+      if (summary) {
+        const opts = (summary.hasWarnings || summary.hasFailures)
+          ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(groups, summary.hasFailures ? 'error' : 'warn') } }
+          : undefined;
+        toast[summary.type](summary.title, summary.message, opts);
       }
     } catch (e) {
       unlisten();
@@ -1773,12 +1818,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       const failed = result.total_failed || 0;
       unlisten();
       batch.update('descriptionProcessing', { current: booksToProcess.length, success: processed, failed, currentBook: 'Complete' });
-      if (processed > 0 || skippedDesc > 0) {
-        const parts = [];
-        if (processed > 0) parts.push(`${processed} processed`);
-        if (skippedDesc > 0) parts.push(`${skippedDesc} already ok`);
-        if (failed > 0) parts.push(`${failed} failed`);
-        toast.success('Description Processing Complete', parts.join(', '));
+      const descWarnings = (result.results || []).filter(r =>
+        r.errorDetail && !r.error && r.success !== false && severityForKind(r.errorDetail.kind) === 'warn'
+      ).length;
+      const descSummary = summarizeBatch({ op: 'description', succeeded: processed, skipped: skippedDesc, warnings: descWarnings, failed });
+      if (descSummary) {
+        const opts = (descSummary.hasWarnings || descSummary.hasFailures)
+          ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(groups, descSummary.hasFailures ? 'error' : 'warn') } }
+          : undefined;
+        toast[descSummary.type](descSummary.title, descSummary.message, opts);
       }
     } catch (e) {
       unlisten();
@@ -2275,12 +2323,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
       batch.update('classify', { current: booksToProcess.length, success: successCount, failed: failedCount, currentBook: 'Complete!' });
 
-      if (successCount > 0 || skippedClassify > 0) {
-        const cParts = [];
-        if (successCount > 0) cParts.push(`${successCount} classified`);
-        if (skippedClassify > 0) cParts.push(`${skippedClassify} already ok`);
-        if (failedCount > 0) cParts.push(`${failedCount} failed`);
-        toast.success('Classification Complete', cParts.join(', '));
+      const classifyWarnings = (result.results || []).filter(r =>
+        r.errorDetail && !r.error && r.success !== false && severityForKind(r.errorDetail.kind) === 'warn'
+      ).length;
+      const classifySummary = summarizeBatch({ op: 'classify', succeeded: successCount, skipped: skippedClassify, warnings: classifyWarnings, failed: failedCount });
+      if (classifySummary) {
+        const opts = (classifySummary.hasWarnings || classifySummary.hasFailures)
+          ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(groups, classifySummary.hasFailures ? 'error' : 'warn') } }
+          : undefined;
+        toast[classifySummary.type](classifySummary.title, classifySummary.message, opts);
       }
 
     } catch (error) {

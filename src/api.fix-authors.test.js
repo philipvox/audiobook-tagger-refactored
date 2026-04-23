@@ -79,6 +79,28 @@ describe('fix_authors_batch — ai-empty normalization + errorDetail (cluster 2)
     expect(r.errorDetail).toBeUndefined();
   });
 
+  it('counts add up: fixed + skipped + failed === total books (Risk 1 smoke)', async () => {
+    // One book gets fixed, one is already valid (skipped), one ai-empty (failed).
+    let call = 0;
+    callAI.mockImplementation(() => {
+      call++;
+      if (call === 1) return Promise.resolve(JSON.stringify({ author: 'Frank Herbert', confidence: 90 }));
+      return Promise.resolve(JSON.stringify({ author: null }));
+    });
+    const result = await callBackend('fix_authors_batch', {
+      books: [
+        { id: 'b1', title: 'Dune', current_author: 'Unknown' },      // will be fixed
+        { id: 'b2', title: 'LotR', current_author: 'J.R.R. Tolkien' }, // valid, skipped
+        { id: 'b3', title: 'Weird', current_author: 'Unknown' },     // ai-empty
+      ],
+    });
+    const total = result.total_fixed + result.total_skipped + result.total_failed;
+    expect(total).toBe(3);
+    expect(result.total_fixed).toBe(1);
+    expect(result.total_skipped).toBe(1);
+    expect(result.total_failed).toBe(1);
+  });
+
   it('does not hit the AI (or attach errorDetail) when existing author is valid', async () => {
     const result = await callBackend('fix_authors_batch', {
       books: [{ id: 'b1', title: 'Dune', current_author: 'Frank Herbert' }],
