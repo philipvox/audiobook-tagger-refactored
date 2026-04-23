@@ -72,6 +72,58 @@ describe('classify_books_batch — local DNA swallow adopts errorDetail (commit 
     expect(result.results[0].success).toBe(true);
   });
 
+  it('cloud path: attaches errorDetail when DNA fetch throws, preserves classification', async () => {
+    // Switch to cloud config (no use_local_ai / no ollama_model).
+    localStorage.setItem('audiobook_tagger_config', JSON.stringify({
+      openai_api_key: 'sk-fake',
+      ai_model: 'gpt-5-nano',
+    }));
+    // Cloud path fires classify + DNA in Promise.all. Classify resolves, DNA rejects.
+    callAI.mockImplementation((config, sys /* system prompt */, user, maxTokens) => {
+      // DNA system prompt differs from classification — discriminate by maxTokens
+      // (1500 for DNA, 2000 for classification in the cloud processBook).
+      if (maxTokens === 1500) return Promise.reject(new Error('Anthropic error 529: Overloaded'));
+      return Promise.resolve(JSON.stringify({ genres: ['Fantasy'], tags: ['magic'] }));
+    });
+
+    const result = await callBackend('classify_books_batch', {
+      books: [{ id: 'b1', title: 'A Wizard of Earthsea' }],
+      dnaEnabled: true,
+      forceFresh: false,
+      includeDescription: false,
+    });
+
+    const r = result.results[0];
+    expect(r.success).toBe(true);
+    expect(r.genres).toEqual(['Fantasy']);
+    expect(r.errorDetail).toBeDefined();
+    expect(r.errorDetail.stage).toBe('dna');
+    expect(r.errorDetail.kind).toBe('http'); // "error 529" → http
+    expect(r.errorDetail.message).toMatch(/529|Overloaded/);
+  });
+
+  it('cloud path: attaches errorDetail on hard classify failure with stage=classify', async () => {
+    localStorage.setItem('audiobook_tagger_config', JSON.stringify({
+      openai_api_key: 'sk-fake',
+      ai_model: 'gpt-5-nano',
+    }));
+    callAI.mockRejectedValue(new Error('OpenAI error 401: invalid key'));
+
+    const result = await callBackend('classify_books_batch', {
+      books: [{ id: 'b1', title: 'A Wizard of Earthsea' }],
+      dnaEnabled: false,
+      forceFresh: false,
+      includeDescription: false,
+    });
+
+    const r = result.results[0];
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/401/);
+    expect(r.errorDetail).toBeDefined();
+    expect(r.errorDetail.stage).toBe('classify');
+    expect(r.errorDetail.kind).toBe('http');
+  });
+
   it('does NOT attach errorDetail when DNA is disabled', async () => {
     callAI.mockResolvedValueOnce(JSON.stringify([{ genres: ['Fantasy'], tags: [] }]));
 
