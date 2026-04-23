@@ -865,7 +865,20 @@ If it's part of a series, fill in the name and book number. If standalone, use n
           ]);
           const parsed = parseAIJson(response);
           let dna_tags = [];
-          if (dnaResponse) { try { dna_tags = convertDnaToTags(parseAIJson(dnaResponse)); } catch {} }
+          if (dnaResponse) {
+            try {
+              dna_tags = convertDnaToTags(parseAIJson(dnaResponse));
+            } catch (err) {
+              // DNA response arrived but couldn't be parsed. Fetch-level dnaError
+              // is impossible here (null response would have skipped this branch),
+              // so overwriting is safe.
+              dnaError = errorDetailFromException(err, {
+                stage: 'dna',
+                kind: 'parse',
+                responsePreview: dnaResponse,
+              });
+            }
+          }
           completed++;
           emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
           const bookResult = buildResult(book, parsed, dna_tags);
