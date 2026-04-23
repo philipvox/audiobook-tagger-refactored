@@ -2184,7 +2184,16 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       setGroups(prevGroups => {
         return prevGroups.map(g => {
           const r = result.results?.find(r => r.id === g.id);
-          if (!r || r.error) return g;
+          if (!r) return g;
+          // Hard failure: surface the error on the group and skip the metadata merge.
+          if (r.error || r.success === false) {
+            return {
+              ...g,
+              lastError: r.errorDetail
+                ? { ...r.errorDetail, severity: 'error' }
+                : { stage: 'classify', kind: 'network', message: r.error || 'Classification failed', severity: 'error' },
+            };
+          }
 
           const isForceReset = idsToForceReset?.has(g.id);
           const updatedMeta = { ...g.metadata };
@@ -2227,11 +2236,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           if (r.age_category && r.age_category !== 'Unknown') fields.add('age');
           if (r.dna_tags?.length > 0) fields.add('dna');
 
+          // Sub-step warning (e.g. classification OK, DNA failed): amber pill.
+          // Clear lastError if there was a prior failure and this run succeeded cleanly.
+          const lastError = r.errorDetail
+            ? { ...r.errorDetail, severity: 'warn' }
+            : undefined;
           return {
             ...g,
             metadata: updatedMeta,
             total_changes: (g.total_changes || 0) + 1,
             changedFields: [...fields],
+            lastError,
           };
         });
       });

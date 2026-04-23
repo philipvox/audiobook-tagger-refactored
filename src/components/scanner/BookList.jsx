@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { callBackend } from '../../api';
+import { ErrorPill } from './ErrorPill';
 import { CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, X, Sparkles, FileJson, Cloud, ArrowRight, ArrowUpDown, ArrowUp, ArrowDown, AlertTriangle, AlertCircle, Filter } from 'lucide-react';
 
 // Virtualized item height (approximate) - more compact
@@ -978,6 +979,12 @@ export function BookList({
                             <span className="text-[8px] text-gray-500">+{(group.changedFields?.length || 0) - 5}</span>
                           )}
                         </div>
+                      )}
+                      {group.lastError && (
+                        <ErrorPill
+                          detail={group.lastError}
+                          severity={group.lastError.severity || 'warn'}
+                        />
                       )}
                       {hasChanges && !group.changedFields?.length && (
                         <span

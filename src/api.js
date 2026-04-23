@@ -8,6 +8,7 @@ import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificatio
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName } from './lib/normalize';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit, enforceTagPolicyWithDna } from './lib/genres';
 import { isTauri } from './lib/platform.js';
+import { makeErrorDetail, errorDetailFromException } from './lib/errorDetail.js';
 
 /** Safely serialize a value for AI prompts (escapes quotes/newlines). */
 function safe(value) {
@@ -808,16 +809,27 @@ If it's part of a series, fill in the name and book number. If standalone, use n
               console.warn(`[Batch] Empty result for book ${j} "${book.title}" — parsedArray has ${parsedArray.length} items`);
             }
             let dna_tags = [];
+            let dnaError = null;
+            let dnaResp = null;
 
             if (dnaEnabled) {
               emitEvent('batch-progress', { call_type: 'classify', current: completed + 0.5, total: books.length, title: `DNA: ${book.title}` });
               try {
-                const dnaResp = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500);
+                dnaResp = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500);
                 dna_tags = convertDnaToTags(parseAIJson(dnaResp));
-              } catch {}
+              } catch (err) {
+                // DNA sub-step failed — surface via errorDetail while keeping the
+                // book's classification result (success:true, amber warning pill).
+                dnaError = errorDetailFromException(err, {
+                  stage: 'dna',
+                  responsePreview: dnaResp || undefined,
+                });
+              }
             }
 
-            results.push(buildResult(book, parsed, dna_tags));
+            const bookResult = buildResult(book, parsed, dna_tags);
+            if (dnaError) bookResult.errorDetail = dnaError;
+            results.push(bookResult);
             completed++;
             emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
           }
