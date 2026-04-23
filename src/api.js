@@ -629,8 +629,21 @@ const HANDLERS = {
     const results = [];
     let completed = 0;
 
+    // Helper: did the AI produce any non-null value across the fields we asked
+    // about? Partial results count as useful — we don't want to double-surface
+    // what the changedFields diff already shows (AI returned data but nothing
+    // changed is a distinct signal, tracked separately).
+    const aiReturnedNothingUseful = (parsed) => {
+      if (!parsed || typeof parsed !== 'object') return true;
+      const fields = ['title', 'author', 'subtitle', 'series', 'sequence', 'narrator'];
+      return !fields.some((f) => {
+        const v = parsed[f];
+        return v !== null && v !== undefined && String(v).trim() !== '';
+      });
+    };
+
     // Helper: build result from parsed metadata
-    const buildMetaResult = (book, parsed) => {
+    const buildMetaResult = (book, parsed, rawResponse) => {
       const title = parsed.title || book.current_title;
       const author = parsed.author || book.current_author;
       const subtitle = parsed.subtitle || null;
@@ -641,7 +654,20 @@ const HANDLERS = {
         || subtitle !== (book.current_subtitle || null)
         || series !== (book.current_series || null)
         || sequence !== (book.current_sequence || null);
-      return { id: book.id, title, author, subtitle, series, sequence, narrator, confidence: parsed.confidence || 75, changed };
+      const result = { id: book.id, title, author, subtitle, series, sequence, narrator, confidence: parsed.confidence || 75, changed };
+      // Silent-success surfacing: the caller already selected this book for
+      // resolution (missing/bad author/title/series), so an empty AI response
+      // means the model had no grounded signal. Amber pill so the user knows
+      // it ran and yielded nothing, not "nothing happened".
+      if (aiReturnedNothingUseful(parsed)) {
+        result.errorDetail = makeErrorDetail({
+          stage: 'resolve',
+          kind: 'empty-content',
+          message: 'AI returned no usable metadata for this book.',
+          responsePreview: rawResponse,
+        });
+      }
+      return result;
     };
 
     if (isLocalAI && books.length > 1) {
@@ -664,7 +690,7 @@ const HANDLERS = {
           for (let j = 0; j < batch.length; j++) {
             const book = batch[j];
             const parsed = parsedArray[j] || parsedArray.find(p => p.id === book.id) || {};
-            results.push(buildMetaResult(book, parsed));
+            results.push(buildMetaResult(book, parsed, response));
             completed++;
             emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
           }
@@ -674,9 +700,14 @@ const HANDLERS = {
             try {
               const prompt = buildMetadataPrompt(book);
               const response = await callAI(config, SYSTEM_PROMPT, prompt, 1500);
-              results.push(buildMetaResult(book, parseAIJson(response)));
+              results.push(buildMetaResult(book, parseAIJson(response), response));
             } catch (e) {
-              results.push({ id: book.id, error: e.message, changed: false });
+              results.push({
+                id: book.id,
+                error: e.message,
+                changed: false,
+                errorDetail: errorDetailFromException(e, { stage: 'resolve' }),
+              });
             }
             completed++;
             emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
@@ -690,14 +721,19 @@ const HANDLERS = {
           emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: `Resolving: ${book.current_title}...` });
           const prompt = buildMetadataPrompt(book);
           const response = await callAI(config, SYSTEM_PROMPT, prompt, 1500);
-          const result = buildMetaResult(book, parseAIJson(response));
+          const result = buildMetaResult(book, parseAIJson(response), response);
           completed++;
           emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
           return result;
         } catch (err) {
           completed++;
           emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
-          return { id: book.id, error: err.message, changed: false };
+          return {
+            id: book.id,
+            error: err.message,
+            changed: false,
+            errorDetail: errorDetailFromException(err, { stage: 'resolve' }),
+          };
         }
       };
 

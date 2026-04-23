@@ -24,6 +24,18 @@ export const ERROR_KINDS = Object.freeze([
   'schema',         // AI returned content that doesn't match the expected schema
 ]);
 
+// Suggested render severity per kind. Callers pass severity to ErrorPill
+// explicitly — this is the convention so the batch-summary toast (commit 11)
+// and the scanner pill agree on red vs amber without needing to re-infer.
+//   WARNING (amber): empty-response, empty-content
+//     The call succeeded at the transport + parse level; the model just
+//     didn't produce usable data. Book is still usable; user may want a
+//     different model or more signal.
+//   FAILURE (red):   network, http, parse, schema
+//     Something broke in the pipeline. The book's data may be stale or
+//     missing. User action (retry, fix config, switch provider) likely
+//     required.
+
 const MAX_PREVIEW_CHARS = 500;
 
 function truncate(s) {
