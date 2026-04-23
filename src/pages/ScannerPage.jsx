@@ -1632,7 +1632,24 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       setGroups(prevGroups => {
         return prevGroups.map(g => {
           const r = result.results?.find(r => r.id === g.id);
-          if (!r || r.error || !r.changed) return g;
+          if (!r) return g;
+
+          // Pick the most relevant errorDetail for this book: resolve-stage error
+          // wins over the earlier gather-stage error (resolve runs after gather;
+          // if both stages produced errors, the resolve error is newer signal).
+          const gatherDetail = gatheredDataRef.current?.get(g.id)?.errorDetail;
+          const errorSource = r.errorDetail || gatherDetail;
+          let lastError;
+          if (errorSource) {
+            const isHardFailure = r.error || r.success === false || ['network', 'http', 'parse', 'schema'].includes(errorSource.kind);
+            lastError = { ...errorSource, severity: isHardFailure ? 'error' : 'warn' };
+          }
+
+          // Hard failure or no usable change: surface error, don't merge metadata.
+          if (r.error || r.success === false || !r.changed) {
+            return lastError ? { ...g, lastError } : g;
+          }
+
           const fields = new Set(g.changedFields || []);
           if (r.title && r.title !== g.metadata.title) fields.add('title');
           if (r.author && r.author !== g.metadata.author) fields.add('author');
@@ -1653,6 +1670,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             },
             total_changes: (g.total_changes || 0) + 1,
             changedFields: [...fields],
+            lastError,
           };
         });
       });
