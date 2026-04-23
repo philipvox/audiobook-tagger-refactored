@@ -1259,13 +1259,34 @@ Return JSON: {"author":"Author Name","confidence":90}`;
           total_fixed++;
           return { id: book.id, success: true, author, fixed: true, source: 'ai', confidence: parsed?.confidence };
         }
+        // AI returned empty/bad author. Previously reported success:true + total_failed++
+        // (inconsistent). Now reported as a non-fatal warning with errorDetail so the
+        // UI renders an amber pill and counts match reality.
         total_failed++;
-        return { id: book.id, success: true, author: current, fixed: false, source: 'ai-empty' };
+        return {
+          id: book.id,
+          success: false,
+          author: current,
+          fixed: false,
+          source: 'ai-empty',
+          errorDetail: makeErrorDetail({
+            stage: 'fix-author',
+            kind: 'empty-response',
+            message: 'AI could not identify an author for this book.',
+            responsePreview: response,
+          }),
+        };
       } catch (err) {
         completed++;
         emitEvent('batch-progress', { call_type: 'authors', current: completed, total: books.length, title: book.title });
         total_failed++;
-        return { id: book.id, success: false, error: err.message, fixed: false };
+        return {
+          id: book.id,
+          success: false,
+          error: err.message,
+          fixed: false,
+          errorDetail: errorDetailFromException(err, { stage: 'fix-author' }),
+        };
       }
     };
 
