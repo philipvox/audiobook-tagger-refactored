@@ -189,6 +189,7 @@ pub async fn ollama_start(base_url: Option<String>) -> Result<String, String> {
     cmd.arg("serve")
         .env("OLLAMA_MODELS", models_dir.to_str().unwrap_or(""))
         .env("OLLAMA_HOST", format!("127.0.0.1:{}", OLLAMA_PORT))
+        .env("OLLAMA_ORIGINS", "*")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     #[cfg(windows)]

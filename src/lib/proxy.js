@@ -152,7 +152,11 @@ export async function callOpenAI(apiKey, model, systemPrompt, userPrompt, maxTok
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`OpenAI error ${res.status}: ${text}`);
+    if (res.status === 401) throw new Error('Invalid API key. Check your OpenAI key in Settings.');
+    if (res.status === 404) throw new Error(`Model "${model}" not found. Your OpenAI account may not have access to this model. Try a different model in Settings.`);
+    if (res.status === 429) throw new Error('OpenAI rate limit exceeded. Wait a moment and try again, or reduce concurrency in Settings.');
+    if (res.status === 403) throw new Error('OpenAI access denied. Your API key may lack permissions for this model or endpoint.');
+    throw new Error(`OpenAI error ${res.status}: ${text.substring(0, 300)}`);
   }
 
   const data = await res.json();
@@ -203,8 +207,11 @@ export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, max
   }, 90000);
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Anthropic error ${res.status}: ${text}`);
+    const errText = await res.text();
+    if (res.status === 401) throw new Error('Invalid API key. Check your Anthropic key in Settings.');
+    if (res.status === 404) throw new Error(`Model "${model}" not found. Try a different Claude model in Settings.`);
+    if (res.status === 429) throw new Error('Anthropic rate limit exceeded. Wait a moment and try again.');
+    throw new Error(`Anthropic error ${res.status}: ${errText.substring(0, 300)}`);
   }
 
   const data = await res.json();
@@ -281,7 +288,13 @@ export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b',
     const text = await resp.text();
     const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
     console.error(`[Ollama] HTTP ${resp.status} after ${elapsed}s — ${text.substring(0, 200)}`);
-    throw new Error(`Ollama error ${resp.status}: ${text}`);
+    if (resp.status === 403) {
+      throw new Error('Ollama rejected the request (403 Forbidden). If you are running Ollama separately, set OLLAMA_ORIGINS=* in your environment and restart Ollama. If using the built-in Ollama, try stopping and restarting it from Settings.');
+    }
+    if (resp.status === 404) {
+      throw new Error(`Model "${model}" not found in Ollama. Go to Settings and pull the model first.`);
+    }
+    throw new Error(`Ollama error ${resp.status}: ${text.substring(0, 300)}`);
   }
 
   const data = await resp.json();
