@@ -366,6 +366,37 @@ export function normalizeTag(tag) {
   return tag.trim().toLowerCase().replace(/\s+/g, "-");
 }
 
+// Split a tag/genre into word tokens (on whitespace and hyphens).
+function _tokenize(s) {
+  return s.split(/[\s-]+/).filter(Boolean);
+}
+
+// True if `needle` tokens appear as a contiguous run inside `haystack` tokens.
+function _tokensContiguous(haystack, needle) {
+  if (needle.length === 0 || needle.length > haystack.length) return false;
+  for (let i = 0; i + needle.length <= haystack.length; i++) {
+    let ok = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+// Token-boundary containment in either direction. Replaces a raw `includes`
+// substring test so partial matches respect word boundaries: "epic fantasy"
+// still maps via the "fantasy" token, but "warrior" no longer matches "war"
+// and "classic rock" no longer matches "class".
+function _tokenBoundaryMatch(a, b) {
+  const ta = _tokenize(a);
+  const tb = _tokenize(b);
+  return _tokensContiguous(ta, tb) || _tokensContiguous(tb, ta);
+}
+
 /**
  * Map a genre string to an approved genre.
  *
@@ -393,9 +424,10 @@ export function mapGenre(genre) {
     return aliased === "" ? null : aliased;
   }
 
-  // Partial match - if the genre contains an approved genre or vice versa
+  // Partial match - only when an approved genre appears as a whole token run
+  // (token-boundary, not raw substring — avoids "Article" -> "Art")
   for (const [approvedLower, approved] of _approvedGenresLower) {
-    if (normalized.includes(approvedLower) || approvedLower.includes(normalized)) {
+    if (_tokenBoundaryMatch(normalized, approvedLower)) {
       return approved;
     }
   }
@@ -424,9 +456,9 @@ export function mapTag(tag) {
   const aliased = TAG_ALIASES.get(tag.trim().toLowerCase());
   if (aliased) return aliased;
 
-  // Partial match
+  // Partial match - token-boundary only (avoids "warrior" -> "war")
   for (const approved of APPROVED_TAGS) {
-    if (normalized.includes(approved) || approved.includes(normalized)) {
+    if (_tokenBoundaryMatch(normalized, approved)) {
       return approved;
     }
   }

@@ -132,7 +132,7 @@ function absItemToBookGroup(item, absBaseUrl) {
     || fromTags(firstTags.tagArtist)
     || 'Unknown';
 
-  const narrator = fromTags((meta.narrators || []).join(', '))
+  const narrator = fromTags((meta.narrators || []).map(n => typeof n === 'string' ? n : n.name).join(', '))
     || fromTags(meta.narratorName)
     || fromTags(firstTags.tagComposer)
     || null;
