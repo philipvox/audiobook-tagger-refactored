@@ -165,25 +165,31 @@ export function toTitleCase(str) {
  * removeJunkSuffixes("1984 [Audiobook] 320kbps")       // "1984"
  */
 export function removeJunkSuffixes(title) {
-  let result = title;
+  let result = title.trim();
 
-  for (const suffix of JUNK_SUFFIXES) {
-    const suffixLower = suffix.toLowerCase();
-    // Loop to remove repeated occurrences
-    let changed = true;
-    while (changed) {
-      const lower = result.toLowerCase();
-      const pos = lower.lastIndexOf(suffixLower);
-      if (pos !== -1) {
-        result = (result.slice(0, pos) + result.slice(pos + suffix.length)).trim();
-      } else {
-        changed = false;
+  // Iteratively strip junk that sits at the END of the title (plus any trailing
+  // dash between tokens). Trailing-only: a junk-looking word in the MIDDLE of a
+  // real title (e.g. "The (Complete) Idiot's Guide", "Live in (HQ) Studio") must
+  // be preserved \u2014 using lastIndexOf here would corrupt those titles.
+  let changed = true;
+  while (changed) {
+    changed = false;
+
+    const dedashed = result.replace(/[-\u2013]+\s*$/, "").trim();
+    if (dedashed !== result) {
+      result = dedashed;
+      changed = true;
+    }
+
+    const lower = result.toLowerCase();
+    for (const suffix of JUNK_SUFFIXES) {
+      if (lower.endsWith(suffix.toLowerCase())) {
+        result = result.slice(0, result.length - suffix.length).trim();
+        changed = true;
+        break;
       }
     }
   }
-
-  // Remove trailing dashes
-  result = result.replace(/[-\u2013]+\s*$/, "").trim();
 
   return result;
 }
@@ -301,16 +307,23 @@ export function cleanAuthorName(name) {
   // Remove quotes
   result = result.replace(/^["']|["']$/g, "").trim();
 
-  // Handle "Last, First" format -> "First Last"
-  const commaPos = result.indexOf(",");
-  if (commaPos !== -1) {
-    const lastName = result.slice(0, commaPos).trim();
-    const firstName = result.slice(commaPos + 1).trim();
-
-    const suffixes = ["jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "phd", "md"];
-    if (!suffixes.includes(firstName.toLowerCase())) {
+  // Handle "Last, First" / "Last, First, Suffix" -> "First Last [Suffix]".
+  // Never leave an embedded comma: authors are later split on "," downstream,
+  // so "King, Stephen, Jr." must not become "Stephen, Jr. King" (two authors).
+  const suffixes = ["jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "phd", "md"];
+  const commaParts = result.split(",").map((p) => p.trim()).filter(Boolean);
+  if (commaParts.length === 2) {
+    const [lastName, firstName] = commaParts;
+    if (suffixes.includes(firstName.toLowerCase())) {
+      // "Name, Suffix" -> "Name Suffix"
+      result = `${lastName} ${firstName}`;
+    } else {
       result = `${firstName} ${lastName}`;
     }
+  } else if (commaParts.length >= 3) {
+    // "Last, First, Suffix..." -> "First Last Suffix..."
+    const [lastName, firstName, ...rest] = commaParts;
+    result = `${firstName} ${lastName} ${rest.join(" ")}`.trim();
   }
 
   // Title-case name parts, handling initials and particles
