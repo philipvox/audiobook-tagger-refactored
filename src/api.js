@@ -217,6 +217,29 @@ function convertDnaToTags(dna) {
 // ============================================================================
 
 /**
+ * Strip embedded sequence numbers from a series name.
+ * e.g. "Harry Potter #3" -> { name: "Harry Potter", sequence: "3" }
+ * Only strips when an explicit marker is present (#, Book, Vol, Part, No.) before a number at end.
+ */
+function stripEmbeddedSequence(name) {
+  if (!name || typeof name !== 'string') return { name, sequence: null };
+  const trimmed = name.trim();
+  const re = /[,:]?\s*(?:#|book|bk\.?|vol\.?|volume|part|no\.?|number)\s*(\d+(?:\.\d+)?)\s*$/i;
+  const match = trimmed.match(re);
+  if (match) {
+    const cleaned = trimmed.slice(0, match.index).trim();
+    if (cleaned) return { name: cleaned, sequence: match[1] };
+  }
+  const hashRe = /\s+#(\d+(?:\.\d+)?)\s*$/;
+  const hashMatch = trimmed.match(hashRe);
+  if (hashMatch) {
+    const cleaned = trimmed.slice(0, hashMatch.index).trim();
+    if (cleaned) return { name: cleaned, sequence: hashMatch[1] };
+  }
+  return { name: trimmed, sequence: null };
+}
+
+/**
  * Build ABS-formatted PATCH payload from internal metadata.
  * Matches src-tauri/src/commands/abs.rs build_update_payload():
  * - Authors: split on , and & → [{id: "new-N", name}]
@@ -261,19 +284,31 @@ function buildAbsPayload(meta) {
 
   // Series: use all_series if available, fall back to series/sequence
   // NO id field — let ABS match by name to avoid duplicates
+  // Strip embedded sequence numbers from names (e.g. "Harry Potter #3" -> name + seq)
   if (meta.all_series && meta.all_series.length > 0) {
     metadata.series = meta.all_series.map(s => {
-      const obj = { name: s.name };
-      if (s.sequence != null) obj.sequence = String(s.sequence);
+      const stripped = stripEmbeddedSequence(s.name);
+      if (stripped.sequence) {
+        console.log(`[series-fix] Stripped embedded seq from all_series: "${s.name}" -> name="${stripped.name}" seq="${stripped.sequence}" (original seq=${s.sequence})`);
+      }
+      const obj = { name: stripped.name };
+      const seq = s.sequence != null ? String(s.sequence) : stripped.sequence;
+      if (seq != null) obj.sequence = seq;
       return obj;
     });
   } else if (meta.series) {
-    const obj = { name: meta.series };
-    if (meta.sequence != null) obj.sequence = String(meta.sequence);
+    const stripped = stripEmbeddedSequence(meta.series);
+    if (stripped.sequence) {
+      console.log(`[series-fix] Stripped embedded seq from series: "${meta.series}" -> name="${stripped.name}" seq="${stripped.sequence}" (original seq=${meta.sequence})`);
+    }
+    const obj = { name: stripped.name };
+    const seq = meta.sequence != null ? String(meta.sequence) : stripped.sequence;
+    if (seq != null) obj.sequence = seq;
     metadata.series = [obj];
   } else {
     metadata.series = [];
   }
+  console.log(`[series-fix] Final series payload:`, JSON.stringify(metadata.series));
 
   // Tags: TOP LEVEL (not inside metadata), DNA-aware enforcement
   const finalTags = enforceTagPolicyWithDna(meta.tags || []);
@@ -649,6 +684,10 @@ const HANDLERS = {
       const subtitle = parsed.subtitle || null;
       const series = parsed.series !== undefined ? parsed.series : null;
       const sequence = parsed.sequence !== undefined ? parsed.sequence : null;
+      console.log(`[series-fix] GPT returned for "${title}": series="${series}" sequence="${sequence}"`);
+      if (series && /[#]|\bbook\b|\bvol/i.test(series)) {
+        console.warn(`[series-fix] WARNING: GPT returned embedded sequence in series name: "${series}"`);
+      }
       const narrator = parsed.narrator || null;
       const changed = title !== book.current_title || author !== book.current_author
         || subtitle !== (book.current_subtitle || null)
@@ -779,7 +818,12 @@ ${input.current_series ? `Current series: ${safe(input.current_series)}` : ''}
 Return JSON: {"series":null,"sequence":null,"confidence":0,"source":"gpt"}
 If it's part of a series, fill in the name and book number. If standalone, use null.`;
     const response = await callAI(config, SYSTEM_PROMPT, prompt, 500);
-    return parseAIJson(response);
+    const parsed = parseAIJson(response);
+    console.log(`[series-fix] resolve_series for "${input.title}": series="${parsed.series}" sequence="${parsed.sequence}"`);
+    if (parsed.series && /[#]|\bbook\b|\bvol/i.test(parsed.series)) {
+      console.warn(`[series-fix] WARNING: GPT returned embedded sequence in series name: "${parsed.series}"`);
+    }
+    return parsed;
   },
 
   // === GPT: Classification (genres + tags + age + DNA + themes/tropes) ===
