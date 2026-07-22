@@ -260,11 +260,10 @@ function buildAbsPayload(meta) {
   if (meta.asin) metadata.asin = meta.asin;
   if (meta.language) metadata.language = meta.language;
 
-  // Authors: split on , and & (matching desktop), create {id, name} objects
+  // Authors: split on , and & (matching desktop), create {id, name} objects.
+  // splitAuthors() is suffix-aware so "Martin Luther King, Jr." stays one author.
   if (meta.author) {
-    const authors = meta.author.split(/[,&]/)
-      .map(a => a.trim())
-      .filter(a => a)
+    const authors = splitAuthors(meta.author)
       .map((name, i) => ({ id: `new-${i + 1}`, name }));
     if (authors.length > 0) metadata.authors = authors;
   }
@@ -282,9 +281,12 @@ function buildAbsPayload(meta) {
       : meta.genres.slice(0, 3);
   }
 
-  // Series: use all_series if available, fall back to series/sequence
-  // NO id field — let ABS match by name to avoid duplicates
-  // Strip embedded sequence numbers from names (e.g. "Harry Potter #3" -> name + seq)
+  // Series: use all_series if available, fall back to series/sequence.
+  // NO id field: let ABS match by name to avoid duplicates.
+  // Strip embedded sequence numbers from names (e.g. "Harry Potter #3" -> name + seq).
+  // CR-4a: when the input carries NO series info at all, OMIT the key entirely
+  // rather than sending [] - an empty array wipes curated ABS series on a
+  // partial push. There is no clear-series path here; clearing stays manual in ABS.
   if (meta.all_series && meta.all_series.length > 0) {
     metadata.series = meta.all_series.map(s => {
       const stripped = stripEmbeddedSequence(s.name);
@@ -292,7 +294,8 @@ function buildAbsPayload(meta) {
         console.log(`[series-fix] Stripped embedded seq from all_series: "${s.name}" -> name="${stripped.name}" seq="${stripped.sequence}" (original seq=${s.sequence})`);
       }
       const obj = { name: stripped.name };
-      const seq = s.sequence != null ? String(s.sequence) : stripped.sequence;
+      const hasSeq = s.sequence != null && s.sequence !== '';
+      const seq = hasSeq ? String(s.sequence) : stripped.sequence;
       if (seq != null) obj.sequence = seq;
       return obj;
     });
@@ -302,13 +305,12 @@ function buildAbsPayload(meta) {
       console.log(`[series-fix] Stripped embedded seq from series: "${meta.series}" -> name="${stripped.name}" seq="${stripped.sequence}" (original seq=${meta.sequence})`);
     }
     const obj = { name: stripped.name };
-    const seq = meta.sequence != null ? String(meta.sequence) : stripped.sequence;
+    const hasSeq = meta.sequence != null && meta.sequence !== '';
+    const seq = hasSeq ? String(meta.sequence) : stripped.sequence;
     if (seq != null) obj.sequence = seq;
     metadata.series = [obj];
-  } else {
-    metadata.series = [];
   }
-  console.log(`[series-fix] Final series payload:`, JSON.stringify(metadata.series));
+  if (metadata.series) console.log(`[series-fix] Final series payload:`, JSON.stringify(metadata.series));
 
   // Tags: TOP LEVEL (not inside metadata), DNA-aware enforcement
   const finalTags = enforceTagPolicyWithDna(meta.tags || []);
@@ -350,15 +352,24 @@ const HANDLERS = {
     const allItems = [];
     let page = 0;
     const limit = 100;
-    let total = 0;
 
-    do {
+    // Pagination guards: some ABS responses omit `total`, in which case the
+    // old `allItems.length < total` condition (total defaulting to 0) exited
+    // after a single page even when more data existed. Loop on page shape
+    // instead: keep going while the last page was a full page, stop on an
+    // empty or short page, and cap iterations so a misbehaving server can't
+    // spin this forever.
+    while (true) {
       const data = await absApi(baseUrl, token, `/api/libraries/${libraryId}/items?limit=${limit}&page=${page}&expanded=1`);
       const items = data.results || [];
-      total = data.total || 0;
+      const total = data.total || 0;
       allItems.push(...items);
       page++;
-    } while (allItems.length < total);
+      if (items.length === 0) break;
+      if (total && allItems.length >= total) break;
+      if (items.length < limit) break;
+      if (page > 1000) { console.warn('[import_from_abs] Pagination cap (1000 pages) hit; stopping.'); break; }
+    }
 
     // Convert ABS items to book groups
     const groups = allItems.map(item => absItemToBookGroup(item, baseUrl));
@@ -372,6 +383,16 @@ const HANDLERS = {
     const items = args.request?.items || args.items || [];
     let success = 0, failed = 0;
     const errors = [];
+
+    // Q: fail fast with a single result instead of issuing N doomed requests
+    // when ABS isn't configured.
+    if (!baseUrl || !token) {
+      return {
+        success: 0,
+        failed: 1,
+        errors: [{ id: 'config', error: 'ABS is not configured: missing base URL or API token' }],
+      };
+    }
 
     for (const item of items) {
       try {
@@ -400,9 +421,19 @@ const HANDLERS = {
     let updated = 0, failed = 0;
     const errors = [];
 
+    // Q: fail fast with a single result instead of issuing N doomed requests
+    // when ABS isn't configured.
+    if (!baseUrl || !token) {
+      return {
+        updated: 0,
+        failed: 1,
+        errors: ['ABS is not configured: missing base URL or API token'],
+      };
+    }
+
     for (const item of items) {
       try {
-        const absId = item.id || item.abs_id;
+        const absId = item.abs_id || item.id;
         if (!absId) { failed++; errors.push('Missing item ID'); continue; }
         const meta = item.metadata || {};
         const payload = buildAbsPayload(meta);
@@ -677,22 +708,37 @@ const HANDLERS = {
       });
     };
 
+    // Helper: is a value "present" for fallback purposes? Missing (undefined),
+    // explicit null, and empty string all count as "the AI didn't say anything".
+    const hasValue = (v) => v !== undefined && v !== null && v !== '';
+
+    // Helper: compare two values as strings, collapsing null/undefined to ''
+    // first so numeric 3 vs "3" (or null vs undefined) isn't a spurious change.
+    const strEq = (a, b) => (a == null ? '' : String(a)) === (b == null ? '' : String(b));
+
     // Helper: build result from parsed metadata
     const buildMetaResult = (book, parsed, rawResponse) => {
       const title = parsed.title || book.current_title;
       const author = parsed.author || book.current_author;
       const subtitle = parsed.subtitle || null;
-      const series = parsed.series !== undefined ? parsed.series : null;
-      const sequence = parsed.sequence !== undefined ? parsed.sequence : null;
+      // CR-4b: a missing OR null series/sequence in the AI response must fall
+      // back to the book's current series/sequence, exactly like title/author
+      // do: never to null. An AI response can't clear a series. (0 is a valid
+      // sequence value, so we check presence rather than truthiness.)
+      const series = hasValue(parsed.series) ? parsed.series : (book.current_series ?? null);
+      const sequence = hasValue(parsed.sequence) ? parsed.sequence : (book.current_sequence ?? null);
       console.log(`[series-fix] GPT returned for "${title}": series="${series}" sequence="${sequence}"`);
       if (series && /[#]|\bbook\b|\bvol/i.test(series)) {
         console.warn(`[series-fix] WARNING: GPT returned embedded sequence in series name: "${series}"`);
       }
-      const narrator = parsed.narrator || null;
+      // Data-preservation: an AI response that omits narrator shouldn't wipe a
+      // curated one either.
+      const narrator = hasValue(parsed.narrator) ? parsed.narrator : (book.current_narrator ?? null);
       const changed = title !== book.current_title || author !== book.current_author
-        || subtitle !== (book.current_subtitle || null)
+        || !strEq(subtitle, book.current_subtitle)
         || series !== (book.current_series || null)
-        || sequence !== (book.current_sequence || null);
+        || !strEq(sequence, book.current_sequence)
+        || !strEq(narrator, book.current_narrator);
       const result = { id: book.id, title, author, subtitle, series, sequence, narrator, confidence: parsed.confidence || 75, changed };
       // Silent-success surfacing: the caller already selected this book for
       // resolution (missing/bad author/title/series), so an empty AI response
@@ -1749,9 +1795,10 @@ function absItemToBookGroup(item, absBaseUrl) {
     || null;
 
   // Series can be in metadata.series (array) or metadata.seriesName (string)
+  // L: use ?? (not ||) so a legitimate sequence of 0 is preserved.
   const seriesArr = (meta.series || []).map(s => ({
     name: typeof s === 'string' ? s : s.name,
-    sequence: s.sequence || null,
+    sequence: (typeof s === 'string' ? undefined : s.sequence) ?? null,
     source: 'abs',
   }));
 
@@ -1766,6 +1813,9 @@ function absItemToBookGroup(item, absBaseUrl) {
     || firstTags.tagYear
     || null;
 
+  // L: don't let `|| meta.seriesSequence` override a legitimate sequence of 0.
+  const primarySequence = seriesArr[0]?.sequence;
+
   return {
     id: item.id || crypto.randomUUID(),
     abs_id: item.id,
@@ -1776,7 +1826,7 @@ function absItemToBookGroup(item, absBaseUrl) {
       narrator,
       subtitle: meta.subtitle || null,
       series: seriesArr[0]?.name || meta.seriesName || fromTags(firstTags.tagSeries) || null,
-      sequence: seriesArr[0]?.sequence || meta.seriesSequence || fromTags(firstTags.tagSeriesPart) || null,
+      sequence: primarySequence != null ? primarySequence : (meta.seriesSequence || fromTags(firstTags.tagSeriesPart) || null),
       all_series: seriesArr,
       genres: meta.genres || [],
       tags: item.media?.tags || [],
