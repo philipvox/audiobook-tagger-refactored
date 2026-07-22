@@ -573,6 +573,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         const transcriptionLabel = options.enableTranscription ? ' + audio verification' : '';
         const actualSelectedFiles = getSelectedFileIds(groups);
         const result = await handleRescan(actualSelectedFiles, groups, scanMode, selectiveFields, options);
+        // CR-1: handleRescan now returns { success: false, error } instead of
+        // throwing when the scan itself failed, surface that to the user.
+        if (result && result.success === false && result.error) {
+          toast.error('Rescan Failed', result.error);
+        }
       }
 
       handleClearSelection();
@@ -998,7 +1003,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Per D4, Fix Authors stays toast-silent on all-success. summarizeBatch
     // returns null for {0,0,0,0}, and for {fixed=N, skipped=M, 0 failed, 0
-    // warnings} we skip the success toast too — progress bar already showed
+    // warnings} we skip the success toast too, progress bar already showed
     // counts. Only surface V2/V3 when there's something to flag.
     const authorWarnings = 0; // fix_authors_batch ai-empty is failed, not warn (commit 8 normalization)
     if (failedCount > 0 || authorWarnings > 0) {
@@ -1134,7 +1139,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Per D4, toast-silent on all-success (progress bar suffices). Surface V2/V3
     // only when there's something to flag. fix_years_batch emits kind='schema'
-    // for invalid-year, which maps to severity=error — so these are failures,
+    // for invalid-year, which maps to severity=error, so these are failures,
     // not warnings.
     if (failedCount > 0) {
       const summary = summarizeBatch({ op: 'years', succeeded: fixedCount, skipped: skippedCount, warnings: 0, failed: failedCount });
@@ -1499,7 +1504,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       // Update progress with current batch
       batch.update('isbn', { current: i, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') });
 
-      // Process batch — use pre-fetched data from gather phase if available
+      // Process batch, use pre-fetched data from gather phase if available
       const results = await Promise.allSettled(
         chunk.map(async (group) => {
           try {
@@ -1569,7 +1574,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     batch.end('isbn');
   };
 
-  // ✅ CALL A: METADATA RESOLUTION — title + subtitle + author + series in ONE GPT call per book
+  // ✅ CALL A: METADATA RESOLUTION, title + subtitle + author + series in ONE GPT call per book
   const resolvingMetadata = batch.isActive('metadata');
   const metadataProgress = batch.getProgress('metadata');
   const handleMetadataResolution = async () => {
@@ -1739,7 +1744,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     batch.end('metadata', 2000);
   };
 
-  // ✅ CALL C: DESCRIPTION PROCESSING — validate + clean/generate in ONE GPT call per book
+  // ✅ CALL C: DESCRIPTION PROCESSING, validate + clean/generate in ONE GPT call per book
   const processingDescriptions = batch.isActive('descriptionProcessing');
   const descriptionProgress = batch.getProgress('descriptionProcessing');
   const handleDescriptionProcessing = async () => {
@@ -1874,7 +1879,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     } catch (error) {
       console.error('❌ Phase 1 (gather) failed:', error);
       gatheredDataRef.current = null;
-      // Continue anyway — individual steps will fall back to their own API calls
+      // Continue anyway, individual steps will fall back to their own API calls
     }
 
     batch.update('enrichment', {
@@ -2172,7 +2177,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     batch.end('dna', 1500);
   };
 
-  // ✅ CONSOLIDATED CLASSIFY — replaces genres + tags + age + DNA + description in ONE GPT call per book
+  // ✅ CONSOLIDATED CLASSIFY, replaces genres + tags + age + DNA + description in ONE GPT call per book
   const classifying = batch.isActive('classify');
   const classifyProgress = batch.getProgress('classify');
 
@@ -2204,7 +2209,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       return;
     }
 
-    // When Force is on, we want to clear stale classification data — but only AFTER the AI
+    // When Force is on, we want to clear stale classification data, but only AFTER the AI
     // call succeeds. Clearing eagerly (a) strips the tag signal the prompt builder reads back
     // via books[].tags and (b) permanently loses the user's existing tags if the API fails.
     // We record the ids to reset and apply the reset inside the success branch.

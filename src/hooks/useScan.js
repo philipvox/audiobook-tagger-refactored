@@ -3,6 +3,77 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { callBackend, subscribe, pickPath } from '../api';
 import { useApp } from '../context/AppContext';
 
+// ============================================================================
+// Pure helpers, extracted so they can be unit-tested without rendering the
+// hook (src/hooks/useScan.test.js is fully describe.skip'd; see that file's
+// header comment for why). Exported for src/hooks/useScan.helpers.test.js.
+// ============================================================================
+
+/**
+ * L-11: find the parent directory of a file path, handling both POSIX and
+ * Windows separators (a path scanned on Windows may contain '\\').
+ * Returns null if the path has no directory separator.
+ */
+export function getParentDir(path) {
+  if (!path) return null;
+  const lastSlash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return lastSlash > 0 ? path.substring(0, lastSlash) : null;
+}
+
+/**
+ * CR-1 support: merge freshly-rescanned groups into the existing group list.
+ * Drops any previous group that had a selected file (it's being replaced by
+ * the rescan result) and appends the new groups. Pure, does not decide
+ * whether the merge should run at all; the caller (handleRescan) skips
+ * calling this entirely when the scan itself failed, so a failed rescan
+ * never touches existing groups or staged edits.
+ */
+export function buildRescanGroups(prevGroups, selectedFilePaths, newGroups) {
+  const filtered = prevGroups.filter(group => {
+    const hasSelectedFile = group.files.some(file => selectedFilePaths.has(file.path));
+    return !hasSelectedFile;
+  });
+  return [...filtered, ...newGroups];
+}
+
+/** True if a group has any staged/unsaved local edits. */
+function groupHasStagedChanges(group) {
+  if (!group) return false;
+  if ((group.total_changes || 0) > 0) return true;
+  return (group.files || []).some(file => Object.keys(file.changes || {}).length > 0);
+}
+
+/**
+ * L1(pages): merge a fresh ABS pull into the existing groups instead of
+ * blindly replacing everything. If nothing locally has staged changes, a
+ * full replace is safe (and preserves prior behavior). Otherwise: keep any
+ * local group that isn't part of this ABS result, keep local groups that
+ * have staged edits as-is (don't clobber unsaved work), and only replace
+ * ABS-sourced groups that have no staged edits with the fresh data. Any
+ * brand-new ABS groups not previously known are appended.
+ */
+export function mergeAbsPullGroups(prevGroups, newGroups) {
+  const anyStaged = prevGroups.some(groupHasStagedChanges);
+  if (!anyStaged) {
+    return newGroups;
+  }
+
+  const newById = new Map(newGroups.map(g => [g.id, g]));
+  const seen = new Set();
+
+  const merged = prevGroups.map(group => {
+    if (!newById.has(group.id)) return group;
+    seen.add(group.id);
+    return groupHasStagedChanges(group) ? group : newById.get(group.id);
+  });
+
+  for (const group of newGroups) {
+    if (!seen.has(group.id)) merged.push(group);
+  }
+
+  return merged;
+}
+
 export function useScan() {
   const { setGroups } = useApp();
   const [scanning, setScanning] = useState(false);
@@ -259,11 +330,11 @@ export function useScan() {
 
       groups.forEach(group => {
         group.files.forEach(file => {
-          if (selectedFiles.has(file.id)) {
+          if (file.id != null && selectedFiles.has(file.id)) {
             selectedFilePaths.add(file.path);
-            const lastSlash = file.path.lastIndexOf('/');
-            if (lastSlash > 0) {
-              pathsToScan.add(file.path.substring(0, lastSlash));
+            const parentDir = getParentDir(file.path);
+            if (parentDir) {
+              pathsToScan.add(parentDir);
             }
           }
         });
@@ -310,6 +381,7 @@ export function useScan() {
         // Batch all paths in a single call for better performance
         // The Rust backend handles parallel processing internally
         let allNewGroups = [];
+        let scanError = null;
         try {
           let result;
           const enableTranscription = options.enableTranscription ?? false;
@@ -333,18 +405,17 @@ export function useScan() {
           }
         } catch (error) {
           console.error('Failed to scan paths:', error);
+          scanError = error;
         }
 
-        setGroups(prevGroups => {
-          const filtered = prevGroups.filter(group => {
-            const hasSelectedFile = group.files.some(file =>
-              selectedFilePaths.has(file.path)
-            );
-            return !hasSelectedFile;
-          });
+        // CR-1: if the rescan call itself failed, do NOT touch existing
+        // groups, a failed rescan must never destroy groups or staged
+        // edits. Surface the failure so the caller can toast it.
+        if (scanError) {
+          return { success: false, error: scanError.message || String(scanError) };
+        }
 
-          return [...filtered, ...allNewGroups];
-        });
+        setGroups(prevGroups => buildRescanGroups(prevGroups, selectedFilePaths, allNewGroups));
 
         return { success: true, count: allNewGroups.length };
 
@@ -432,7 +503,9 @@ export function useScan() {
         const result = await callBackend('import_from_abs', { request });
 
         if (result && result.groups) {
-          setGroups(result.groups);
+          // L1(pages): don't blow away staged local edits with a wholesale
+          // replace, merge the fresh ABS pull in instead.
+          setGroups(prevGroups => mergeAbsPullGroups(prevGroups, result.groups));
         }
 
         return { success: true, count: result?.total_imported || 0 };
@@ -630,6 +703,7 @@ export function useScan() {
       return { success: false, count: 0 };
     }
 
+    let unlisten = null;
     try {
       setScanning(true);
       const startTime = Date.now();
@@ -644,7 +718,7 @@ export function useScan() {
 
 
       // Listen for pipeline progress events
-      const unlisten = subscribe('pipeline_progress', (data) => {
+      unlisten = subscribe('pipeline_progress', (data) => {
         const { current, total, message, phase } = data;
         setScanProgress(prev => ({
           ...prev,
@@ -678,9 +752,6 @@ export function useScan() {
       };
 
       const result = await callBackend('process_with_pipeline', { request });
-
-      // Stop listening for progress events
-      unlisten();
 
       // Update groups with pipeline results
       if (result && result.books) {
@@ -728,6 +799,9 @@ export function useScan() {
       console.error('Pipeline rescan failed:', error);
       throw error;
     } finally {
+      // L-10: unlisten belongs in finally (matching the other handlers) so a
+      // thrown callBackend/setGroups error doesn't leak the subscription.
+      if (unlisten) unlisten();
       setScanning(false);
       setScanProgress({
         current: 0,
