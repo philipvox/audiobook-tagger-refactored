@@ -16,6 +16,8 @@ const JUNK_SUFFIXES = [
   "[Abridged]",
   "(Audiobook)",
   "[Audiobook]",
+  "(Unabridged Edition)",
+  "(Unabridged Audiobook)",
   "- Audiobook Edition",
   "- Audiobook",
   "- Unabridged Edition",
@@ -91,8 +93,8 @@ function looksLikeProperNoun(word) {
  * @returns {boolean}
  */
 function looksLikeAcronym(word) {
-  if (word.length < 2 || word.length > 4) return false;
-  if (!/^[A-Z0-9]+$/.test(word)) return false;
+  if (word.length < 2 || word.length > 6) return false;
+  if (!/^[A-Z0-9&]+$/.test(word)) return false;
   return KNOWN_ACRONYMS.has(word);
 }
 
@@ -109,6 +111,37 @@ function capitalizeNamePart(word) {
       .join(".");
   }
   return capitalizeFirst(word);
+}
+
+// Name particles that keep their given casing (usually lowercase) instead of
+// being title-cased, e.g. "Ludwig van Beethoven", "Vincent van Gogh".
+const NAME_PARTICLES = new Set([
+  "de", "van", "von", "la", "le", "da", "di", "del",
+  "jr.", "sr.", "ii", "iii", "iv",
+]);
+
+// Suffixes whose canonical casing isn't just "capitalize the first letter" -
+// applied regardless of the input's original casing so "phd"/"PHD"/"PhD" all
+// normalize to the same "PhD".
+const SUFFIX_CANONICAL_CASE = new Map([
+  ["phd", "PhD"],
+  ["md", "MD"],
+  ["m.d.", "M.D."],
+  ["ph.d.", "Ph.D."],
+]);
+
+// Title-case each whitespace-separated word in a name, handling initials
+// (capitalizeNamePart), particles (kept as-is), and suffix canonical casing.
+function _titleCaseNameWords(str) {
+  return str
+    .split(/\s+/)
+    .map((w) => {
+      const lower = w.toLowerCase();
+      if (SUFFIX_CANONICAL_CASE.has(lower)) return SUFFIX_CANONICAL_CASE.get(lower);
+      if (NAME_PARTICLES.has(lower)) return w;
+      return capitalizeNamePart(lower);
+    })
+    .join(" ");
 }
 
 // =============================================================================
@@ -137,9 +170,15 @@ export function toTitleCase(str) {
       const isFirst = i === 0;
       const isLast = i === words.length - 1;
 
+      // Strip trailing punctuation before the acronym/proper-noun check only
+      // (re-attached below) so "FBI:" is recognized as the acronym "FBI"
+      // instead of failing the check on the trailing colon.
+      const trailingPunct = word.match(/[.,:;!?]+$/);
+      const core = trailingPunct ? word.slice(0, -trailingPunct[0].length) : word;
+
       // Preserve acronyms and proper nouns
-      if (looksLikeProperNoun(word) || looksLikeAcronym(word)) {
-        return word;
+      if (looksLikeProperNoun(core) || looksLikeAcronym(core)) {
+        return core + (trailingPunct ? trailingPunct[0] : "");
       }
 
       const lower = word.toLowerCase();
@@ -179,6 +218,14 @@ export function removeJunkSuffixes(title) {
     if (dedashed !== result) {
       result = dedashed;
       changed = true;
+    }
+
+    // Bracketed bitrate markers, e.g. "[64kbps]", "[320kbps]".
+    const bitrateMatch = result.match(/\s*\[\d+\s*kbps\]\s*$/i);
+    if (bitrateMatch) {
+      result = result.slice(0, bitrateMatch.index).trim();
+      changed = true;
+      continue;
     }
 
     const lower = result.toLowerCase();
@@ -250,7 +297,12 @@ export function extractSubtitle(title) {
   if (colonPos !== -1) {
     const mainTitle = title.slice(0, colonPos).trim();
     const subtitle = title.slice(colonPos + 1).trim();
-    if (subtitle.length > 2) {
+    if (
+      subtitle.length > 2 &&
+      !NARRATOR_PREFIXES.some((p) =>
+        subtitle.toLowerCase().startsWith(p.toLowerCase())
+      )
+    ) {
       return { title: mainTitle, subtitle };
     }
   }
@@ -310,37 +362,44 @@ export function cleanAuthorName(name) {
   // Handle "Last, First" / "Last, First, Suffix" -> "First Last [Suffix]".
   // Never leave an embedded comma: authors are later split on "," downstream,
   // so "King, Stephen, Jr." must not become "Stephen, Jr. King" (two authors).
-  const suffixes = ["jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "phd", "md"];
+  //
+  // But a comma is also how co-authors are joined ("Stephen King, Peter
+  // Straub"). The "Last, First" swap only makes sense when the first
+  // comma-part is a single word (a surname) and the second is 1-2 words (a
+  // given name, optionally with a middle name) - if BOTH parts are
+  // multi-word, this is a co-author list, not a single inverted name, and
+  // swapping would mangle it into one garbled name. In that case each name
+  // is cleaned individually and the list is preserved comma-joined.
+  const suffixes = ["jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "phd", "md", "m.d.", "ph.d."];
   const commaParts = result.split(",").map((p) => p.trim()).filter(Boolean);
+  const wordCount = (s) => s.split(/\s+/).filter(Boolean).length;
+
   if (commaParts.length === 2) {
-    const [lastName, firstName] = commaParts;
-    if (suffixes.includes(firstName.toLowerCase())) {
+    const [first, second] = commaParts;
+    if (suffixes.includes(second.toLowerCase())) {
       // "Name, Suffix" -> "Name Suffix"
-      result = `${lastName} ${firstName}`;
+      result = `${first} ${second}`;
+    } else if (wordCount(first) === 1 && wordCount(second) <= 2) {
+      // "Last, First [Middle]" -> "First [Middle] Last"
+      result = `${second} ${first}`;
     } else {
-      result = `${firstName} ${lastName}`;
+      // Co-authors already in "First Last" order - clean each name
+      // independently and keep them comma-separated.
+      return commaParts.map((p) => _titleCaseNameWords(p)).join(", ");
     }
   } else if (commaParts.length >= 3) {
+    const allMultiWord = commaParts.every((p) => wordCount(p) > 1);
+    if (allMultiWord) {
+      // "Stephen King, Peter Straub, Neil Gaiman" - a co-author list, not a
+      // "Last, First, Suffix..." inversion.
+      return commaParts.map((p) => _titleCaseNameWords(p)).join(", ");
+    }
     // "Last, First, Suffix..." -> "First Last Suffix..."
     const [lastName, firstName, ...rest] = commaParts;
     result = `${firstName} ${lastName} ${rest.join(" ")}`.trim();
   }
 
-  // Title-case name parts, handling initials and particles
-  const particles = new Set([
-    "de", "van", "von", "la", "le", "da", "di", "del",
-    "jr.", "sr.", "ii", "iii", "iv",
-  ]);
-
-  const words = result.split(/\s+/).map((w) => {
-    const lower = w.toLowerCase();
-    if (particles.has(lower)) {
-      return w;
-    }
-    return capitalizeNamePart(lower);
-  });
-
-  return words.join(" ");
+  return _titleCaseNameWords(result);
 }
 
 /**
@@ -378,9 +437,12 @@ export function cleanNarratorName(name) {
 }
 
 /**
- * Validate and extract a year value (1900-2099).
+ * Validate and extract a year value (1000..currentYear+2, mirrors api.js's
+ * isValidYear).
  *
- * Accepts a plain year string or extracts a 4-digit year from a larger string.
+ * Accepts a plain year string or extracts a word-bounded 4-digit year from a
+ * larger string. The word boundary keeps this from matching a year-shaped
+ * digit run embedded inside a longer number, e.g. an ISBN/ASIN.
  * Returns null if no valid year can be found.
  *
  * @param {string} str
@@ -389,21 +451,20 @@ export function cleanNarratorName(name) {
  * @example
  * validateYear("2020")              // "2020"
  * validateYear("Released in 2015")  // "2015"
- * validateYear("1800")              // null (too old)
+ * validateYear("999")               // null (too old)
  * validateYear("invalid")           // null
  */
 export function validateYear(str) {
   const trimmed = str.trim();
+  const maxYear = new Date().getFullYear() + 2;
 
-  // Try to parse as a plain number
-  const num = parseInt(trimmed, 10);
-  if (!isNaN(num) && String(num) === trimmed && num >= 1900 && num <= 2099) {
-    return String(num);
-  }
+  // Word-boundary match so a year-shaped run embedded in a longer digit
+  // string (e.g. an ISBN) is not mistaken for a standalone year.
+  const match = trimmed.match(/\b(1[0-9]{3}|20[0-9]{2})\b/);
+  if (!match) return null;
 
-  // Try to extract a 4-digit year from the string
-  const match = trimmed.match(/(19|20)\d{2}/);
-  if (match) {
+  const num = parseInt(match[0], 10);
+  if (num >= 1000 && num <= maxYear) {
     return match[0];
   }
 
@@ -470,7 +531,7 @@ export function stripTrackSuffixes(title) {
   result = result.replace(/\s*\(\s*(?:part|track|disc|cd)\s*\d+\s*(?:of\s*\d+)?\s*\)\s*$/i, "");
 
   // Pattern: ": Track N" or " - Track N" at end
-  result = result.replace(/[:\s-]+(?:track|chapter|part|opening|closing|credits|intro|prologue|epilogue)\s*\d*\s*$/i, "");
+  result = result.replace(/[:\s-]+(?:track|chapter|part|opening|closing|credits|intro|prologue|epilogue)\s*\d+\s*$/i, "");
 
   return result.trim();
 }
