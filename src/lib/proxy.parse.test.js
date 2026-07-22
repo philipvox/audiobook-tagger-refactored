@@ -56,6 +56,16 @@ describe('parseAIJson - robust extraction (item 8)', () => {
     expect(parseAIJson(text)).toEqual([{ id: 'b1', meta: { a: 1, b: [1, 2, 3] } }, { id: 'b2' }]);
   });
 
+  it('preserves a literal ``` fence sequence inside a JSON string value, even when the whole response is also fence-wrapped and surrounded by prose', () => {
+    // Regression for a real corruption bug: a global `.replace(/```/g, '')`
+    // over the entire raw text would delete this ``` sequence too, since it
+    // can't distinguish "fence markers wrapping the payload" from "a literal
+    // backtick sequence inside a JSON string value". The fix must never
+    // mutate characters inside the JSON payload itself.
+    const text = 'Here you go:\n```json\n{"description":"use ```json blocks for code samples"}\n```\nHope that helps!';
+    expect(parseAIJson(text)).toEqual({ description: 'use ```json blocks for code samples' });
+  });
+
   it('skips an unparseable earlier balanced block and parses valid JSON later in the text', () => {
     // Small local models often emit a <thinking> block first; a stray brace
     // pair in that prose balances but is not valid JSON, and the real JSON

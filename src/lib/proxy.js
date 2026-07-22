@@ -418,27 +418,42 @@ function findFirstParseableBlock(text) {
 
 /**
  * Parse a JSON response from AI, handling markdown code blocks, prose the
- * model wrapped around the JSON, and trailing commentary. Strategy:
- *   1. Strip ``` fences wherever they appear (not just at the very start/end).
- *   2. Try JSON.parse on the cleaned text directly (fast path, no prose).
- *   3. Fall back to scanning for balanced {...} / [...] blocks (respecting
- *      strings/escapes) and parsing each in turn, returning the first one
- *      that is actually valid JSON: a balanced-but-non-JSON block earlier
- *      in the text (e.g. a stray brace pair inside a <thinking> block) does
- *      not stop the scan.
+ * model wrapped around the JSON, and trailing commentary. Strategy, tried
+ * in order:
+ *   1. JSON.parse the raw (trimmed) text as-is - the fast path when the
+ *      model returned clean JSON with no wrapping.
+ *   2. If the ENTIRE text is wrapped in a single pair of ``` fences at the
+ *      very start and very end, strip just those two wrapping delimiters
+ *      (never a global replace across the whole text) and parse the
+ *      interior. This is anchored on purpose: a global "delete every ```
+ *      substring" would also corrupt a legitimate ``` sequence that
+ *      appears inside a JSON string value elsewhere in the response.
+ *   3. Fall back to scanning the ORIGINAL, unstripped text for balanced
+ *      {...} / [...] blocks (respecting strings/escapes) and parsing each
+ *      in turn, returning the first one that is actually valid JSON. This
+ *      naturally skips over fence markers and surrounding prose (they're
+ *      just ordinary characters to the scanner) without ever deleting or
+ *      mutating any character of the payload itself, including fence-like
+ *      sequences that legitimately live inside a string value.
  *   4. Throw only if nothing in the text was parseable.
  */
 export function parseAIJson(text) {
-  const cleaned = String(text)
-    .replace(/```json/gi, '')
-    .replace(/```/g, '')
-    .trim();
+  const raw = String(text);
+  const trimmed = raw.trim();
 
   try {
-    return JSON.parse(cleaned);
+    return JSON.parse(trimmed);
   } catch (e) {
-    const result = findFirstParseableBlock(cleaned);
+    const wrapped = trimmed.match(/^```(?:json)?\s*([\s\S]*)\s*```$/i);
+    if (wrapped) {
+      try {
+        return JSON.parse(wrapped[1]);
+      } catch { /* not valid JSON even unwrapped - fall through to the scan */ }
+    }
+
+    const result = findFirstParseableBlock(raw);
     if (result !== NO_BLOCK_FOUND) return result;
-    throw new Error(`Failed to parse AI response as JSON: ${e.message}\nResponse was: ${cleaned.substring(0, 200)}`);
+
+    throw new Error(`Failed to parse AI response as JSON: ${e.message}\nResponse was: ${trimmed.substring(0, 200)}`);
   }
 }
