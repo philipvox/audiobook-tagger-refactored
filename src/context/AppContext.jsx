@@ -333,7 +333,7 @@ export function AppProvider({ children }) {
 
       // Find issues with suggested fixes, optionally filtered by issue type
       const fixableIssues = validation.issues.filter(issue =>
-        issue.suggested_value &&
+        issue.suggested_value != null &&
         (allowedIssueTypes === null || allowedIssueTypes[issue.issue_type])
       );
       if (fixableIssues.length === 0) {

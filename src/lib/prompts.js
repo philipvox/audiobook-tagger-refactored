@@ -138,7 +138,7 @@ export function buildMetadataPrompt(input) {
   context += `Current author: ${safe(input.current_author)}\n`;
   if (input.current_subtitle) context += `Current subtitle: ${safe(input.current_subtitle)}\n`;
   if (input.current_series) context += `Current series: ${safe(input.current_series)}\n`;
-  if (input.current_sequence) context += `Current sequence: ${safe(input.current_sequence)}\n`;
+  if (input.current_sequence != null) context += `Current sequence: ${safe(input.current_sequence)}\n`;
   if (input.current_narrator) context += `Current narrator: ${safe(input.current_narrator)}\n`;
   if (input.current_publisher) context += `Current publisher: ${safe(input.current_publisher)}\n`;
   if (input.current_year) context += `Current year: ${safe(input.current_year)}\n`;
@@ -166,9 +166,11 @@ export function buildMetadataPrompt(input) {
     context += '\n--- Ambiguous External Matches (PICK ONE that matches narrator/year/publisher) ---\n';
     input.audible_candidates.slice(0, 5).forEach((c, i) => {
       const bits = [];
+      if (c.title) bits.push(`title=${c.title}`);
       if (c.author) bits.push(`author=${c.author}`);
       if (c.year) bits.push(`year=${c.year}`);
       if (c.publisher) bits.push(`publisher=${c.publisher}`);
+      if (c.narrator) bits.push(`narrator=${c.narrator}`);
       if (c.subtitle) bits.push(`subtitle=${c.subtitle}`);
       context += `${i + 1}. ${bits.join(' | ')}\n`;
     });
@@ -249,7 +251,7 @@ export function buildClassificationPrompt(book, externalData = null, customInstr
   if (book.author) context += `\nAuthor: ${safe(book.author)}`;
   if (book.subtitle) context += `\nSubtitle: ${safe(book.subtitle)}`;
   if (book.series) context += `\nSeries: ${safe(book.series)}`;
-  if (book.sequence) context += `\nBook #: ${safe(book.sequence)}`;
+  if (book.sequence != null) context += `\nBook #: ${safe(book.sequence)}`;
   if (book.description) context += `\nDescription: ${safe(book.description.substring(0, 500))}`;
   if (book.narrator) context += `\nNarrator: ${safe(book.narrator)}`;
   if (book.published_year || book.year) context += `\nYear: ${book.published_year || book.year}`;
@@ -322,7 +324,7 @@ export function buildBatchMetadataPrompt(books) {
     booksContext += `Title: ${safe(book.current_title)}\n`;
     booksContext += `Author: ${safe(book.current_author)}\n`;
     if (book.current_series) booksContext += `Series: ${safe(book.current_series)}\n`;
-    if (book.current_sequence) booksContext += `Sequence: ${safe(book.current_sequence)}\n`;
+    if (book.current_sequence != null) booksContext += `Sequence: ${safe(book.current_sequence)}\n`;
   });
 
   return `Resolve metadata for these ${books.length} audiobooks. Fix titles, authors, series, and sequences.
@@ -370,7 +372,7 @@ Return ONLY valid JSON:
   const rules = customGenerateRules || DEFAULT_DESCRIPTION_GENERATE_RULES;
   return `Write a brief audiobook description for ${safe(book.title)} by ${safe(book.author)}.
 ${book.subtitle ? `Subtitle: ${safe(book.subtitle)}` : ''}
-${book.series ? `Series: ${safe(book.series)} #${book.sequence || '?'}` : ''}
+${book.series ? `Series: ${safe(book.series)} #${book.sequence != null ? book.sequence : '?'}` : ''}
 Genre: ${genres}
 
 ${rules}
@@ -514,7 +516,7 @@ export function buildDnaPrompt(book) {
   }
   if (book.series) {
     prompt += `Series: ${safe(book.series)}`;
-    if (book.sequence) prompt += ` #${book.sequence}`;
+    if (book.sequence != null) prompt += ` #${book.sequence}`;
     prompt += `\n`;
   }
   if (book.year || book.published_year) {

@@ -358,4 +358,54 @@ describe('AppContext', () => {
       });
     });
   });
+
+  describe('applyBatchFixes — sequence 0 is real data (L-7)', () => {
+    const wrapper = ({ children }) => (
+      <AppProvider>{children}</AppProvider>
+    );
+
+    it('applies a suggested sequence fix of 0 instead of dropping it as falsy', async () => {
+      mockInvoke.mockImplementation(async (cmd) => {
+        if (cmd === 'get_config') return {};
+        if (cmd === 'scan_metadata_errors') {
+          return {
+            books: [{
+              book_id: 'b1',
+              issues: [{ field: 'sequence', issue_type: 'sequence_mismatch', suggested_value: 0 }],
+              error_count: 1,
+              warning_count: 0,
+            }],
+            total_scanned: 1,
+            books_with_errors: 1,
+            books_with_warnings: 0,
+          };
+        }
+        return {};
+      });
+
+      const { result } = renderHook(() => useApp(), { wrapper });
+
+      await waitFor(() => {
+        expect(result.current.config).not.toBe(null);
+      });
+
+      const group = { id: 'b1', metadata: { sequence: null } };
+
+      await act(async () => {
+        await result.current.runValidation([group]);
+      });
+
+      await waitFor(() => {
+        expect(result.current.validationResults['b1']).toBeDefined();
+      });
+
+      let applied;
+      act(() => {
+        applied = result.current.applyBatchFixes([group]);
+      });
+
+      expect(applied.fixCount).toBe(1);
+      expect(applied.updatedGroups[0].metadata.sequence).toBe(0);
+    });
+  });
 });
