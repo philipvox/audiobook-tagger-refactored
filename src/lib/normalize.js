@@ -537,6 +537,51 @@ export function isValidAuthor(author) {
  * @param {number} [maxLength] - Optional max length (truncates at sentence/word boundary).
  * @returns {string}
  */
+// Known suffixes that must NOT be treated as a separate author when they
+// follow a comma (e.g. "Martin Luther King, Jr." is ONE author, not two).
+const AUTHOR_SUFFIXES = new Set([
+  "jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "phd", "md", "m.d.", "ph.d.",
+]);
+
+/**
+ * Split a raw "author" string into individual author names.
+ *
+ * Splits on "&" and " and " (case-insensitive), and on "," EXCEPT when the
+ * comma-delimited part is a known name suffix (Jr, Jr., Sr, Sr., II, III, IV,
+ * PhD, MD, M.D., Ph.D.), in which case it is rejoined onto the previous name.
+ * Ported from the 2026-07-21 audit finding K: `meta.author.split(/[,&]/)`
+ * mangled "Martin Luther King, Jr." into two authors.
+ *
+ * @param {string} str
+ * @returns {string[]}
+ *
+ * @example
+ * splitAuthors("Martin Luther King, Jr.")  // ["Martin Luther King, Jr."]
+ * splitAuthors("Stephen King, John Grisham")  // ["Stephen King", "John Grisham"]
+ * splitAuthors("Stephen King & John Grisham")  // ["Stephen King", "John Grisham"]
+ */
+export function splitAuthors(str) {
+  if (!str || typeof str !== "string") return [];
+
+  // Split on "&" and " and " first (word-boundary, case-insensitive).
+  const chunks = str.split(/\s*&\s*|\s+and\s+/i).map((c) => c.trim()).filter(Boolean);
+
+  const authors = [];
+  for (const chunk of chunks) {
+    const commaParts = chunk.split(",").map((p) => p.trim()).filter(Boolean);
+    for (const part of commaParts) {
+      const isSuffix = AUTHOR_SUFFIXES.has(part.toLowerCase());
+      if (isSuffix && authors.length > 0) {
+        authors[authors.length - 1] = `${authors[authors.length - 1]}, ${part}`;
+      } else {
+        authors.push(part);
+      }
+    }
+  }
+
+  return authors;
+}
+
 export function normalizeDescription(description, maxLength) {
   let result = description;
 

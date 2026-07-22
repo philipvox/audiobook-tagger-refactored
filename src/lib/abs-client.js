@@ -39,22 +39,32 @@ export async function importLibrary(config, onProgress) {
     throw new Error('Configure ABS URL, token, and library ID in Settings first');
   }
 
-  // Fetch all items with pagination
+  // Fetch all items with pagination.
+  // Pagination guards: some ABS responses omit `total`, in which case the old
+  // `allItems.length < total` condition (total defaulting to 0) exited after a
+  // single page even when more data existed. Loop on page shape instead: keep
+  // going while the last page was a full page, stop on an empty or short
+  // page, and cap iterations so a misbehaving server can't spin this forever.
   const allItems = [];
   let page = 0;
   const limit = 100;
-  let total = 0;
+  let lastKnownTotal = 0;
 
-  do {
-    onProgress?.(allItems.length, total || 0, `Fetching page ${page + 1}...`);
+  while (true) {
+    onProgress?.(allItems.length, lastKnownTotal, `Fetching page ${page + 1}...`);
     const data = await absApi(baseUrl, token, `/api/libraries/${libraryId}/items?limit=${limit}&page=${page}&expanded=1`);
     const items = data.results || [];
-    total = data.total || 0;
+    const total = data.total || 0;
+    if (total) lastKnownTotal = total;
     allItems.push(...items);
     page++;
-  } while (allItems.length < total);
+    if (items.length === 0) break;
+    if (total && allItems.length >= total) break;
+    if (items.length < limit) break;
+    if (page > 1000) { console.warn('[importLibrary] Pagination cap (1000 pages) hit; stopping.'); break; }
+  }
 
-  onProgress?.(allItems.length, total, 'Processing...');
+  onProgress?.(allItems.length, lastKnownTotal || allItems.length, 'Processing...');
 
   // Convert ABS items to book groups
   const groups = allItems.map((item, index) => {
