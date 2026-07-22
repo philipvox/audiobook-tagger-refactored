@@ -56,6 +56,14 @@ describe('parseAIJson - robust extraction (item 8)', () => {
     expect(parseAIJson(text)).toEqual([{ id: 'b1', meta: { a: 1, b: [1, 2, 3] } }, { id: 'b2' }]);
   });
 
+  it('skips an unparseable earlier balanced block and parses valid JSON later in the text', () => {
+    // Small local models often emit a <thinking> block first; a stray brace
+    // pair in that prose balances but is not valid JSON, and the real JSON
+    // comes after it. The first balanced block must not be the final word.
+    const text = '<thinking>maybe {fantasy}</thinking>{"genres":["Fantasy"]}';
+    expect(parseAIJson(text)).toEqual({ genres: ['Fantasy'] });
+  });
+
   it('throws a JSON-mentioning error for pure garbage with no parseable block', () => {
     expect(() => parseAIJson('sorry, I cannot help with that request.')).toThrow(/JSON/i);
   });
