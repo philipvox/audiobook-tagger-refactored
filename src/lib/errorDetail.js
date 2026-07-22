@@ -89,6 +89,11 @@ export function errorDetailFromException(err, { stage, kind, url, responsePrevie
   let resolvedKind = kind;
   if (!resolvedKind) {
     if (/HTTP \d|status \d|error \d{3}/i.test(msg)) resolvedKind = 'http';
+    // Auth failures ("Invalid API key", "Invalid key", "unauthorized") are
+    // effectively an HTTP-level rejection even when the message doesn't
+    // include a literal status code - classify before the network fallback
+    // so they don't get mistaken for a transport-level failure.
+    else if (/api key|invalid key|unauthorized/i.test(msg)) resolvedKind = 'http';
     else if (/parse|JSON|unexpected token/i.test(msg)) resolvedKind = 'parse';
     else resolvedKind = 'network';
   }
