@@ -1,5 +1,5 @@
 // src/pages/AuthorsPage.jsx
-// Authors tab — mirrors the ScannerPage experience for author metadata
+// Authors tab, mirrors the ScannerPage experience for author metadata
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { callBackend } from '../api';
@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useAuthors } from '../hooks/useAuthors';
 import { useApp } from '../context/AppContext';
+import { useToast } from '../components/Toast';
 import { ConfirmModal } from '../components/ConfirmModal';
 
 export function AuthorsPage() {
@@ -22,12 +23,13 @@ export function AuthorsPage() {
     loadAuthors, loadDetail, runAnalysis, renameAuthor,
     stageMerge, unstageMerge, autoMergeDuplicates,
     fixDescriptions, applyNormalizationFixes, pushToAbs,
-    stageChange, discardAllChanges, selectedAuthorId,
+    stageChange, updateDetail, discardAllChanges, selectedAuthorId,
     handleAuthorClick, handleSelectAll, handleClearSelection,
     getSelectedAuthors, getSelectedCount,
     getIssuesForAuthor,
   } = useAuthors();
 
+  const toast = useToast();
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState('all');
   const [renameModal, setRenameModal] = useState(null);
@@ -49,12 +51,12 @@ export function AuthorsPage() {
       const t = setTimeout(() => endGlobalProgress(), 2000);
       return () => clearTimeout(t);
     } else {
-      // First event with a total — start or update the bar
+      // First event with a total, start or update the bar
       if (total > 0) {
         startGlobalProgress({ message, total, type: 'info' });
         if (current > 0) updateGlobalProgress({ current, message, detail: message });
       } else {
-        // Indeterminate — just start with a message
+        // Indeterminate, just start with a message
         startGlobalProgress({ message, total: 0, type: 'info' });
       }
     }
@@ -64,7 +66,7 @@ export function AuthorsPage() {
   const isProcessing = analyzing || fixingDescriptions || pushing;
   useEffect(() => {
     if (prevProcessing.current && !isProcessing) {
-      // Operations ended — dismiss after a short delay
+      // Operations ended, dismiss after a short delay
       const t = setTimeout(() => endGlobalProgress(), 2500);
       return () => clearTimeout(t);
     }
@@ -84,7 +86,7 @@ export function AuthorsPage() {
     return map;
   }, [analysis]);
 
-  // Filtered + searched authors — hide authors that are staged to be merged away
+  // Filtered + searched authors, hide authors that are staged to be merged away
   const filteredAuthors = useMemo(() => {
     let list = authors.filter(a => !mergedAwayIds.has(a.id));
     if (searchQuery.trim()) {
@@ -150,10 +152,21 @@ export function AuthorsPage() {
       type: 'info',
       onConfirm: async () => {
         setConfirmModal(null);
-        await pushToAbs();
+        const result = await pushToAbs();
+        // H5/M-8: pushToAbs keeps failed entries staged instead of silently
+        // dropping them, so tell the user what actually happened.
+        if (!result) {
+          toast.error('Push Failed', 'Could not push changes to AudiobookShelf.');
+        } else if (result.failed > 0 && result.updated > 0) {
+          toast.warning('Push Partially Failed', `Updated ${result.updated}, failed ${result.failed}. Failed changes remain staged.`);
+        } else if (result.failed > 0) {
+          toast.error('Push Failed', `Failed to push ${result.failed} change(s). They remain staged.`);
+        } else if (result.updated > 0) {
+          toast.success('Pushed to ABS', `Updated ${result.updated} author${result.updated === 1 ? '' : 's'}.`);
+        }
       },
     });
-  }, [pendingCount, pushToAbs]);
+  }, [pendingCount, pushToAbs, toast]);
 
   const getIssueBadges = (authorId) => {
     const issues = issuesByAuthor[authorId];
@@ -461,13 +474,22 @@ export function AuthorsPage() {
               onRename={(id, name) => {
                 setRenameModal({ id, name });
                 const norm = (issuesByAuthor[id] || []).find(i => i.issue_type === 'needs_normalization');
-                setRenameValue(norm?.suggested_value || name);
+                // Item 12: a bare `||` fallback drops a legitimate suggested
+                // value of 0/'', only fall back to `name` when there's
+                // genuinely nothing suggested.
+                const suggested = norm?.suggested_value;
+                // renameValue is a controlled <input> value, so it must
+                // always be a string (a numeric 0 would otherwise reach
+                // renameValue.trim() below and throw).
+                setRenameValue(suggested != null && suggested !== '' ? String(suggested) : name);
               }}
               onMerge={(primaryId, primaryName, secondaryId, secondaryName) => handleMerge(primaryId, primaryName, secondaryId, secondaryName)}
               onFixDescription={async (id) => { await fixDescriptions([id], false); }}
               onEditDescription={(id, desc) => {
+                // CR-7: useAuthors doesn't expose its internal setDetail -
+                // use the exported updateDetail mutator instead.
                 stageChange(id, 'description', desc);
-                setDetail(prev => prev ? { ...prev, description: desc } : prev);
+                updateDetail('description', desc);
               }}
               actionLoading={actionLoading || fixingDescriptions}
             />
@@ -488,7 +510,7 @@ export function AuthorsPage() {
             <input type="text" value={renameValue} onChange={(e) => setRenameValue(e.target.value)}
               className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-gray-200 text-sm focus:outline-none focus:border-neutral-500"
               autoFocus onKeyDown={(e) => e.key === 'Enter' && handleRename()} />
-            <p className="text-xs text-gray-600 mt-2">Staged locally — push to ABS when ready.</p>
+            <p className="text-xs text-gray-600 mt-2">Staged locally, push to ABS when ready.</p>
             <div className="flex justify-end gap-2 mt-4">
               <button onClick={() => setRenameModal(null)} className="px-4 py-2 text-sm text-gray-400 hover:text-gray-200">Cancel</button>
               <button onClick={handleRename} disabled={!renameValue.trim() || renameValue.trim() === renameModal.name}
@@ -581,6 +603,9 @@ function AuthorDetail({ detail, issues, pendingChanges, onRename, onMerge, onFix
           <div className="flex flex-wrap gap-2 mt-2">
             {normIssue && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-500/20 text-orange-400">
+                {/* Item 12 reviewed: this is direct interpolation gated on
+                    `normIssue` (an object), not on suggested_value itself, so
+                    0/'' render fine here. No truthy-check bug at this line. */}
                 <Edit3 className="w-3 h-3" /> Normalize to: {normIssue.suggested_value}
               </span>
             )}
@@ -697,7 +722,8 @@ function AuthorDetail({ detail, issues, pendingChanges, onRename, onMerge, onFix
                   : <Info className="w-4 h-4 text-blue-400 mt-0.5 flex-shrink-0" />}
                 <div className="flex-1">
                   <p className="text-sm text-gray-300">{issue.message}</p>
-                  {issue.suggested_value && <p className="text-xs text-gray-500 mt-0.5">Suggested: <span className="text-gray-400">{issue.suggested_value}</span></p>}
+                  {/* Item 12: a bare truthy check here hides a legitimate suggested_value of 0. */}
+                  {issue.suggested_value != null && issue.suggested_value !== '' && <p className="text-xs text-gray-500 mt-0.5">Suggested: <span className="text-gray-400">{issue.suggested_value}</span></p>}
                 </div>
               </div>
             ))}

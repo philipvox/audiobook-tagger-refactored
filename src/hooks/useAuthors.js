@@ -81,7 +81,7 @@ export function useAuthors() {
       setDetail(result);
       return result;
     } catch (err) {
-      // Detail load failed — error shown via detail=null state
+      // Detail load failed, error shown via detail=null state
       setDetail(null);
       return null;
     } finally {
@@ -171,6 +171,13 @@ export function useAuthors() {
     if (allSelected) return (filteredList || authors).length;
     return selectedIds.size;
   }, [authors, allSelected, selectedIds]);
+
+  // CR-7: lets callers (e.g. AuthorsPage's description editor) mutate a
+  // single field on the loaded detail without reaching into the hook's
+  // internal setDetail (which isn't exported and isn't theirs to call).
+  const updateDetail = useCallback((field, value) => {
+    setDetail(prev => prev ? { ...prev, [field]: value } : prev);
+  }, []);
 
   // ---- Rename (stages locally) ----
 
@@ -325,7 +332,12 @@ export function useAuthors() {
     const idSet = authorIds ? new Set(authorIds) : null;
     let count = 0;
     for (const issue of analysis.issues) {
-      if (issue.issue_type !== 'needs_normalization' || !issue.suggested_value) continue;
+      // Item 11: a bare truthiness check drops a legitimate suggested_value
+      // of 0. Only skip when there's genuinely nothing to apply (null/
+      // undefined/empty string), not for a falsy-but-real value.
+      if (issue.issue_type !== 'needs_normalization'
+        || issue.suggested_value == null
+        || issue.suggested_value === '') continue;
       if (idSet && !idSet.has(issue.author_id)) continue;
       stageChange(issue.author_id, 'name', issue.suggested_value);
       setAuthors(prev => prev.map(a =>
@@ -352,6 +364,11 @@ export function useAuthors() {
       let totalFailed = 0;
       let allErrors = [];
 
+      // H5/M-8: only clear a staged entry once we can positively confirm it
+      // succeeded. A partial (or unidentifiable) failure must never destroy
+      // staged edits, anything we can't prove succeeded stays staged.
+      const failedChangeIds = new Set();
+
       // 1. Push name/description changes
       if (changeEntries.length > 0) {
         const items = changeEntries.map(([id, changes]) => ({
@@ -360,12 +377,29 @@ export function useAuthors() {
           description: changes.description || null,
         }));
         const result = await callBackend('push_author_changes_to_abs', { items });
-        totalUpdated += result.updated;
-        totalFailed += result.failed;
-        allErrors = allErrors.concat(result.errors);
+        const updated = result?.updated || 0;
+        const failed = result?.failed || 0;
+        const errors = result?.errors || [];
+        totalUpdated += updated;
+        totalFailed += failed;
+        allErrors = allErrors.concat(errors);
+
+        const idsFromErrors = errors
+          .map(e => (e && typeof e === 'object' ? (e.id ?? e.absId ?? null) : null))
+          .filter(id => id != null);
+
+        if (failed > 0 && idsFromErrors.length === 0) {
+          // The backend reported failures but didn't say which ids failed -
+          // we can't prove any of them succeeded, so keep them all staged.
+          changeEntries.forEach(([id]) => failedChangeIds.add(id));
+        } else {
+          idsFromErrors.forEach(id => failedChangeIds.add(id));
+        }
       }
 
-      // 2. Execute merges
+      // 2. Execute merges (deterministic per primaryId, we know exactly
+      // which ones failed from the try/catch below)
+      const failedMergePrimaryIds = new Set();
       for (const [primaryId, secondaries] of mergeEntries) {
         try {
           await callBackend('merge_abs_authors', {
@@ -376,12 +410,25 @@ export function useAuthors() {
         } catch (err) {
           totalFailed += secondaries.length;
           allErrors.push(`Merge failed: ${err}`);
+          failedMergePrimaryIds.add(primaryId);
         }
       }
 
-      // Clear all staged state
-      setPendingChanges({});
-      setPendingMerges({});
+      // Clear only the staged entries we can confirm succeeded.
+      setPendingChanges(prev => {
+        const next = { ...prev };
+        for (const [id] of changeEntries) {
+          if (!failedChangeIds.has(id)) delete next[id];
+        }
+        return next;
+      });
+      setPendingMerges(prev => {
+        const next = { ...prev };
+        for (const [primaryId] of mergeEntries) {
+          if (!failedMergePrimaryIds.has(primaryId)) delete next[primaryId];
+        }
+        return next;
+      });
 
       // Reload to get fresh state
       await loadAuthors();
@@ -422,7 +469,7 @@ export function useAuthors() {
     loadAuthors, loadDetail, runAnalysis,
     renameAuthor, stageMerge, unstageMerge, autoMergeDuplicates, fixDescriptions,
     applyNormalizationFixes, pushToAbs,
-    stageChange, discardAllChanges, setSelectedAuthorId,
+    stageChange, updateDetail, discardAllChanges, setSelectedAuthorId,
 
     handleAuthorClick, handleSelectAll, handleClearSelection,
     getSelectedAuthors, getSelectedCount,
