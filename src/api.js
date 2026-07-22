@@ -1,5 +1,5 @@
 // src/api.js
-// Transport adapter — 100% client-side. No backend server needed.
+// Transport adapter, 100% client-side. No backend server needed.
 // All API calls go through the Cloudflare Worker CORS proxy.
 // Config lives in browser localStorage.
 
@@ -22,7 +22,7 @@ function getSystemPrompt(config) {
 }
 
 /** Get the effective DNA system prompt (custom override or default).
- *  Uses compact prompt for local AI — fewer fields, ~50% less output. */
+ *  Uses compact prompt for local AI, fewer fields, ~50% less output. */
 function getDnaSystemPrompt(config) {
   if (config?.custom_dna_prompt?.trim()) return config.custom_dna_prompt.trim();
   const isLocal = !!(config?.use_local_ai && config?.ollama_model);
@@ -75,7 +75,7 @@ export function getOllamaBaseUrl() {
   return configured || DEFAULT_OLLAMA_BASE_URL;
 }
 
-// Wrapper for Ollama-touching Tauri commands — injects baseUrl from config.
+// Wrapper for Ollama-touching Tauri commands, injects baseUrl from config.
 export async function ollamaCall(cmd, args = {}) {
   return callBackend(cmd, { baseUrl: getOllamaBaseUrl(), ...args });
 }
@@ -131,9 +131,9 @@ const TAURI_COMMANDS = new Set([
 ]);
 
 // ============================================================================
-// callBackend() — main dispatch function
+// callBackend(), main dispatch function
 // Routes commands to client-side handlers or CORS proxy.
-// All existing component code calls this — we just changed what's under the hood.
+// All existing component code calls this, we just changed what's under the hood.
 // ============================================================================
 
 export async function callBackend(cmd, args = {}) {
@@ -148,13 +148,13 @@ export async function callBackend(cmd, args = {}) {
     return handler(args);
   }
 
-  // Commands that aren't wired up yet — return a stub instead of crashing
+  // Commands that aren't wired up yet, return a stub instead of crashing
   console.warn(`Command '${cmd}' not available in web version`);
   return { _stub: true, message: `'${cmd}' is not available in the web version.` };
 }
 
 // ============================================================================
-// DNA-TO-TAGS CONVERTER — converts BookDNA JSON to dna: prefixed tags
+// DNA-TO-TAGS CONVERTER, converts BookDNA JSON to dna: prefixed tags
 // ============================================================================
 
 function convertDnaToTags(dna) {
@@ -213,7 +213,7 @@ function convertDnaToTags(dna) {
 }
 
 // ============================================================================
-// ABS PAYLOAD BUILDER — matches desktop build_update_payload() exactly
+// ABS PAYLOAD BUILDER, matches desktop build_update_payload() exactly
 // ============================================================================
 
 /**
@@ -321,7 +321,7 @@ function buildAbsPayload(meta) {
 }
 
 // ============================================================================
-// COMMAND HANDLERS — client-side implementations
+// COMMAND HANDLERS, client-side implementations
 // ============================================================================
 
 const HANDLERS = {
@@ -546,13 +546,13 @@ const HANDLERS = {
 
   // === External Data Gathering ===
   // Two-tier lookup:
-  //   1. If book has an ASIN, hit Audnexus (api.audnex.us) — authoritative audiobook DB with CORS.
-  //   2. Otherwise search OpenLibrary by title (+author) — good recall, CORS, free.
+  //   1. If book has an ASIN, hit Audnexus (api.audnex.us), authoritative audiobook DB with CORS.
+  //   2. Otherwise search OpenLibrary by title (+author), good recall, CORS, free.
   // Results are keyed by book id and shaped with `abs_*` field names because that's
   // what handleMetadataResolution already consumes.
   gather_external_data: async (args) => {
     const books = args.books || [];
-    const CONCURRENCY = 3; // polite — these are free public APIs
+    const CONCURRENCY = 3; // polite, these are free public APIs
     const results = [];
 
     const asJoinedNames = (arr) => {
@@ -639,7 +639,7 @@ const HANDLERS = {
 
         // If we got the author parameter, we can be confident in the top hit.
         // Otherwise (title-only search) the first hit is often wrong for common
-        // titles — surface ALL candidates and let the downstream AI disambiguate
+        // titles, surface ALL candidates and let the downstream AI disambiguate
         // using other signals (narrator, year, publisher).
         const top = candidates[0];
         const baseFields = {
@@ -714,7 +714,7 @@ const HANDLERS = {
     let completed = 0;
 
     // Helper: did the AI produce any non-null value across the fields we asked
-    // about? Partial results count as useful — we don't want to double-surface
+    // about? Partial results count as useful, we don't want to double-surface
     // what the changedFields diff already shows (AI returned data but nothing
     // changed is a distinct signal, tracked separately).
     const aiReturnedNothingUseful = (parsed) => {
@@ -806,7 +806,7 @@ const HANDLERS = {
             emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
           }
         } catch (err) {
-          // Batch failed — fall back to individual
+          // Batch failed, fall back to individual
           for (const book of batch) {
             try {
               const prompt = buildMetadataPrompt(book);
@@ -1039,7 +1039,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
             }
             // Log if we got empty results for debugging
             if (!parsed.genres?.length && !parsed.tags?.length) {
-              console.warn(`[Batch] Empty result for book ${j} "${book.title}" — parsedArray has ${parsedArray.length} items`);
+              console.warn(`[Batch] Empty result for book ${j} "${book.title}", parsedArray has ${parsedArray.length} items`);
             }
             let dna_tags = [];
             let dnaError = null;
@@ -1051,7 +1051,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
                 dnaResp = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500);
                 dna_tags = convertDnaToTags(parseAIJson(dnaResp));
               } catch (err) {
-                // DNA sub-step failed — surface via errorDetail while keeping the
+                // DNA sub-step failed, surface via errorDetail while keeping the
                 // book's classification result (success:true, amber warning pill).
                 dnaError = errorDetailFromException(err, {
                   stage: 'dna',
@@ -1804,7 +1804,7 @@ Return JSON: {"year":"2005"}`;
     try {
       const titleParam = encodeURIComponent(title);
       const authorParam = encodeURIComponent(author || '');
-      // Audible catalog (Tauri http plugin bypasses CORS; web variant deferred — see issue #53)
+      // Audible catalog (Tauri http plugin bypasses CORS; web variant deferred, see issue #53)
       const audibleRes = await proxyFetch(`https://api.audible.com/1.0/catalog/products?title=${titleParam}&author=${authorParam}&num_results=3&response_groups=product_desc`);
       if (audibleRes.ok) {
         const data = await audibleRes.json();
@@ -1862,6 +1862,23 @@ Return JSON: {"year":"2005"}`;
 // ABS Item → BookGroup conversion (runs in browser)
 // ============================================================================
 
+// M-4/L-14: parse a year out of a free-form ABS date string (publishedDate or
+// an embedded tagDate) defensively. Only take the first 4 characters when
+// they're actually 4 digits; otherwise fall back to Date parsing, and give up
+// (null) rather than return a bogus year. Mirrors src/lib/abs-client.js's
+// parseYearFromTagDate, kept as a local copy since this file's
+// absItemToBookGroup is itself a standalone copy of that one.
+function parseYearFromDateString(dateStr) {
+  if (!dateStr) return null;
+  const str = String(dateStr).trim();
+  if (!str) return null;
+  const first4 = str.substring(0, 4);
+  if (/^\d{4}$/.test(first4)) return first4;
+  const parsed = new Date(str);
+  if (!Number.isNaN(parsed.getTime())) return String(parsed.getFullYear());
+  return null;
+}
+
 function absItemToBookGroup(item, absBaseUrl) {
   const meta = item.media?.metadata || {};
   const base = absBaseUrl.replace(/\/$/, '');
@@ -1899,8 +1916,8 @@ function absItemToBookGroup(item, absBaseUrl) {
     || 'Unknown';
 
   const publishedYear = meta.publishedYear
-    || meta.publishedDate?.substring(0, 4)
-    || (firstTags.tagDate && String(firstTags.tagDate).substring(0, 4))
+    || parseYearFromDateString(meta.publishedDate)
+    || parseYearFromDateString(firstTags.tagDate)
     || firstTags.tagYear
     || null;
 
@@ -1924,6 +1941,7 @@ function absItemToBookGroup(item, absBaseUrl) {
       description: meta.description || null,
       publisher: meta.publisher || fromTags(firstTags.tagPublisher) || null,
       published_year: publishedYear,
+      year: publishedYear,
       language: meta.language || fromTags(firstTags.tagLanguage) || null,
       isbn: meta.isbn || fromTags(firstTags.tagIsbn) || null,
       asin: meta.asin || fromTags(firstTags.tagAsin) || null,
@@ -1931,17 +1949,21 @@ function absItemToBookGroup(item, absBaseUrl) {
       duration: item.media?.duration || null,
       added_at: item.addedAt || item.createdAt || 0,
     },
-    files: (item.media?.audioFiles || []).map(f => ({
+    // CR-3: every file needs a stable id (used for selection Sets etc.) and
+    // a changes object (write/rescan paths assume file.changes exists).
+    files: (item.media?.audioFiles || []).map((f, index) => ({
+      id: `${item.id}-f${index}`,
       path: f.metadata?.path || '',
       filename: f.metadata?.filename || '',
       duration: f.duration || 0,
       size: f.metadata?.size || 0,
+      changes: {},
     })),
   };
 }
 
 // ============================================================================
-// EVENT SUBSCRIPTION (SSE — only needed if using Axum backend, otherwise no-op)
+// EVENT SUBSCRIPTION (SSE, only needed if using Axum backend, otherwise no-op)
 // ============================================================================
 
 const eventHandlers = new Map();
@@ -1972,7 +1994,7 @@ export function closeEventSource() {
 }
 
 // ============================================================================
-// FILE PICKER (server-side file browser — kept for API compatibility)
+// FILE PICKER (server-side file browser, kept for API compatibility)
 // ============================================================================
 
 let fileBrowserResolver = null;

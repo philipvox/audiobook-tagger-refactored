@@ -1,5 +1,5 @@
 // src/lib/abs-client.js
-// AudiobookShelf API client — runs in the browser, calls ABS through the CORS proxy.
+// AudiobookShelf API client, runs in the browser, calls ABS through the CORS proxy.
 
 import { absApi } from './proxy';
 
@@ -115,6 +115,24 @@ export async function getChapters(config, absId) {
 }
 
 /**
+ * M-4/L-14: parse a year out of an embedded tagDate value defensively.
+ * ABS's tagDate is a free-form string, sometimes a plain 4-digit year,
+ * sometimes a full date, sometimes garbage. Only take the first 4
+ * characters when they're actually 4 digits; otherwise fall back to
+ * Date parsing, and give up (null) rather than return a bogus year.
+ */
+export function parseYearFromTagDate(tagDate) {
+  if (!tagDate) return null;
+  const str = String(tagDate).trim();
+  if (!str) return null;
+  const first4 = str.substring(0, 4);
+  if (/^\d{4}$/.test(first4)) return first4;
+  const parsed = new Date(str);
+  if (!Number.isNaN(parsed.getTime())) return String(parsed.getFullYear());
+  return null;
+}
+
+/**
  * Convert an ABS library item to a BookGroup for the frontend.
  */
 function absItemToBookGroup(item, absBaseUrl) {
@@ -152,6 +170,10 @@ function absItemToBookGroup(item, absBaseUrl) {
     || fromTags(firstTags.tagTitle)
     || 'Unknown';
 
+  // M-4/L-14: publishedYear/year need to carry the same value so downstream
+  // rescan payloads (which read metadata.year) get it too.
+  const publishedYear = meta.publishedYear || parseYearFromTagDate(firstTags.tagDate) || firstTags.tagYear || null;
+
   return {
     id: item.id || crypto.randomUUID(),
     abs_id: item.id,
@@ -168,19 +190,24 @@ function absItemToBookGroup(item, absBaseUrl) {
       tags: (item.media?.tags || []),
       description: meta.description || null,
       publisher: meta.publisher || fromTags(firstTags.tagPublisher) || null,
-      published_year: meta.publishedYear || (firstTags.tagDate && String(firstTags.tagDate).substring(0, 4)) || firstTags.tagYear || null,
+      published_year: publishedYear,
+      year: publishedYear,
       language: meta.language || fromTags(firstTags.tagLanguage) || null,
       isbn: meta.isbn || fromTags(firstTags.tagIsbn) || null,
       asin: meta.asin || fromTags(firstTags.tagAsin) || null,
       cover_url: coverUrl,
       duration: item.media?.duration || null,
     },
-    files: audioFiles.map(f => ({
+    // CR-3: every file needs a stable id (used for selection Sets etc.) and
+    // a changes object (write/rescan paths assume file.changes exists).
+    files: audioFiles.map((f, index) => ({
+      id: `${item.id}-f${index}`,
       path: f.metadata?.path || f.ino || '',
       filename: f.metadata?.filename || '',
       duration: f.duration || 0,
       size: f.metadata?.size || 0,
       ino: f.ino || null,
+      changes: {},
     })),
   };
 }
