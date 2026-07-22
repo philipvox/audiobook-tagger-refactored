@@ -371,30 +371,41 @@ function _tokenize(s) {
   return s.split(/[\s-]+/).filter(Boolean);
 }
 
-// True if `needle` tokens appear as a contiguous run inside `haystack` tokens.
-function _tokensContiguous(haystack, needle) {
-  if (needle.length === 0 || needle.length > haystack.length) return false;
-  for (let i = 0; i + needle.length <= haystack.length; i++) {
-    let ok = true;
-    for (let j = 0; j < needle.length; j++) {
-      if (haystack[i + j] !== needle[j]) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return true;
-  }
-  return false;
+// Strip a trailing plural "s" (or "ies" -> "y") so a plural INPUT token
+// (e.g. "thrillers", "mysteries") can still match a singular approved token
+// ("thriller", "mystery"). Only used as a fallback comparison, never in
+// place of the original token, so this never affects exact/alias matches.
+function _singularize(token) {
+  if (token.length > 3 && token.endsWith("ies")) return token.slice(0, -3) + "y";
+  if (token.length > 1 && token.endsWith("s") && !token.endsWith("ss")) return token.slice(0, -1);
+  return token;
 }
 
-// Token-boundary containment in either direction. Replaces a raw `includes`
-// substring test so partial matches respect word boundaries: "epic fantasy"
-// still maps via the "fantasy" token, but "warrior" no longer matches "war"
-// and "classic rock" no longer matches "class".
-function _tokenBoundaryMatch(a, b) {
-  const ta = _tokenize(a);
-  const tb = _tokenize(b);
-  return _tokensContiguous(ta, tb) || _tokensContiguous(tb, ta);
+// Token set for an INPUT string, including singularized forms alongside the
+// originals so plural inputs still match singular approved vocabulary.
+function _inputTokenSet(s) {
+  const set = new Set();
+  for (const t of _tokenize(s)) {
+    set.add(t);
+    set.add(_singularize(t));
+  }
+  return set;
+}
+
+// Forward containment ONLY: true when every token of the APPROVED value is
+// present in the INPUT's token set. This is intentionally one-directional -
+// the reverse (input's tokens all present in the approved value) is what let
+// short inputs like "fantasy" get swallowed by long approved values like
+// "fantasy-romance". "epic fantasy novel" still maps to "epic-fantasy"
+// because "epic" and "fantasy" are both present in the input; "warrior"
+// no longer matches "war" because "war" alone is now insufficient in the
+// wrong direction, and "fantasy" no longer matches "fantasy-romance" because
+// "romance" isn't present in the input.
+function _approvedTokensSubsetOfInput(inputStr, approvedStr) {
+  const inputTokens = _inputTokenSet(inputStr);
+  const approvedTokens = _tokenize(approvedStr);
+  if (approvedTokens.length === 0) return false;
+  return approvedTokens.every((t) => inputTokens.has(t));
 }
 
 /**
@@ -424,10 +435,11 @@ export function mapGenre(genre) {
     return aliased === "" ? null : aliased;
   }
 
-  // Partial match - only when an approved genre appears as a whole token run
-  // (token-boundary, not raw substring — avoids "Article" -> "Art")
+  // Partial match - forward containment only: the approved genre's tokens
+  // must ALL be present in the input's tokens (avoids "Article" -> "Art",
+  // and never expands a short input into a longer approved value).
   for (const [approvedLower, approved] of _approvedGenresLower) {
-    if (_tokenBoundaryMatch(normalized, approvedLower)) {
+    if (_approvedTokensSubsetOfInput(normalized, approvedLower)) {
       return approved;
     }
   }
@@ -456,9 +468,12 @@ export function mapTag(tag) {
   const aliased = TAG_ALIASES.get(tag.trim().toLowerCase());
   if (aliased) return aliased;
 
-  // Partial match - token-boundary only (avoids "warrior" -> "war")
+  // Partial match - forward containment only: the approved tag's tokens
+  // must ALL be present in the input's tokens (avoids "warrior" -> "war",
+  // and never expands a short input like "fantasy" into a longer approved
+  // tag like "fantasy-romance").
   for (const approved of APPROVED_TAGS) {
-    if (_tokenBoundaryMatch(normalized, approved)) {
+    if (_approvedTokensSubsetOfInput(normalized, approved)) {
       return approved;
     }
   }
@@ -577,9 +592,15 @@ export function enforceTagPolicyWithDna(tags) {
   return result;
 }
 
+// Matches any combined-genre separator: "/", ",", ";", "&", or the word
+// " and " - with surrounding whitespace absorbed into the match.
+const COMBINED_GENRE_SEPARATOR = /\s*\/\s*|\s*,\s*|\s*;\s*|\s+&\s+|\s+and\s+/i;
+
 /**
  * Split combined genre strings into individual genres.
- * Handles " / ", ", ", and " & " separators.
+ * Handles "/", ",", ";", "&", and " and " separators - all in a single pass,
+ * so a string combining several of them (e.g. "Fiction / Thrillers, Suspense")
+ * is fully split rather than only matching the first separator found.
  *
  * @param {string[]} genres
  * @returns {string[]}
@@ -589,27 +610,11 @@ export function splitCombinedGenres(genres) {
 
   for (const genre of genres) {
     const trimmed = genre.trim();
+    if (!trimmed) continue;
 
-    if (trimmed.includes(" / ")) {
-      // Google Books hierarchical format: "Fiction / Thrillers / Suspense"
-      for (const part of trimmed.split(" / ")) {
-        const cleaned = part.trim();
-        if (cleaned) result.push(cleaned);
-      }
-    } else if (trimmed.includes(", ")) {
-      // Comma-separated: "Suspense, Crime Thrillers"
-      for (const part of trimmed.split(", ")) {
-        const cleaned = part.trim();
-        if (cleaned) result.push(cleaned);
-      }
-    } else if (trimmed.includes(" & ")) {
-      // Ampersand-separated: "Mystery & Thriller"
-      for (const part of trimmed.split(" & ")) {
-        const cleaned = part.trim();
-        if (cleaned) result.push(cleaned);
-      }
-    } else if (trimmed) {
-      result.push(trimmed);
+    for (const part of trimmed.split(COMBINED_GENRE_SEPARATOR)) {
+      const cleaned = part.trim();
+      if (cleaned) result.push(cleaned);
     }
   }
 
@@ -689,7 +694,7 @@ export function areTagsComplete(tags) {
   const ageRatingTags = ["age-childrens", "age-middle-grade", "age-teens", "age-young-adult", "age-adult"];
   const contentRatingTags = ["rated-g", "rated-pg", "rated-pg13", "rated-r", "rated-x"];
   const readingAgeTags = [
-    "age-rec-all", "age-rec-4", "age-rec-6", "age-rec-8", "age-rec-10",
+    "age-rec-all", "age-rec-0", "age-rec-3", "age-rec-4", "age-rec-6", "age-rec-8", "age-rec-10",
     "age-rec-12", "age-rec-14", "age-rec-16", "age-rec-18",
   ];
 
@@ -710,7 +715,7 @@ export function getMissingTagCategories(tags) {
   const ageRatingTags = ["age-childrens", "age-middle-grade", "age-teens", "age-young-adult", "age-adult"];
   const contentRatingTags = ["rated-g", "rated-pg", "rated-pg13", "rated-r", "rated-x"];
   const readingAgeTags = [
-    "age-rec-all", "age-rec-4", "age-rec-6", "age-rec-8", "age-rec-10",
+    "age-rec-all", "age-rec-0", "age-rec-3", "age-rec-4", "age-rec-6", "age-rec-8", "age-rec-10",
     "age-rec-12", "age-rec-14", "age-rec-16", "age-rec-18",
   ];
 
