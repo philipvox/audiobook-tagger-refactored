@@ -74,8 +74,10 @@ export function useFileSelection() {
   // Check if a group is selected (handles allSelected mode)
   const isGroupSelected = useCallback((groupId, group) => {
     if (allSelected) return true;
-    // A group is selected if all its files are selected
-    return group.files.every(f => selectedFiles.has(f.id));
+    // A group is selected if all its (id-bearing) files are selected.
+    // CR-3: skip files with a null/undefined id defensively so one
+    // id-less file doesn't make the whole group look unselected.
+    return group.files.every(f => f.id == null || selectedFiles.has(f.id));
   }, [allSelected, selectedFiles]);
 
   // Get selected file IDs (materializes the selection when needed)
@@ -120,15 +122,17 @@ export function useFileSelection() {
   }, [allSelected, selectedFiles]);
 
   const getFilesWithChanges = useCallback((groups) => {
+    // L-12: guard against files with no `changes` object (e.g. freshly
+    // ABS-imported files before any edit is staged).
     if (allSelected) {
       return groups.flatMap(g =>
-        g.files.filter(f => Object.keys(f.changes).length > 0).map(f => f.id)
+        g.files.filter(f => Object.keys(f.changes || {}).length > 0).map(f => f.id)
       );
     }
     return Array.from(selectedFiles).filter(id => {
       for (const group of groups) {
         const file = group.files.find(f => f.id === id);
-        if (file && Object.keys(file.changes).length > 0) return true;
+        if (file && Object.keys(file.changes || {}).length > 0) return true;
       }
       return false;
     });

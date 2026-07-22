@@ -59,7 +59,8 @@ export function useTagOperations() {
       const filePairs = [];
       groups.forEach(group => {
         group.files.forEach(file => {
-          if (selectedFiles.has(file.id)) {
+          // CR-3: skip files with a null/undefined id defensively.
+          if (file.id != null && selectedFiles.has(file.id)) {
             filePairs.push([file.path, group.metadata]);
           }
         });
