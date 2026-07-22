@@ -7,6 +7,22 @@ beforeEach(() => {
   vi.restoreAllMocks();
 });
 
+// M: gather_external_data now routes through proxyFetch, which tries a direct
+// fetch(targetUrl) first and, on failure, falls back to POSTing the worker
+// proxy endpoint with { url: targetUrl, ... } in the body. To simulate a true
+// network failure (not just the direct attempt), the mock must recognize the
+// target host whether it's the literal fetch URL (direct attempt) or embedded
+// in the proxy fallback's request body.
+function targetUrlOf(url, opts) {
+  if (opts?.body && typeof opts.body === 'string') {
+    try {
+      const parsed = JSON.parse(opts.body);
+      if (parsed?.url) return parsed.url;
+    } catch { /* not a proxy body - fall through to the literal url */ }
+  }
+  return String(url);
+}
+
 describe('gather_external_data — OpenLibrary (cluster 1)', () => {
   it('surfaces errorDetail when OpenLibrary returns 503 and there is no ASIN fallback', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
@@ -30,8 +46,8 @@ describe('gather_external_data — OpenLibrary (cluster 1)', () => {
   });
 
   it('surfaces errorDetail when OpenLibrary fetch throws', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
-      if (String(url).includes('openlibrary.org')) throw new TypeError('Failed to fetch');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, opts) => {
+      if (targetUrlOf(url, opts).includes('openlibrary.org')) throw new TypeError('Failed to fetch');
       return new Response('', { status: 404 });
     });
 
@@ -81,8 +97,8 @@ describe('gather_external_data — Audnexus (cluster 1)', () => {
   });
 
   it('surfaces errorDetail when Audnexus fetch throws (network error)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
-      if (String(url).includes('audnex.us')) throw new TypeError('Failed to fetch');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, opts) => {
+      if (targetUrlOf(url, opts).includes('audnex.us')) throw new TypeError('Failed to fetch');
       return new Response(JSON.stringify({ docs: [] }), { status: 200 });
     });
 

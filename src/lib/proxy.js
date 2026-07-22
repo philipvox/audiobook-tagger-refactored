@@ -346,18 +346,89 @@ export async function callAI(config, systemPrompt, userPrompt, maxTokens = 2000)
 }
 
 /**
- * Parse a JSON response from AI, handling markdown code blocks.
+ * Scan `text` starting at `startIndex` (which must point at a `{` or `[`) and
+ * return the substring of the first balanced bracket block, respecting
+ * strings and escape sequences so braces/brackets inside string values don't
+ * throw off the depth count. Returns null if the block never balances.
+ */
+function extractBalancedBlock(text, startIndex) {
+  const open = text[startIndex];
+  const close = open === '{' ? '}' : ']';
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = startIndex; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return text.slice(startIndex, i + 1);
+    }
+  }
+  return null; // never balanced - truncated/garbage input
+}
+
+/**
+ * Find the first balanced `{...}` or `[...]` block anywhere in `text`,
+ * whichever bracket type opens first. Returns the substring, or null if
+ * neither an object nor an array is present.
+ */
+function findFirstBalancedBlock(text) {
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '{' || ch === '[') {
+      const block = extractBalancedBlock(text, i);
+      if (block) return block;
+      // This opening bracket never balanced - keep scanning in case a later
+      // one does (defensive; not required by any current caller pattern).
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse a JSON response from AI, handling markdown code blocks, prose the
+ * model wrapped around the JSON, and trailing commentary. Strategy:
+ *   1. Strip ``` fences wherever they appear (not just at the very start/end).
+ *   2. Try JSON.parse on the cleaned text directly (fast path, no prose).
+ *   3. Fall back to scanning for the first balanced {...} or [...] block,
+ *      respecting strings/escapes, and parse that.
+ *   4. Throw only if nothing parseable was found.
  */
 export function parseAIJson(text) {
-  const cleaned = text
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '')
+  const cleaned = String(text)
+    .replace(/```json/gi, '')
+    .replace(/```/g, '')
     .trim();
 
   try {
     return JSON.parse(cleaned);
   } catch (e) {
+    const block = findFirstBalancedBlock(cleaned);
+    if (block) {
+      try {
+        return JSON.parse(block);
+      } catch (e2) {
+        throw new Error(`Failed to parse AI response as JSON: ${e2.message}\nResponse was: ${cleaned.substring(0, 200)}`);
+      }
+    }
     throw new Error(`Failed to parse AI response as JSON: ${e.message}\nResponse was: ${cleaned.substring(0, 200)}`);
   }
 }

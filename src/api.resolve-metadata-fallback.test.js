@@ -145,3 +145,48 @@ describe('F: sequence/subtitle compared with String() normalization', () => {
     expect(result.results[0].changed).toBe(true);
   });
 });
+
+describe('item 12: resolve_metadata_batch subtitle falls back to current, never to null', () => {
+  const bookWithSubtitle = { ...bookWithSeries, current_subtitle: 'A Novel' };
+
+  it('falls back to current_subtitle when the AI omits the key entirely', async () => {
+    callAI.mockResolvedValueOnce(JSON.stringify({
+      title: 'Dune', author: 'Frank Herbert', series: 'Dune Chronicles', sequence: '1',
+    }));
+
+    const result = await callBackend('resolve_metadata_batch', { books: [bookWithSubtitle] });
+    expect(result.results[0].subtitle).toBe('A Novel');
+    expect(result.results[0].changed).toBe(false);
+  });
+
+  it('falls back to current_subtitle when the AI returns explicit null', async () => {
+    callAI.mockResolvedValueOnce(JSON.stringify({
+      title: 'Dune', author: 'Frank Herbert', subtitle: null,
+      series: 'Dune Chronicles', sequence: '1',
+    }));
+
+    const result = await callBackend('resolve_metadata_batch', { books: [bookWithSubtitle] });
+    expect(result.results[0].subtitle).toBe('A Novel');
+    expect(result.results[0].changed).toBe(false);
+  });
+
+  it('still uses an AI-provided subtitle when present', async () => {
+    callAI.mockResolvedValueOnce(JSON.stringify({
+      title: 'Dune', author: 'Frank Herbert', subtitle: 'A New Subtitle',
+      series: 'Dune Chronicles', sequence: '1',
+    }));
+
+    const result = await callBackend('resolve_metadata_batch', { books: [bookWithSubtitle] });
+    expect(result.results[0].subtitle).toBe('A New Subtitle');
+    expect(result.results[0].changed).toBe(true);
+  });
+
+  it('falls back to null (not clearing anything) when there is no current_subtitle either', async () => {
+    callAI.mockResolvedValueOnce(JSON.stringify({
+      title: 'Dune', author: 'Frank Herbert', series: 'Dune Chronicles', sequence: '1',
+    }));
+
+    const result = await callBackend('resolve_metadata_batch', { books: [bookWithSeries] }); // current_subtitle: null
+    expect(result.results[0].subtitle).toBeNull();
+  });
+});

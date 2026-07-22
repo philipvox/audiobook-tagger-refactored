@@ -306,7 +306,8 @@ ${booksContext}
 ${instructions}
 
 CRITICAL: Return a JSON array with EXACTLY ${books.length} objects, one per book, in order. Do NOT skip any books.
-Example for ${books.length} books: [{"genres":["G1"],"tags":["t1"],"age_rating":{"intended_for_kids":false,"age_category":"Adult","content_rating":"PG-13"},"themes":["T1"],"tropes":["Tr1"]}, ... ${books.length} total objects]`;
+CRITICAL: Each object MUST include an "id" field that echoes the book's id verbatim (the "id: ..." value shown in that book's "--- BOOK N (id: ...) ---" header above), so results can be matched back to books even if the order changes.
+Example for ${books.length} books: [{"id":"book-id","genres":["G1"],"tags":["t1"],"age_rating":{"intended_for_kids":false,"age_category":"Adult","content_rating":"PG-13"},"themes":["T1"],"tropes":["Tr1"]}, ... ${books.length} total objects]`;
 }
 
 /**

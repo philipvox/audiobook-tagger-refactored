@@ -111,3 +111,36 @@ describe('fix_authors_batch — ai-empty normalization + errorDetail (cluster 2)
     expect(result.results[0].success).toBe(true);
   });
 });
+
+describe('E: fix_authors_batch - AI confirms an already-valid author (force mode)', () => {
+  it('reports success:true, changed:false, message "Author confirmed" and counts it as processed, not failed', async () => {
+    callAI.mockResolvedValueOnce(JSON.stringify({ author: 'Frank Herbert', confidence: 95 }));
+
+    const result = await callBackend('fix_authors_batch', {
+      books: [{ id: 'b1', title: 'Dune', current_author: 'Frank Herbert' }],
+      force: true,
+    });
+    const r = result.results[0];
+
+    expect(r.success).toBe(true);
+    expect(r.changed).toBe(false);
+    expect(r.message).toBe('Author confirmed');
+    expect(r.author).toBe('Frank Herbert');
+    expect(r.errorDetail).toBeUndefined();
+    // Not counted as a failure - the fixed+skipped+failed invariant must hold.
+    expect(result.total_failed).toBe(0);
+    expect(result.total_fixed + result.total_skipped + result.total_failed).toBe(1);
+  });
+
+  it('still normalizes via cleanAuthorName when the AI-confirmed name differs only in formatting', async () => {
+    // AI echoes back a name that cleanAuthorName would leave unchanged and that
+    // matches current after cleaning - still a confirmation, not a fix.
+    callAI.mockResolvedValueOnce(JSON.stringify({ author: 'Frank Herbert', confidence: 95 }));
+
+    const result = await callBackend('fix_authors_batch', {
+      books: [{ id: 'b1', title: 'Dune', current_author: 'Frank Herbert' }],
+      force: true,
+    });
+    expect(result.results[0].fixed).toBe(false);
+  });
+});
