@@ -385,22 +385,35 @@ function extractBalancedBlock(text, startIndex) {
   return null; // never balanced - truncated/garbage input
 }
 
+// Sentinel distinguishing "no parseable block found" from a block that
+// legitimately parses to JSON `undefined` (which cannot happen: JSON has no
+// undefined literal, but a dedicated sentinel keeps the intent explicit).
+const NO_BLOCK_FOUND = Symbol('no-parseable-block');
+
 /**
- * Find the first balanced `{...}` or `[...]` block anywhere in `text`,
- * whichever bracket type opens first. Returns the substring, or null if
- * neither an object nor an array is present.
+ * Scan `text` for balanced `{...}` / `[...]` blocks (in order of where they
+ * open) and return the parsed value of the first one that is actually valid
+ * JSON. A block can balance its brackets without being valid JSON (e.g. a
+ * stray `{fantasy}` in prose before the real payload) - those are skipped
+ * rather than treated as the final answer, so JSON appearing after
+ * non-JSON bracket noise (a `<thinking>` block, for example) still gets
+ * found. Returns NO_BLOCK_FOUND if nothing in the text parses.
  */
-function findFirstBalancedBlock(text) {
+function findFirstParseableBlock(text) {
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (ch === '{' || ch === '[') {
       const block = extractBalancedBlock(text, i);
-      if (block) return block;
-      // This opening bracket never balanced - keep scanning in case a later
-      // one does (defensive; not required by any current caller pattern).
+      if (block) {
+        try {
+          return JSON.parse(block);
+        } catch {
+          // Balanced but not valid JSON - keep scanning for a later block.
+        }
+      }
     }
   }
-  return null;
+  return NO_BLOCK_FOUND;
 }
 
 /**
@@ -408,9 +421,12 @@ function findFirstBalancedBlock(text) {
  * model wrapped around the JSON, and trailing commentary. Strategy:
  *   1. Strip ``` fences wherever they appear (not just at the very start/end).
  *   2. Try JSON.parse on the cleaned text directly (fast path, no prose).
- *   3. Fall back to scanning for the first balanced {...} or [...] block,
- *      respecting strings/escapes, and parse that.
- *   4. Throw only if nothing parseable was found.
+ *   3. Fall back to scanning for balanced {...} / [...] blocks (respecting
+ *      strings/escapes) and parsing each in turn, returning the first one
+ *      that is actually valid JSON: a balanced-but-non-JSON block earlier
+ *      in the text (e.g. a stray brace pair inside a <thinking> block) does
+ *      not stop the scan.
+ *   4. Throw only if nothing in the text was parseable.
  */
 export function parseAIJson(text) {
   const cleaned = String(text)
@@ -421,14 +437,8 @@ export function parseAIJson(text) {
   try {
     return JSON.parse(cleaned);
   } catch (e) {
-    const block = findFirstBalancedBlock(cleaned);
-    if (block) {
-      try {
-        return JSON.parse(block);
-      } catch (e2) {
-        throw new Error(`Failed to parse AI response as JSON: ${e2.message}\nResponse was: ${cleaned.substring(0, 200)}`);
-      }
-    }
+    const result = findFirstParseableBlock(cleaned);
+    if (result !== NO_BLOCK_FOUND) return result;
     throw new Error(`Failed to parse AI response as JSON: ${e.message}\nResponse was: ${cleaned.substring(0, 200)}`);
   }
 }
