@@ -476,6 +476,12 @@ const HANDLERS = {
         const classifyResponse = await callAI(config, getSystemPrompt(config), classifyPrompt, 2000);
         const classify = parseAIJson(classifyResponse);
 
+        // H: capture DNA/description sub-step failures as errorDetail (same
+        // shape the classify handler uses) instead of console.warn only, so
+        // the UI can render a diagnosable pill. Keeps whichever failed first
+        // (DNA runs before description) if both fail.
+        let subStepError = null;
+
         // Step 2: DNA generation
         let dna_tags = [];
         try {
@@ -483,7 +489,10 @@ const HANDLERS = {
           const dnaPrompt = buildDnaPrompt(book);
           const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, 1500);
           dna_tags = convertDnaToTags(parseAIJson(dnaResponse));
-        } catch (e) { console.warn('DNA failed:', e.message); }
+        } catch (e) {
+          console.warn('DNA failed:', e.message);
+          subStepError = errorDetailFromException(e, { stage: 'dna' });
+        }
 
         // Step 3: Description
         let description = book.description;
@@ -494,7 +503,10 @@ const HANDLERS = {
           const descResponse = await callAI(config, getSystemPrompt(config), descPrompt, 800);
           const desc = parseAIJson(descResponse);
           if (desc.description) { description = desc.description; description_changed = true; }
-        } catch (e) { console.warn('Description failed:', e.message); }
+        } catch (e) {
+          console.warn('Description failed:', e.message);
+          if (!subStepError) subStepError = errorDetailFromException(e, { stage: 'description' });
+        }
 
         // Build age tags from structured age_rating
         const age_tags = [];
@@ -510,7 +522,7 @@ const HANDLERS = {
         // Merge all tags
         const allTags = [...new Set([...(classify.tags || []), ...age_tags, ...dna_tags])];
 
-        results.push({
+        const pipelineResult = {
           abs_id: book.abs_id,
           success: true,
           metadata: {
@@ -520,7 +532,9 @@ const HANDLERS = {
             tropes: classify.tropes || [],
             description,
           },
-        });
+        };
+        if (subStepError) pipelineResult.errorDetail = subStepError;
+        results.push(pipelineResult);
         processed++;
       } catch (err) {
         results.push({ abs_id: book.abs_id, success: false, error: err.message });
@@ -552,7 +566,10 @@ const HANDLERS = {
     const lookupByAsin = async (asin) => {
       const url = `https://api.audnex.us/books/${encodeURIComponent(asin)}`;
       try {
-        const res = await fetch(url, {
+        // M: route through proxyFetch (like get_abs_author_image etc. do) so
+        // the Tauri HTTP plugin bypasses CORS natively and the 30s timeout
+        // applies uniformly, instead of a bare unbounded fetch().
+        const res = await proxyFetch(url, {
           headers: { 'Accept': 'application/json' },
         });
         if (!res.ok) {
@@ -593,7 +610,8 @@ const HANDLERS = {
       if (hasAuthor) params.set('author', String(author).trim());
       const url = `https://openlibrary.org/search.json?${params}`;
       try {
-        const res = await fetch(url, {
+        // M: route through proxyFetch - see lookupByAsin above.
+        const res = await proxyFetch(url, {
           headers: { 'Accept': 'application/json' },
         });
         if (!res.ok) {
@@ -720,7 +738,10 @@ const HANDLERS = {
     const buildMetaResult = (book, parsed, rawResponse) => {
       const title = parsed.title || book.current_title;
       const author = parsed.author || book.current_author;
-      const subtitle = parsed.subtitle || null;
+      // item 12: a missing OR null subtitle in the AI response must fall back
+      // to the book's current subtitle, same as title/author/series/sequence/
+      // narrator - an AI response can't clear a curated subtitle.
+      const subtitle = hasValue(parsed.subtitle) ? parsed.subtitle : (book.current_subtitle ?? null);
       // CR-4b: a missing OR null series/sequence in the AI response must fall
       // back to the book's current series/sequence, exactly like title/author
       // do: never to null. An AI response can't clear a series. (0 is a valid
@@ -764,7 +785,7 @@ const HANDLERS = {
 
         try {
           const batchPrompt = buildBatchMetadataPrompt(batch);
-          const response = await callAI(config, SYSTEM_PROMPT, batchPrompt, BATCH_SIZE * 200);
+          const response = await callAI(config, getSystemPrompt(config), batchPrompt, BATCH_SIZE * 400);
           let parsedArray = parseAIJson(response);
           if (!Array.isArray(parsedArray)) {
             const wrapped = parsedArray.books || parsedArray.results || parsedArray.metadata || parsedArray.data;
@@ -772,9 +793,14 @@ const HANDLERS = {
             else parsedArray = [parsedArray];
           }
 
+          // D: match results by id first, fall back to position only when no
+          // id-matched entry exists AND the response length equals the batch
+          // length (same rule as the classify handler).
           for (let j = 0; j < batch.length; j++) {
             const book = batch[j];
-            const parsed = parsedArray[j] || parsedArray.find(p => p.id === book.id) || {};
+            const idMatch = parsedArray.find(p => p && p.id !== undefined && String(p.id) === String(book.id));
+            const positionEligible = !idMatch && parsedArray.length === batch.length;
+            const parsed = idMatch || (positionEligible ? parsedArray[j] : undefined) || {};
             results.push(buildMetaResult(book, parsed, response));
             completed++;
             emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
@@ -784,7 +810,7 @@ const HANDLERS = {
           for (const book of batch) {
             try {
               const prompt = buildMetadataPrompt(book);
-              const response = await callAI(config, SYSTEM_PROMPT, prompt, 1500);
+              const response = await callAI(config, getSystemPrompt(config), prompt, 1500);
               results.push(buildMetaResult(book, parseAIJson(response), response));
             } catch (e) {
               results.push({
@@ -805,7 +831,7 @@ const HANDLERS = {
         try {
           emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: `Resolving: ${book.current_title}...` });
           const prompt = buildMetadataPrompt(book);
-          const response = await callAI(config, SYSTEM_PROMPT, prompt, 1500);
+          const response = await callAI(config, getSystemPrompt(config), prompt, 1500);
           const result = buildMetaResult(book, parseAIJson(response), response);
           completed++;
           emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
@@ -838,7 +864,7 @@ const HANDLERS = {
     const config = getLocalConfig();
     const input = args.request || args;
     const prompt = buildMetadataPrompt(input);
-    const response = await callAI(config, SYSTEM_PROMPT, prompt, 1500);
+    const response = await callAI(config, getSystemPrompt(config), prompt, 1500);
     const parsed = parseAIJson(response);
     return {
       title: parsed.title || input.current_title,
@@ -863,7 +889,7 @@ ${input.current_series ? `Current series: ${safe(input.current_series)}` : ''}
 
 Return JSON: {"series":null,"sequence":null,"confidence":0,"source":"gpt"}
 If it's part of a series, fill in the name and book number. If standalone, use null.`;
-    const response = await callAI(config, SYSTEM_PROMPT, prompt, 500);
+    const response = await callAI(config, getSystemPrompt(config), prompt, 500);
     const parsed = parseAIJson(response);
     console.log(`[series-fix] resolve_series for "${input.title}": series="${parsed.series}" sequence="${parsed.sequence}"`);
     if (parsed.series && /[#]|\bbook\b|\bvol/i.test(parsed.series)) {
@@ -941,15 +967,41 @@ If it's part of a series, fill in the name and book number. If standalone, use n
             }
             console.log(`[Batch] Classification returned ${parsedArray.length} results for ${batch.length} books. Keys: ${parsedArray[0] ? Object.keys(parsedArray[0]).join(',') : 'none'}`);
           } catch {
-            // If batch parse fails, fall back to individual processing
+            // If batch parse fails, fall back to individual processing.
+            // G: run DNA per book here too (same as the main batch path below)
+            // when dnaEnabled, and attach errorDetail on failures instead of a
+            // bare { success:false, error } with no diagnosable detail.
             for (const book of batch) {
               try {
                 const singleResp = await callAI(config, getSystemPrompt(config),
                   buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
                 const parsed = parseAIJson(singleResp);
-                results.push(buildResult(book, parsed));
+
+                let dna_tags = [];
+                let dnaError = null;
+                if (dnaEnabled) {
+                  let dnaResp = null;
+                  try {
+                    dnaResp = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500);
+                    dna_tags = convertDnaToTags(parseAIJson(dnaResp));
+                  } catch (dnaErr) {
+                    dnaError = errorDetailFromException(dnaErr, {
+                      stage: 'dna',
+                      responsePreview: dnaResp || undefined,
+                    });
+                  }
+                }
+
+                const bookResult = buildResult(book, parsed, dna_tags);
+                if (dnaError) bookResult.errorDetail = dnaError;
+                results.push(bookResult);
               } catch (err) {
-                results.push({ id: book.id, success: false, error: err.message });
+                results.push({
+                  id: book.id,
+                  success: false,
+                  error: err.message,
+                  errorDetail: errorDetailFromException(err, { stage: 'classify' }),
+                });
               }
               completed++;
               emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
@@ -958,10 +1010,33 @@ If it's part of a series, fill in the name and book number. If standalone, use n
           }
 
           // Step 2: DNA for each book in batch (sequential)
-          // Use positional matching — AI returns array in same order as input
+          // C: match results by id first (echoed back by the model per the
+          // prompt's "id" instruction); fall back to position only when no
+          // id-matched entry exists AND the response length equals the batch
+          // length. A book with no matching entry at all is a real failure
+          // (errorDetail, success:false), never a silent empty success.
           for (let j = 0; j < batch.length; j++) {
             const book = batch[j];
-            const parsed = parsedArray[j] || {};
+            const idMatch = parsedArray.find(p => p && p.id !== undefined && String(p.id) === String(book.id));
+            const positionEligible = !idMatch && parsedArray.length === batch.length;
+            const parsed = idMatch || (positionEligible ? parsedArray[j] : undefined);
+
+            if (!parsed) {
+              completed++;
+              emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
+              results.push({
+                id: book.id,
+                success: false,
+                error: 'AI returned no classification for this book.',
+                errorDetail: makeErrorDetail({
+                  stage: 'classify',
+                  kind: 'empty-response',
+                  message: 'AI returned no classification result for this book (no id match, and response length did not match the batch size).',
+                  responsePreview: JSON.stringify(parsedArray).slice(0, 500),
+                }),
+              });
+              continue;
+            }
             // Log if we got empty results for debugging
             if (!parsed.genres?.length && !parsed.tags?.length) {
               console.warn(`[Batch] Empty result for book ${j} "${book.title}" — parsedArray has ${parsedArray.length} items`);
@@ -1128,9 +1203,14 @@ If it's part of a series, fill in the name and book number. If standalone, use n
       const chunk = books.slice(i, i + CONCURRENCY);
       results.push(...await Promise.all(chunk.map(processBook)));
     }
-    const total_processed = results.filter(r => r.success && r.changed).length;
+    // N: total_processed counts ALL successful results (changed or kept), not
+    // just the changed ones - a book the AI validated and left as-is is still
+    // a processed book, not an unprocessed one. total_unchanged tracks the
+    // kept subset separately so callers can still distinguish the two.
+    const total_processed = results.filter(r => r.success).length;
+    const total_unchanged = results.filter(r => r.success && !r.changed).length;
     const total_failed = results.filter(r => !r.success).length;
-    return { results, total_processed, total_failed };
+    return { results, total_processed, total_unchanged, total_failed };
   },
 
   // === GPT: Genre Cleanup ===
@@ -1159,7 +1239,7 @@ RULES:
 - Do NOT invent genres not on this list.
 
 Return JSON: {"genres":["Genre1","Genre2"]}`;
-        const response = await callAI(config, SYSTEM_PROMPT, prompt, 500);
+        const response = await callAI(config, getSystemPrompt(config), prompt, 500);
         const parsed = parseAIJson(response);
         // Enforce genre policy on AI output if enabled
         const genres = config.genre_enforcement !== false
@@ -1261,7 +1341,7 @@ ${book.series ? `Series: ${safe(book.series)}` : ''}
 
 Return JSON: {"subtitle":null}
 If the book has a well-known subtitle (e.g., "Dune: The Desert Planet"), include it. Otherwise null.`;
-        const response = await callAI(config, SYSTEM_PROMPT, prompt, 300);
+        const response = await callAI(config, getSystemPrompt(config), prompt, 300);
         const parsed = parseAIJson(response);
         completed++;
         emitEvent('batch-progress', { call_type: 'subtitles', current: completed, total: books.length, title: book.title });
@@ -1339,7 +1419,7 @@ Rules:
 - Return null ONLY if you truly have no grounded signal.
 
 Return JSON: {"author":"Author Name","confidence":90}`;
-        const response = await callAI(config, getSystemPrompt(config), prompt, 200);
+        const response = await callAI(config, getSystemPrompt(config), prompt, 600);
         const parsed = parseAIJson(response);
         const raw = parsed?.author ? String(parsed.author).trim() : '';
         const author = raw && !isBadAuthor(raw) ? cleanAuthorName(raw) || raw : '';
@@ -1348,6 +1428,13 @@ Return JSON: {"author":"Author Name","confidence":90}`;
         if (author && author !== current) {
           total_fixed++;
           return { id: book.id, success: true, author, fixed: true, source: 'ai', confidence: parsed?.confidence };
+        }
+        // E: the AI confirmed the existing (already-valid) author rather than
+        // changing it - a real, successful result, not the ai-empty case below.
+        // Counted as processed (total_skipped), never total_failed.
+        if (author && author === current) {
+          total_skipped++;
+          return { id: book.id, success: true, changed: false, author, fixed: false, source: 'ai-confirmed', message: 'Author confirmed', confidence: parsed?.confidence };
         }
         // AI returned empty/bad author. Previously reported success:true + total_failed++
         // (inconsistent). Now reported as a non-fatal warning with errorDetail so the
@@ -1423,7 +1510,7 @@ Author: ${safe(book.author)}
 ${book.series ? `Series: ${safe(book.series)}\n` : ''}${descSnippet}
 Return the ORIGINAL first publication year, NOT audiobook release, reprint, or new edition date.
 Return JSON: {"year":"2005"}`;
-        const response = await callAI(config, SYSTEM_PROMPT, prompt, 200);
+        const response = await callAI(config, getSystemPrompt(config), prompt, 600);
         const parsed = parseAIJson(response);
         const year = parsed.year ? String(parsed.year) : null;
         if (year && isValidYear(year)) {
@@ -1507,7 +1594,7 @@ Return JSON: {"year":"2005"}`;
     const book = args.request || args;
     try {
       const prompt = buildClassificationPrompt(book);
-      const response = await callAI(config, SYSTEM_PROMPT, prompt, 1000);
+      const response = await callAI(config, getSystemPrompt(config), prompt, 1000);
       const parsed = parseAIJson(response);
       return { success: true, age_rating: parsed.age_rating, age_rating_reason: parsed.age_rating_reason };
     } catch (err) {
@@ -1526,7 +1613,11 @@ Return JSON: {"year":"2005"}`;
       const cleanedGenres = config.genre_enforcement !== false
         ? enforceGenrePolicyWithSplit(originalGenres)
         : originalGenres;
-      const changed = JSON.stringify(cleanedGenres) !== JSON.stringify(originalGenres);
+      // R: compare order-insensitively - enforceGenrePolicyWithSplit's
+      // priority sort (specific genres first, broad ones last) can legitimately
+      // reorder an already-approved set without changing its membership, and
+      // that reorder alone is not a "real" change worth flagging.
+      const changed = JSON.stringify([...cleanedGenres].sort()) !== JSON.stringify([...originalGenres].sort());
       if (changed) totalCleaned++; else totalUnchanged++;
       return { id: g.id, changed, cleaned_genres: cleanedGenres, original_genres: originalGenres };
     });
