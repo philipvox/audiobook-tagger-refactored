@@ -627,6 +627,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       if (result.failed > 0) {
         toast.error('Write Errors', `Failed to write ${result.failed} file${result.failed > 1 ? 's' : ''}. Check console for details.`);
       }
+      // Close the honesty loop: warn (not error) when the backend could not embed
+      // some requested fields (format-unsupported or ABS-only) in one or more files.
+      const skippedCount = (result.results || []).filter(
+        r => Array.isArray(r.skipped_fields) && r.skipped_fields.length > 0
+      ).length;
+      if (skippedCount > 0) {
+        toast.warning(
+          'Some Fields Not Written',
+          `Some fields are not supported by this file format and were not written (${skippedCount} file${skippedCount === 1 ? '' : 's'} affected).`
+        );
+      }
     } catch (error) {
       console.error('Write failed:', error);
       toast.error('Write Failed', error.toString());
