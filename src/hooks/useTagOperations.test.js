@@ -54,3 +54,47 @@ describe('useTagOperations.renameFiles', () => {
     });
   });
 });
+
+describe('useTagOperations.pushToAudiobookShelf (minor fix: line 114 guard)', () => {
+  it('does not push a group whose only selected-looking file has a null/undefined id', async () => {
+    mockGroups = [{
+      id: 'g1',
+      metadata: { title: 'Book' },
+      files: [{ id: undefined, path: '/a/1.m4b' }],
+    }];
+    mockCallBackend.mockResolvedValue({ updated: 0, unmatched: [], failed: [] });
+
+    const { result } = renderHook(() => useTagOperations());
+
+    // Defensively includes `undefined` itself, matching the renameFiles
+    // test above - without the f.id != null guard, Set.has(undefined)
+    // would be true and this id-less file would count as "selected".
+    const selectedFiles = new Set([undefined]);
+
+    await act(async () => {
+      await result.current.pushToAudiobookShelf(selectedFiles);
+    });
+
+    expect(mockCallBackend).not.toHaveBeenCalled();
+  });
+
+  it('still pushes a group with a genuinely selected id', async () => {
+    mockGroups = [{
+      id: 'g1',
+      metadata: { title: 'Book' },
+      files: [{ id: 'f1', path: '/a/1.m4b' }],
+    }];
+    mockCallBackend.mockResolvedValue({ updated: 1, unmatched: [], failed: [] });
+
+    const { result } = renderHook(() => useTagOperations());
+    const selectedFiles = new Set(['f1']);
+
+    await act(async () => {
+      await result.current.pushToAudiobookShelf(selectedFiles);
+    });
+
+    expect(mockCallBackend).toHaveBeenCalledWith('push_abs_updates', {
+      request: { items: [{ path: '/a/1.m4b', metadata: { title: 'Book' }, group_id: 'g1' }] },
+    });
+  });
+});

@@ -111,7 +111,9 @@ const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
     
     groups.forEach(group => {
       // Check if any file in this group is selected
-      const hasSelectedFile = group.files.some(f => selectedFiles.has(f.id));
+      // CR-3: skip files with a null/undefined id defensively (matches
+      // the same guard in renameFiles above).
+      const hasSelectedFile = group.files.some(f => f.id != null && selectedFiles.has(f.id));
       
       if (hasSelectedFile) {
         // Only add this book once (use first file as representative)

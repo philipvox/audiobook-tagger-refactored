@@ -364,9 +364,11 @@ export function useAuthors() {
       let totalFailed = 0;
       let allErrors = [];
 
-      // H5/M-8: only clear a staged entry once we can positively confirm it
-      // succeeded. A partial (or unidentifiable) failure must never destroy
-      // staged edits, anything we can't prove succeeded stays staged.
+      // H5/M-8: keep-by-default. A staged entry is only cleared once we can
+      // positively confirm it succeeded from a trustworthy result shape;
+      // anything else (partial failure, unidentifiable failure, or an
+      // untrustworthy/missing result) stays staged rather than being
+      // guessed at.
       const failedChangeIds = new Set();
 
       // 1. Push name/description changes
@@ -377,23 +379,40 @@ export function useAuthors() {
           description: changes.description || null,
         }));
         const result = await callBackend('push_author_changes_to_abs', { items });
-        const updated = result?.updated || 0;
-        const failed = result?.failed || 0;
-        const errors = result?.errors || [];
-        totalUpdated += updated;
-        totalFailed += failed;
-        allErrors = allErrors.concat(errors);
 
-        const idsFromErrors = errors
-          .map(e => (e && typeof e === 'object' ? (e.id ?? e.absId ?? null) : null))
-          .filter(id => id != null);
+        // push_author_changes_to_abs isn't wired up in src/api.js's
+        // HANDLERS/TAURI_COMMANDS yet, so callBackend falls through to its
+        // generic stub ({ _stub: true, message }) for an unknown command.
+        // Treating that as "updated=0, failed=0" would clear every staged
+        // change with zero feedback, a live data-destruction path. Only
+        // trust a result that actually looks like the real contract.
+        const isTrustworthyResult = result
+          && typeof result.updated === 'number'
+          && (result.errors === undefined || Array.isArray(result.errors));
 
-        if (failed > 0 && idsFromErrors.length === 0) {
-          // The backend reported failures but didn't say which ids failed -
-          // we can't prove any of them succeeded, so keep them all staged.
+        if (!isTrustworthyResult) {
           changeEntries.forEach(([id]) => failedChangeIds.add(id));
+          totalFailed += changeEntries.length;
+          allErrors.push('Author push failed: backend returned no result');
         } else {
-          idsFromErrors.forEach(id => failedChangeIds.add(id));
+          const updated = result.updated || 0;
+          const failed = result.failed || 0;
+          const errors = result.errors || [];
+          totalUpdated += updated;
+          totalFailed += failed;
+          allErrors = allErrors.concat(errors);
+
+          const idsFromErrors = errors
+            .map(e => (e && typeof e === 'object' ? (e.id ?? e.absId ?? null) : null))
+            .filter(id => id != null);
+
+          if (failed > 0 && idsFromErrors.length === 0) {
+            // The backend reported failures but didn't say which ids failed -
+            // we can't prove any of them succeeded, so keep them all staged.
+            changeEntries.forEach(([id]) => failedChangeIds.add(id));
+          } else {
+            idsFromErrors.forEach(id => failedChangeIds.add(id));
+          }
         }
       }
 

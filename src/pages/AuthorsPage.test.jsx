@@ -89,6 +89,24 @@ describe('AuthorsPage description editing (CR-7)', () => {
   });
 });
 
+describe('AuthorsPage push-to-ABS failure feedback (H5/M-8 critical fix)', () => {
+  it('shows an error toast with the specific message when pushToAbs reports the whole batch failed (untrustworthy backend result)', async () => {
+    const pushToAbs = vi.fn(async () => ({
+      updated: 0,
+      failed: 2,
+      errors: ['Author push failed: backend returned no result'],
+    }));
+    mockHook = makeHook({ pendingCount: 2, pushToAbs });
+    renderPage();
+
+    fireEvent.click(screen.getByTitle(/Push 2 changes to ABS/i));
+    fireEvent.click(screen.getByRole('button', { name: 'Push' }));
+
+    expect(await screen.findByText('Author push failed: backend returned no result')).toBeInTheDocument();
+    expect(pushToAbs).toHaveBeenCalled();
+  });
+});
+
 describe('AuthorsPage suggested_value truthy-check bugs (item 12)', () => {
   // Note: AuthorsPage derives per-author issues from `analysis.issues` via
   // its own issuesByAuthor memo, not from the hook's getIssuesForAuthor
