@@ -161,7 +161,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   const syncedConfigRef = useRef(config);
 
   // Sync localConfig when the context config changes (e.g. a wizard save while
-  // this page is mounted but hidden) — but only when there are no unsaved edits,
+  // this page is mounted but hidden) - but only when there are no unsaved edits,
   // so we never silently discard the user's in-progress changes.
   useEffect(() => {
     if (!config) return;
@@ -246,7 +246,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       }
     }, 800);
     return () => clearTimeout(timer);
-  }, [localConfig.abs_base_url, localConfig.abs_api_token]);
+  }, [localConfig?.abs_base_url, localConfig?.abs_api_token]);
 
   useEffect(() => {
     loadProviders();
@@ -367,7 +367,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       const status = await callBackend('whisper_local_get_status');
       setWhisperStatus(status);
       setWhisperDiskUsage(await callBackend('whisper_local_get_disk_usage'));
-      // Auto-enable local whisper — persist the choice, not just local state.
+      // Auto-enable local whisper - persist the choice, not just local state.
       const newConfig = { ...localConfigRef.current, use_local_whisper: true, whisper_model: selectedWhisperModel };
       const res = await persistConfig(newConfig);
       if (res?.success) {
@@ -460,7 +460,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
     }
     setSaving(true);
     // saveConfig returns {success} rather than throwing, so a failed write must
-    // be detected from the result — never optimistically show "Saved!".
+    // be detected from the result - never optimistically show "Saved!".
     const res = await persistConfig(localConfig);
     if (res?.success) {
       setSaved(true);
