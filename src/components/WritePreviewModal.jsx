@@ -18,8 +18,10 @@ export function WritePreviewModal({
   // Build preview data with file IDs for tracking
   const previewData = [];
   groups.forEach(group => {
-    group.files.forEach(file => {
-      if (selectedFiles.has(file.id) && Object.keys(file.changes).length > 0) {
+    (group.files || []).forEach(file => {
+      // Guard files with no `changes` object (e.g. freshly ABS-imported files),
+      // matching the L-12 convention elsewhere in the app.
+      if (selectedFiles.has(file.id) && Object.keys(file.changes || {}).length > 0) {
         previewData.push({
           fileId: file.id,
           filename: file.filename,

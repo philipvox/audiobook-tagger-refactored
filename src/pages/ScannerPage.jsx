@@ -26,7 +26,8 @@ import { useApp } from '../context/AppContext';
 import { severityForKind } from '../lib/errorDetail';
 import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
 import { mergeClassifyTags } from '../lib/mergeClassifyTags';
-import { applyMetadataToGroup } from '../lib/applyMetadata';
+import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
+import { listFingerprint } from '../lib/selectionFingerprint';
 import { WritePreviewModal } from '../components/WritePreviewModal';
 
 export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoSvg }) {
@@ -45,6 +46,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   // of the stale closure snapshot captured at render time.
   const groupsRef = useRef(groups);
   useEffect(() => { groupsRef.current = groups; }, [groups]);
+
+  // M13: fingerprint of the list the shift-click anchor (lastSelectedIndex) was
+  // taken against, so a stale anchor from a since-changed/filtered list degrades
+  // to a plain click instead of selecting the wrong range.
+  const lastSelectionFingerprintRef = useRef(null);
 
   // M2: true only while Run All is orchestrating. Standalone flows check this
   // before nulling the shared gatheredDataRef so they don't wipe the gather
@@ -205,7 +211,14 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // Use filteredGroups if provided (when filters are active), otherwise use full groups
     const groupsToUse = filteredGroups || groups;
 
-    if (event.shiftKey && lastSelectedIndex !== null) {
+    // M13: the stored anchor index only points at the right row if the list it
+    // was taken against is unchanged. If the fingerprint differs (filter applied/
+    // cleared, list reordered), fall through to a plain click below.
+    const currentFingerprint = listFingerprint(groupsToUse);
+    const anchorValid = lastSelectedIndex !== null
+      && lastSelectionFingerprintRef.current === currentFingerprint;
+
+    if (event.shiftKey && anchorValid) {
       // SHIFT+CLICK: Range selection from last selected to current
       const start = Math.min(lastSelectedIndex, index);
       const end = Math.max(lastSelectedIndex, index);
@@ -253,6 +266,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     setLastSelectedIndex(index);
+    lastSelectionFingerprintRef.current = currentFingerprint;
   };
 
   const handleSelectGroup = (group, checked) => {
@@ -284,8 +298,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       selectAll(groups);
       setSelectedGroupIds(new Set());
     } else {
-      // Otherwise, select only the filtered group IDs
+      // Otherwise, select only the filtered group IDs AND their file ids.
+      // H4: without the file ids, getSelectedFileIds returns an empty set and
+      // Write / Rename / Rescan silently do nothing on a filtered selection.
       clearSelection();
+      const fileIds = new Set();
+      filteredGroups.forEach(g =>
+        (g.files || []).forEach(f => { if (f.id != null) fileIds.add(f.id); })
+      );
+      setSelectedFiles(fileIds);
       setSelectedGroupIds(new Set(filteredGroups.map(g => g.id)));
     }
   };
@@ -299,78 +320,33 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     modals.open('edit', { group });
   };
 
+  // M12: rebuild diffs from the group's ACTUAL current metadata (old =
+  // group.metadata[field], not a stale file.changes.old), include cleared
+  // fields (old set, new ''), map every modal field into file.changes, and
+  // PRESERVE unrelated staged changes (merge via applyMetadataToGroup rather
+  // than rebuilding file.changes from scratch).
+  const EDIT_MODAL_FILE_FIELDS = [
+    'title', 'subtitle', 'author', 'narrator', 'genre', 'series', 'sequence',
+    'year', 'publisher', 'description', 'isbn', 'asin', 'language',
+    'age_rating', 'abridged', 'runtime',
+  ];
+
   const handleSaveMetadata = (newMetadata) => {
     const editGroup = modals.data.edit?.group;
     if (!editGroup) return;
 
     setGroups(prevGroups =>
       prevGroups.map(group => {
-        if (group.id === editGroup.id) {
-          const updatedFiles = (group.files || []).map(file => {
-            const changes = {};
-
-            const oldTitle = file.changes.title?.old || '';
-            const oldAuthor = file.changes.author?.old || '';
-            const oldNarrator = file.changes.narrator?.old || '';
-            const oldGenre = file.changes.genre?.old || '';
-            
-            if (oldTitle !== newMetadata.title) {
-              changes.title = { old: oldTitle, new: newMetadata.title };
-            }
-            
-            if (oldAuthor !== newMetadata.author) {
-              changes.author = { old: oldAuthor, new: newMetadata.author };
-            }
-            
-            if (newMetadata.narrator) {
-              const newNarratorValue = `Narrated by ${newMetadata.narrator}`;
-              if (oldNarrator !== newNarratorValue) {
-                changes.narrator = { old: oldNarrator, new: newNarratorValue };
-              }
-            }
-            
-            if (newMetadata.genres?.length > 0) {
-              const newGenre = newMetadata.genres.join(', ');
-              if (oldGenre !== newGenre) {
-                changes.genre = { old: oldGenre, new: newGenre };
-              }
-            }
-            
-            if (newMetadata.series) {
-              changes.series = { old: '', new: newMetadata.series };
-            }
-            
-            if (newMetadata.sequence) {
-              changes.sequence = { old: '', new: newMetadata.sequence };
-            }
-            
-            if (newMetadata.year) {
-              changes.year = { old: file.changes.year?.old || '', new: newMetadata.year };
-            }
-            
-            if (newMetadata.publisher) {
-              changes.publisher = { old: '', new: newMetadata.publisher };
-            }
-            
-            if (newMetadata.description) {
-              changes.description = { old: '', new: newMetadata.description };
-            }
-            
-            return {
-              ...file,
-              changes,
-              status: Object.keys(changes).length > 0 ? 'changed' : 'unchanged'
-            };
-          });
-          
-          return {
-            ...group,
-            metadata: newMetadata,
-            files: updatedFiles,
-            total_changes: updatedFiles.filter(f => Object.keys(f.changes).length > 0).length
-          };
-        }
-        return group;
+        if (group.id !== editGroup.id) return group;
+        // A field is "changed" when its file-facing (tag-vocabulary) value
+        // differs from the current metadata. readFileField normalizes both
+        // sides (genres->genre join, narrator prefix) so the comparison and the
+        // stamped diff use the same vocabulary. Cleared fields (new === '')
+        // differ from a set old and are included automatically.
+        const changedFileFields = EDIT_MODAL_FILE_FIELDS.filter(
+          f => readFileField(newMetadata, f) !== readFileField(group.metadata, f)
+        );
+        return applyMetadataToGroup(group, newMetadata, changedFileFields);
       })
     );
   };
@@ -542,8 +518,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
   };
 
-  // ✅ SIMPLIFIED - No popups, just write with toast feedback
-  const handleWriteClick = async () => {
+  // H3: open the Write Tags preview modal. The user reviews the exact per-file
+  // changes, can exclude individual rows, and chooses backup (ON by default)
+  // before anything is written. Snapshot the selected file ids at open so the
+  // write targets what was selected when the modal opened.
+  const handleWriteClick = () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0 && !allSelected) {
       toast.warning('No Selection', 'Select files before writing.');
@@ -556,9 +535,22 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       return;
     }
 
+    const fileIds = Array.from(getSelectedFileIds(groups));
+    modals.open('write', { fileIds });
+  };
+
+  // H3: actually write after the preview is confirmed. `skipBackup` and
+  // `excludedChanges` come from the modal; the payload equals exactly what the
+  // preview showed minus the excluded rows.
+  const handleConfirmWrite = async (skipBackup, excludedChanges) => {
+    const fileIds = modals.data.write?.fileIds || [];
+    if (fileIds.length === 0) return;
+
     try {
-      const actualSelectedFiles = getSelectedFileIds(groups);
-      const result = await writeSelectedTags(actualSelectedFiles, false); // false = no backup for speed
+      const result = await writeSelectedTags(new Set(fileIds), {
+        backup: !skipBackup,
+        excludedChanges,
+      });
 
       if (result.success > 0) {
         toast.success('Write Complete', `Successfully wrote ${result.success} file${result.success > 1 ? 's' : ''}.`);
@@ -3018,10 +3010,16 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
       // Handle local files - use path-based push
       if (localFiles.length > 0) {
-        const actualSelectedFiles = getSelectedFileIds(groups);
+        // M15: build the file-id set from the snapshot taken at modal open
+        // (localFiles), mirroring the ABS branch, rather than reading the live
+        // selection which may have changed while the confirm modal was open.
+        const snapshotFileIds = new Set();
+        localFiles.forEach(g =>
+          (g.files || []).forEach(f => { if (f.id != null) snapshotFileIds.add(f.id); })
+        );
 
         const result = await pushToAudiobookShelf(
-          actualSelectedFiles,
+          snapshotFileIds,
           (progress) => {
           }
         );
@@ -3409,6 +3407,20 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         groups={modals.data.push?.groups || []}
         pushing={pushing}
       />
+
+      {/* Write Tags Preview Modal (H3) */}
+      {modals.isOpen('write') && (
+        <WritePreviewModal
+          isOpen={modals.isOpen('write')}
+          onClose={() => modals.close('write')}
+          onConfirm={handleConfirmWrite}
+          // Materialize the snapshot ids into a Set so allSelected mode (which
+          // keeps the raw selection Set empty) still previews correctly.
+          selectedFiles={new Set(modals.data.write?.fileIds || [])}
+          groups={groups}
+          backupEnabled={true}
+        />
+      )}
 
       {/* Bulk Cover Assignment Modal */}
       {modals.isOpen('bulkCover') && (selectedGroupIds.size > 0 || allSelected) && (

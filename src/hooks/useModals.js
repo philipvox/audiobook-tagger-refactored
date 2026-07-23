@@ -8,6 +8,7 @@ const MODAL_NAMES = [
   'export',
   'rescan',
   'push',
+  'write',
   'bulkCover',
   'series',
   'validation',
@@ -26,6 +27,7 @@ function buildInitialState() {
     data: {
       edit: { group: null },
       push: { groups: [] },
+      write: { fileIds: [] },
       batchFix: {
         pending: { validation: 0, author: 0, series: 0 },
         selectedTypes: { validation: true, author: true, series: true },

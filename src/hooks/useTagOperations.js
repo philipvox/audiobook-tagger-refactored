@@ -6,33 +6,48 @@ export function useTagOperations() {
   const { config, groups, updateFileStatuses, setWriteProgress } = useApp();
   const [writing, setWriting] = useState(false);
   const [pushing, setPushing] = useState(false);
-  const writeSelectedTags = useCallback(async (selectedFiles, shouldBackup) => {
+  // writeSelectedTags(selectedFiles, { backup, excludedChanges })
+  //   backup           default true now (data-preservation: backups ON by default).
+  //   excludedChanges  optional Set of "fileId:field" keys to drop from the
+  //                    payload, so what gets written equals exactly what the
+  //                    WritePreviewModal showed minus the unchecked rows.
+  const writeSelectedTags = useCallback(async (selectedFiles, options = {}) => {
+    const { backup = true, excludedChanges = null } = options;
     try {
       setWriting(true);
-      
-      // ✅ Set initial progress
-      setWriteProgress({ current: 0, total: selectedFiles.size });
 
+      // Build the payload from file.changes, honoring per-field exclusions.
+      // Only selected files with at least one surviving change are written.
       const filesMap = {};
+      const idsToWrite = [];
       groups.forEach(group => {
         group.files.forEach(file => {
-          filesMap[file.id] = {
-            path: file.path,
-            changes: file.changes
-          };
+          if (file.id == null || !selectedFiles.has(file.id)) return;
+          const allChanges = file.changes || {};
+          const changes = {};
+          for (const [field, val] of Object.entries(allChanges)) {
+            if (excludedChanges && excludedChanges.has(`${file.id}:${field}`)) continue;
+            changes[field] = val;
+          }
+          if (Object.keys(changes).length === 0) return;
+          filesMap[file.id] = { path: file.path, changes };
+          idsToWrite.push(file.id);
         });
       });
-      
-      const result = await callBackend('write_tags', { 
+
+      // ✅ Set initial progress to the count we will actually write
+      setWriteProgress({ current: 0, total: idsToWrite.length });
+
+      const result = await callBackend('write_tags', {
         request: {
-          file_ids: Array.from(selectedFiles),
+          file_ids: idsToWrite,
           files: filesMap,
-          backup: shouldBackup  // ✅ Use passed parameter instead of config
+          backup
         }
       });
 
       const newStatuses = {};
-      Array.from(selectedFiles).forEach(fileId => {
+      idsToWrite.forEach(fileId => {
         const hasError = result.errors.some(e => e.file_id === fileId);
         newStatuses[fileId] = hasError ? 'failed' : 'success';
       });
