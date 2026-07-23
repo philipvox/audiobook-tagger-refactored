@@ -1,11 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { callBackend } from '../api';
 import { ArrowRight, CheckCircle, Settings, FileType, Edit3 } from 'lucide-react';
 
-export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCancel }) {
+// CR-6a/CR-6b/L9: `files` is an array of { fileId, path, metadata } so every
+// file is previewed with its OWN group's metadata (not one shared `metadata`),
+// preview generation is debounced + cancellable, and the chosen template plus
+// the computed old->new pairs are threaded to onConfirm for the backend rename.
+export function RenamePreviewModal({ files = [], onConfirm, onCancel }) {
   const [previews, setPreviews] = useState([]);
   const [loading, setLoading] = useState(true);
   const [templates, setTemplates] = useState([]);
+  const [templatesLoaded, setTemplatesLoaded] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState(null);
   const [customTemplate, setCustomTemplate] = useState('');
   const [showCustom, setShowCustom] = useState(false);
@@ -15,8 +20,8 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
     const loadTemplates = async () => {
       try {
         const result = await callBackend('get_rename_templates');
-        setTemplates(result);
-        if (result.length > 0) {
+        setTemplates(Array.isArray(result) ? result : []);
+        if (result?.length > 0) {
           setSelectedTemplate(result[0]);
         }
       } catch (error) {
@@ -27,16 +32,12 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
           name: 'Standard',
           file_template: '{author} - {[series #sequence] }{title}{ (year)}',
         });
+      } finally {
+        setTemplatesLoaded(true);
       }
     };
     loadTemplates();
   }, []);
-
-  useEffect(() => {
-    if (selectedTemplate || customTemplate) {
-      generatePreviews();
-    }
-  }, [selectedFiles, metadata, selectedTemplate, customTemplate]);
 
   const getCurrentTemplate = () => {
     if (showCustom && customTemplate) {
@@ -45,29 +46,69 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
     return selectedTemplate?.file_template || null;
   };
 
-  const generatePreviews = async () => {
-    setLoading(true);
-    const results = [];
-    const template = getCurrentTemplate();
+  const currentTemplate = getCurrentTemplate();
 
-    for (const filePath of selectedFiles) {
-      try {
-        const preview = await callBackend('preview_rename', {
-          filePath,
-          metadata,
-          template,
-        });
-        results.push(preview);
-      } catch (error) {
-        console.error('Preview error:', error);
-      }
+  // L9: debounce (300ms) + cancellation token so rapid template edits don't
+  // race. A token captured per run is compared before every setState; a stale
+  // run (superseded by a newer edit or an unmount) is dropped.
+  const runTokenRef = useRef(0);
+  useEffect(() => {
+    // No template resolvable yet: if templates finished loading with none and
+    // no custom text, stop the spinner and show the empty state (L9).
+    if (!currentTemplate) {
+      if (templatesLoaded) setLoading(false);
+      return;
+    }
+    if (files.length === 0) {
+      setPreviews([]);
+      setLoading(false);
+      return;
     }
 
-    setPreviews(results);
-    setLoading(false);
-  };
+    const token = ++runTokenRef.current;
+    setLoading(true);
 
-  const changedCount = previews.filter(p => p.changed).length;
+    const timer = setTimeout(async () => {
+      const results = [];
+      for (const file of files) {
+        if (runTokenRef.current !== token) return; // superseded
+        try {
+          const preview = await callBackend('preview_rename', {
+            filePath: file.path,
+            metadata: file.metadata,
+            template: currentTemplate,
+          });
+          results.push({ fileId: file.fileId, ...preview });
+        } catch (error) {
+          console.error('Preview error:', error);
+        }
+      }
+      if (runTokenRef.current !== token) return; // superseded before commit
+      setPreviews(results);
+      setLoading(false);
+    }, 300);
+
+    return () => {
+      clearTimeout(timer);
+      runTokenRef.current++; // invalidate any in-flight run on cleanup
+    };
+  }, [files, currentTemplate, templatesLoaded]);
+
+  const changedPreviews = previews.filter(p => p.changed);
+  const changedCount = changedPreviews.length;
+  const noTemplates = templatesLoaded && templates.length === 0 && !currentTemplate;
+
+  const handleConfirm = () => {
+    // Thread the computed target names (from the previews already generated with
+    // the chosen template) to the parent as explicit old->new pairs, plus the
+    // template, so the backend renames exactly what was previewed.
+    const pairs = changedPreviews.map(p => ({
+      fileId: p.fileId,
+      oldPath: p.old_path,
+      newPath: p.new_path,
+    }));
+    onConfirm(pairs, currentTemplate);
+  };
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -152,7 +193,15 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
-          {loading ? (
+          {noTemplates ? (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <FileType className="w-8 h-8 text-gray-500 mb-3" />
+              <p className="text-gray-300 font-medium">No rename templates available</p>
+              <p className="text-gray-500 text-sm mt-1">
+                Enter a custom template above to preview renames.
+              </p>
+            </div>
+          ) : loading ? (
             <div className="flex items-center justify-center py-12">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
               <span className="ml-3 text-gray-400">Generating previews...</span>
@@ -206,7 +255,7 @@ export function RenamePreviewModal({ selectedFiles, metadata, onConfirm, onCance
                 Cancel
               </button>
               <button
-                onClick={onConfirm}
+                onClick={handleConfirm}
                 disabled={changedCount === 0 || loading}
                 className={`px-4 py-2 rounded-lg font-medium flex items-center gap-2 transition-colors ${
                   changedCount === 0 || loading

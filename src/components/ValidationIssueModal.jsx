@@ -1,7 +1,7 @@
 // src/components/ValidationIssueModal.jsx
 // Modal for reviewing validation issues and selectively applying fixes
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { X, Check, AlertTriangle, Info, ChevronDown, ChevronRight, Wrench, Filter, BookOpen } from 'lucide-react';
 
 const ISSUE_TYPE_LABELS = {
@@ -54,8 +54,11 @@ export function ValidationIssueModal({
   const booksWithIssues = useMemo(() => {
     if (!validationResults || !groups) return [];
 
+    // CR-5: ScannerPage's selection is file-id based (`selectedFiles`), so a
+    // group is "in selection" when any of its files' ids is selected - not when
+    // the group id matches (group ids never appear in the file-id selection).
     const targetBooks = selectedBooks?.size > 0
-      ? groups.filter(g => selectedBooks.has(g.id))
+      ? groups.filter(g => (g.files || []).some(f => selectedBooks.has(f.id)))
       : groups;
 
     return targetBooks
@@ -126,8 +129,16 @@ export function ValidationIssueModal({
   // Generate fix key for tracking selections
   const getFixKey = (bookId, issueIdx) => `${bookId}:${issueIdx}`;
 
-  // Initialize selected fixes on mount
-  useState(() => {
+  // M4: initialize selected fixes once per data arrival. The old
+  // `useState(fn, [booksWithIssues])` never re-ran (deps are ignored by
+  // useState) AND naively converting to useEffect would re-run on every
+  // recompute (e.g. a filter/selection change), wiping the user's manual
+  // fix selections. Key the init to the validationResults object identity so
+  // it seeds exactly once for a given analysis and never clobbers edits.
+  const initializedRef = useRef(null);
+  useEffect(() => {
+    if (initializedRef.current === validationResults) return;
+    initializedRef.current = validationResults;
     const keys = new Set();
     for (const book of booksWithIssues) {
       book.validation.issues.forEach((issue, idx) => {
@@ -137,7 +148,7 @@ export function ValidationIssueModal({
       });
     }
     setSelectedFixes(keys);
-  }, [booksWithIssues]);
+  }, [validationResults, booksWithIssues]);
 
   const toggleBook = (bookId) => {
     setExpandedBooks(prev => {

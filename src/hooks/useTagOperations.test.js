@@ -27,30 +27,42 @@ beforeEach(() => {
   mockGroups = [];
 });
 
-describe('useTagOperations.renameFiles', () => {
-  it('only sends files whose id is present in the selection, ignoring an id-less file even if `undefined` is in the Set', async () => {
-    mockGroups = [{
-      id: 'g1',
-      metadata: { title: 'Book' },
-      files: [
-        { id: 'f1', path: '/a/1.m4b' },
-        { id: undefined, path: '/a/2.m4b' }, // e.g. a not-yet-normalized ABS file
-      ],
-    }];
-    mockCallBackend.mockResolvedValue({ renamed: 1 });
+describe('useTagOperations.renameFiles (CR-6a: explicit old->new pairs)', () => {
+  it('forwards computed old->new pairs to the backend as `renames`', async () => {
+    mockCallBackend.mockResolvedValue({ renamed: [] });
 
     const { result } = renderHook(() => useTagOperations());
 
-    // Selecting both the real id and (defensively) `undefined` itself -
-    // without the guard this would incorrectly include the id-less file.
-    const selectedFiles = new Set(['f1', undefined]);
+    const pairs = [
+      { fileId: 'f1', oldPath: '/a/1.m4b', newPath: '/a/Author - Book.m4b' },
+    ];
 
     await act(async () => {
-      await result.current.renameFiles(selectedFiles);
+      await result.current.renameFiles(pairs);
     });
 
     expect(mockCallBackend).toHaveBeenCalledWith('rename_files', {
-      files: [['/a/1.m4b', { title: 'Book' }]],
+      renames: [{ file_id: 'f1', old_path: '/a/1.m4b', new_path: '/a/Author - Book.m4b' }],
+    });
+  });
+
+  it('CR-3: drops pairs with a null/undefined fileId (or a missing path) defensively', async () => {
+    mockCallBackend.mockResolvedValue({ renamed: [] });
+
+    const { result } = renderHook(() => useTagOperations());
+
+    const pairs = [
+      { fileId: undefined, oldPath: '/a/2.m4b', newPath: '/a/x.m4b' }, // id-less: skip
+      { fileId: 'f1', oldPath: '/a/1.m4b', newPath: '/a/y.m4b' },       // kept
+      { fileId: 'f3', oldPath: '/a/3.m4b', newPath: '' },               // no target: skip
+    ];
+
+    await act(async () => {
+      await result.current.renameFiles(pairs);
+    });
+
+    expect(mockCallBackend).toHaveBeenCalledWith('rename_files', {
+      renames: [{ file_id: 'f1', old_path: '/a/1.m4b', new_path: '/a/y.m4b' }],
     });
   });
 });

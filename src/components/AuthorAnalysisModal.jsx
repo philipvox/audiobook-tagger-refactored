@@ -1,7 +1,7 @@
 // src/components/AuthorAnalysisModal.jsx
 // Modal for reviewing author analysis and selectively applying normalizations
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { X, Check, User, AlertTriangle, ChevronDown, ChevronRight, Wrench, Filter, BookOpen } from 'lucide-react';
 
 export function AuthorAnalysisModal({
@@ -85,8 +85,14 @@ export function AuthorAnalysisModal({
     return combined;
   }, [normalizationCandidates, suspiciousAuthors, filterType]);
 
-  // Initialize selected fixes
-  useState(() => {
+  // M4: seed selected fixes once per analysis. The old `useState(fn, deps)`
+  // ignored deps (ran once), and a naive useEffect keyed on the derived
+  // `normalizationCandidates` would re-seed on every recompute and wipe manual
+  // toggles. Key init to the authorAnalysis object identity instead.
+  const initializedRef = useRef(null);
+  useEffect(() => {
+    if (initializedRef.current === authorAnalysis) return;
+    initializedRef.current = authorAnalysis;
     const keys = new Set();
     for (const candidate of normalizationCandidates) {
       if (candidate.canonical) {
@@ -96,7 +102,7 @@ export function AuthorAnalysisModal({
       }
     }
     setSelectedFixes(keys);
-  }, [normalizationCandidates]);
+  }, [authorAnalysis, normalizationCandidates]);
 
   const toggleAuthor = (authorName) => {
     setExpandedAuthors(prev => {
