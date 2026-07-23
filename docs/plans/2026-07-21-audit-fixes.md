@@ -190,6 +190,17 @@ Files: `src-tauri/src/scanner.rs`, `whisper.rs`, `whisper_local.rs`, `ollama.rs`
 
 ---
 
+## Task 9b: Rust local-file write backend (discovered gap)
+
+Discovery during Task 6: `write_tags`, `rename_files`, `preview_rename`, `undo_last_write`, and `get_undo_status` have NO backend in v2 (not in TAURI_COMMANDS, not in HANDLERS, no Rust command): the entire local-file write/rename/undo UI surface silently returned stubs. The frontend (Tasks 5-6) now fails safely against stubs, but the feature needs a real backend. Files: new `src-tauri/src/writer.rs`, `src-tauri/src/lib.rs`, `src/api.js` (TAURI_COMMANDS additions only).
+
+1. **write_tags**: Tauri command taking the `filesMap`/`file_ids` payload `buildWritePayload` produces (read `src/lib/buildWritePayload.js` and `useTagOperations.js:write` for the exact shape). For each file: optional backup copy (`<name>.bak` alongside, only when `backup: true`), then apply `changes` via lofty (title, artist/author, album, albumartist, narrator->Composer, series/series-part via the same freeform keys scanner.rs reads, genre, year/date, track). Unknown/ABS-only fields (dna/abs tags) are skipped silently. Return `{ success: <n>, failed: <n>, errors: [{path, error}], results: [{path, status}] }` matching what ScannerPage/useTagOperations consume.
+2. **undo_last_write / get_undo_status**: persist an undo journal (JSON in app data dir) written by write_tags (original path + backup path + timestamp). `get_undo_status` returns `{ available, count, ageSeconds }`; `undo_last_write` restores backups (rename .bak back), returns `{ success: <n>, failed: <n>, results: [{old_path, new_path}] }` consistent with ScannerPage's undo consumption (read the Task 5 wiring for exact field reads). Journal cleared after undo; backups without `backup: true` mean undo unavailable (get_undo_status reflects it).
+3. **preview_rename / rename_files**: `preview_rename` takes `{filePath, metadata, template}` and returns the formatted name (template vars: {title}, {author}, {series}, {sequence}, {year}, {narrator}; sanitize path-illegal chars). `rename_files` takes explicit old->new pairs (the shape RenamePreviewModal/`renameFiles` sends after Task 7) and performs `fs::rename`, refusing to overwrite existing targets, returning `{ renamed: <n>, failed: <n>, results: [{old_path, new_path, status}] }` matching the Task 5 rename consumption in ScannerPage.
+4. Register all commands in lib.rs `generate_handler` and add them to `TAURI_COMMANDS` in `src/api.js` (no HANDLERS fallback: browser build keeps the stub behavior, which the frontend already reports as a visible failure).
+5. Unit tests (cargo) for: tag write round-trip on a generated file (lofty write then read back), backup+undo restore round-trip, rename collision refusal, template formatting incl. sequence 0 and missing fields. JS side: no changes beyond TAURI_COMMANDS, existing suite must stay green.
+6. Verify against the shapes ScannerPage consumes (Task 5 wiring) and adjust ScannerPage field reads ONLY if a mismatch is found (document it).
+
 ## Task 10 (final): whole-branch verification
 
 - Full `npm run test:run` + `cargo test` + `cargo check` + `npm run build` (vite) green.
