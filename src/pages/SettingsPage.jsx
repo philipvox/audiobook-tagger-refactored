@@ -11,9 +11,26 @@ import {
 } from '../lib/prompts';
 import { APPROVED_GENRES } from '../lib/genres';
 import { ChevronDown, Check, X, Plus, Trash2, AlertCircle, Library, Settings, Sparkles, Cpu, Download, HardDrive, Mic } from 'lucide-react';
-import { useApp } from '../context/AppContext';
+import { useApp, shouldAutoEnableLocalAI } from '../context/AppContext';
 import { useToast } from '../components/Toast';
 import { ConfirmModal } from '../components/ConfirmModal';
+
+/**
+ * Shallow-equality check for two config objects. Used to detect whether the
+ * user has unsaved edits (localConfig diverged from the last synced baseline)
+ * so we can safely adopt an updated context config without clobbering edits.
+ * Falls back to a JSON compare for nested (array/object) values.
+ */
+export function configsEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) {
+    if (a[k] === b[k]) continue;
+    if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) return false;
+  }
+  return true;
+}
 
 const PRESETS = {
   conservative: { label: 'Conservative', multiplier: 0.5 },
@@ -130,9 +147,45 @@ function validateAbsUrl(url) {
 }
 
 export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
-  const { config, saveConfig, groups } = useApp();
+  const { config, saveConfig, loadConfig, groups } = useApp();
   const toast = useToast();
   const [localConfig, setLocalConfig] = useState(config);
+
+  // Ref mirror of localConfig so long-lived effects (the 5s Ollama poll) and
+  // blur/auto-save handlers always read the latest edits, not a stale closure.
+  const localConfigRef = useRef(localConfig);
+  useEffect(() => { localConfigRef.current = localConfig; }, [localConfig]);
+
+  // Baseline of the config we last synced from / saved to context. localConfig
+  // differing from this means the user has unsaved edits (the "dirty" flag).
+  const syncedConfigRef = useRef(config);
+
+  // Sync localConfig when the context config changes (e.g. a wizard save while
+  // this page is mounted but hidden) — but only when there are no unsaved edits,
+  // so we never silently discard the user's in-progress changes.
+  useEffect(() => {
+    if (!config) return;
+    // Dirty = localConfig has diverged from the last synced baseline.
+    const dirty = !configsEqual(localConfigRef.current, syncedConfigRef.current);
+    if (dirty) return; // keep the user's unsaved edits
+    // Only re-render when the incoming config actually differs by value; this
+    // avoids a redundant setLocalConfig (and re-render loop) when context hands
+    // back a new object reference with identical values.
+    if (!configsEqual(localConfigRef.current, config)) {
+      setLocalConfig(config);
+    }
+    syncedConfigRef.current = config;
+  }, [config]);
+
+  // Centralized save: updates localConfig, persists via context, and advances
+  // the synced baseline on success so future context changes can re-sync.
+  // Returns the {success} result; callers surface their own success/error UI.
+  const persistConfig = async (newConfig) => {
+    setLocalConfig(newConfig);
+    const res = await saveConfig(newConfig);
+    if (res?.success) syncedConfigRef.current = newConfig;
+    return res;
+  };
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showPrompts, setShowPrompts] = useState(false);
   const [showProviders, setShowProviders] = useState(false);
@@ -152,6 +205,9 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   const [modelPresets, setModelPresets] = useState([]);
   const [selectedPreset, setSelectedPreset] = useState('gemma4');
   const ollamaAutoDetectedRef = useRef(false);
+  // Only initialize selectedPreset from the active model once, so repeated
+  // 5s polls never clobber a model the user picked in the dropdown.
+  const presetInitializedRef = useRef(false);
   const [installing, setInstalling] = useState(false);
   const [pulling, setPulling] = useState(false);
   const [pullProgress, setPullProgress] = useState(null); // { completed, total, status }
@@ -168,6 +224,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
 
   // Auto-fetch libraries when URL + token are both set
   useEffect(() => {
+    if (!localConfig) return;
     const url = localConfig.abs_base_url;
     const token = localConfig.abs_api_token;
     if (!url || !token || url.length < 8 || token.length < 4) return;
@@ -209,16 +266,22 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
         setModelPresets(presets || []);
         setDiskUsage(usage || 0);
         if (status?.models?.length > 0) {
-          setSelectedPreset(status.models[0].name);
-          // Auto-enable local AI if Ollama is running with models and no AI is configured (once only)
-          if (!ollamaAutoDetectedRef.current && status.running) {
-            const hasAnyAI = localConfig?.openai_api_key || localConfig?.anthropic_api_key || localConfig?.use_local_ai;
-            if (!hasAnyAI) {
-              ollamaAutoDetectedRef.current = true;
-              const model = status.models[0].name;
-              const newConfig = { ...localConfig, use_local_ai: true, ollama_model: model };
-              setLocalConfig(newConfig);
-              await saveConfig(newConfig);
+          // Initialize the active-model selection only once so later polls
+          // don't overwrite a model the user chose in the dropdown.
+          if (!presetInitializedRef.current) {
+            presetInitializedRef.current = true;
+            setSelectedPreset(status.models[0].name);
+          }
+          // Auto-enable local AI once, only when the user has never made an
+          // explicit choice. Read the latest config from the ref (this effect
+          // runs on an interval and its closure would otherwise be stale).
+          if (!ollamaAutoDetectedRef.current && shouldAutoEnableLocalAI(localConfigRef.current, status)) {
+            ollamaAutoDetectedRef.current = true;
+            const model = status.models[0].name;
+            const newConfig = { ...localConfigRef.current, use_local_ai: true, ollama_model: model };
+            const res = await persistConfig(newConfig);
+            if (!res?.success) {
+              ollamaAutoDetectedRef.current = false; // allow a retry on the next poll
             }
           }
         }
@@ -304,9 +367,14 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       const status = await callBackend('whisper_local_get_status');
       setWhisperStatus(status);
       setWhisperDiskUsage(await callBackend('whisper_local_get_disk_usage'));
-      // Auto-enable local whisper
-      setLocalConfig(prev => ({ ...prev, use_local_whisper: true, whisper_model: selectedWhisperModel }));
-      toast.success('Whisper model downloaded!');
+      // Auto-enable local whisper — persist the choice, not just local state.
+      const newConfig = { ...localConfigRef.current, use_local_whisper: true, whisper_model: selectedWhisperModel };
+      const res = await persistConfig(newConfig);
+      if (res?.success) {
+        toast.success('Whisper model downloaded!');
+      } else {
+        toast.error('Model downloaded, but saving settings failed', res?.error);
+      }
     } catch (e) {
       toast.error('Download failed', String(e));
     }
@@ -330,8 +398,12 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       await callBackend('whisper_local_uninstall');
       setWhisperStatus({ installed: false, binary_path: null, models: [], active_model: null });
       setWhisperDiskUsage(0);
-      setLocalConfig(prev => ({ ...prev, use_local_whisper: false, whisper_model: null }));
-      toast.info('Local Whisper removed');
+      const res = await persistConfig({ ...localConfigRef.current, use_local_whisper: false, whisper_model: null });
+      if (res?.success) {
+        toast.info('Local Whisper removed');
+      } else {
+        toast.error('Whisper removed, but saving settings failed', res?.error);
+      }
     } catch (e) {
       toast.error('Uninstall failed', String(e));
     }
@@ -387,12 +459,14 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       return;
     }
     setSaving(true);
-    try {
-      await saveConfig(localConfig);
+    // saveConfig returns {success} rather than throwing, so a failed write must
+    // be detected from the result — never optimistically show "Saved!".
+    const res = await persistConfig(localConfig);
+    if (res?.success) {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-    } catch (e) {
-      toast.error('Save Failed', String(e));
+    } else {
+      toast.error('Save Failed', res?.error || 'Could not save settings. Your changes were not persisted.');
     }
     setSaving(false);
   };
@@ -450,11 +524,14 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
         setPulling(false); setPullProgress(null);
       }
       const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset };
-      setLocalConfig(newConfig);
-      await saveConfig(newConfig);
+      const res = await persistConfig(newConfig);
       const status = await ollamaCall('ollama_get_status');
       setOllamaStatus(status);
-      toast.success('Local AI installed and running!');
+      if (res?.success) {
+        toast.success('Local AI installed and running!');
+      } else {
+        toast.error('Installed, but saving settings failed', res?.error);
+      }
     } catch (err) {
       toast.error(`Install failed: ${err.message || err}`);
     } finally {
@@ -467,16 +544,14 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
     try {
       if (ollamaStatus?.running) {
         await callBackend('ollama_stop');
-        const newConfig = { ...localConfig, use_local_ai: false };
-        setLocalConfig(newConfig);
-        await saveConfig(newConfig);
-        toast.info('Local AI stopped');
+        const res = await persistConfig({ ...localConfig, use_local_ai: false });
+        if (res?.success) toast.info('Local AI stopped');
+        else toast.error('Stopped, but saving settings failed', res?.error);
       } else {
         await ollamaCall('ollama_start');
-        const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset };
-        setLocalConfig(newConfig);
-        await saveConfig(newConfig);
-        toast.success('Local AI started');
+        const res = await persistConfig({ ...localConfig, use_local_ai: true, ollama_model: selectedPreset });
+        if (res?.success) toast.success('Local AI started');
+        else toast.error('Started, but saving settings failed', res?.error);
       }
       const status = await ollamaCall('ollama_get_status');
       setOllamaStatus(status);
@@ -502,8 +577,8 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       setPulling(false); setPullProgress(null);
     }
     const newConfig = { ...localConfig, ollama_model: modelId };
-    setLocalConfig(newConfig);
-    await saveConfig(newConfig);
+    const res = await persistConfig(newConfig);
+    if (!res?.success) toast.error('Failed to save model selection', res?.error);
     const status = await ollamaCall('ollama_get_status');
     setOllamaStatus(status);
   };
@@ -511,18 +586,35 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   const handleUninstallOllama = async () => {
     try {
       await callBackend('ollama_uninstall');
-      const newConfig = { ...localConfig, use_local_ai: false, ollama_model: null };
-      setLocalConfig(newConfig);
-      await saveConfig(newConfig);
+      const res = await persistConfig({ ...localConfig, use_local_ai: false, ollama_model: null });
       setOllamaStatus({ installed: false, running: false, models: [], version: null });
       setDiskUsage(0);
-      toast.info('Local AI removed');
+      if (res?.success) toast.info('Local AI removed');
+      else toast.error('Removed, but saving settings failed', res?.error);
     } catch (err) {
       toast.error(`Uninstall failed: ${err.message || err}`);
     }
   };
 
   // Input, Toggle defined outside component (above) to preserve focus on re-render
+
+  // Guard: if the config never loaded, render a retry state rather than
+  // dereferencing a null localConfig throughout the form below.
+  if (!localConfig) {
+    return (
+      <div className="h-full flex items-center justify-center bg-neutral-950">
+        <div className="text-center">
+          <p className="text-gray-400 text-sm mb-3">Settings could not be loaded.</p>
+          <button
+            onClick={() => loadConfig?.()}
+            className="px-4 py-2 text-sm font-medium rounded-lg bg-neutral-800 text-white hover:bg-neutral-700 transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full overflow-y-auto bg-neutral-950">
@@ -786,7 +878,10 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                       const newConfig = { ...localConfig, ollama_base_url: e.target.value };
                       setLocalConfig(newConfig);
                     }}
-                    onBlur={() => saveConfig(localConfig)}
+                    onBlur={async () => {
+                      const res = await persistConfig(localConfig);
+                      if (!res?.success) toast.error('Failed to save server URL', res?.error);
+                    }}
                     placeholder="http://127.0.0.1:11434"
                     className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white placeholder-gray-600 focus:border-blue-500 focus:outline-none"
                   />
@@ -1275,21 +1370,20 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       <ConfirmModal
         isOpen={confirmClearKeys}
         onClose={() => setConfirmClearKeys(false)}
-        onConfirm={() => {
-          setLocalConfig(prev => ({
-            ...prev,
-            abs_api_token: '',
-            openai_api_key: null,
-            anthropic_api_key: null,
-          }));
-          saveConfig({
+        onConfirm={async () => {
+          setConfirmClearKeys(false);
+          const cleared = {
             ...localConfig,
             abs_api_token: '',
             openai_api_key: null,
             anthropic_api_key: null,
-          });
-          setConfirmClearKeys(false);
-          toast.success('Keys Cleared', 'All API keys and tokens have been removed from browser storage.');
+          };
+          const res = await persistConfig(cleared);
+          if (res?.success) {
+            toast.success('Keys Cleared', 'All API keys and tokens have been removed from browser storage.');
+          } else {
+            toast.error('Clear Failed', res?.error || 'Could not remove keys. They may still be stored.');
+          }
         }}
         title="Clear All API Keys"
         message="This will remove your ABS token, OpenAI key, and Anthropic key from browser storage. You'll need to re-enter them to use the app."
