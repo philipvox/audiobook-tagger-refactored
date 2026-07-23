@@ -223,15 +223,17 @@ fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
 
 /// A chapter/disc subfolder that should be climbed past to find the real book folder.
 ///
-/// Matches only a leading chapter keyword followed by a number (e.g. "Disc 1", "CD2",
-/// "Chapter 05", "Part 3", "Track 07") or a pure-number folder (e.g. "01", "5").
-/// It must NOT match "NN - Title" book folders (e.g. "01 - The Way of Kings").
+/// A folder is a chapter folder ONLY when its WHOLE name is a chapter keyword plus a
+/// number and nothing after it (e.g. "Disc 1", "CD2", "Chapter 05", "Part 3",
+/// "Track 07"). Pure-number folders ("01", "5") are deliberately NOT chapter folders:
+/// they are usually distinct numbered book folders (Series/1, Series/2), and merging
+/// two different books mangles data while an over-split is recoverable. Titled folders
+/// that merely start with a keyword+number ("Part 3 - The Return") are book folders too.
 fn is_chapter_folder(name: &str) -> bool {
     use std::sync::OnceLock;
     static CHAPTER_RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = CHAPTER_RE.get_or_init(|| {
-        regex::Regex::new(r"^(chapter|disc|disk|cd|part|track|ch)\s*\d|^\d+$").unwrap()
-    });
+    let re = CHAPTER_RE
+        .get_or_init(|| regex::Regex::new(r"^(chapter|ch|disc|disk|cd|part|track)\s*\.?\s*\d+$").unwrap());
     re.is_match(name.trim().to_lowercase().as_str())
 }
 
@@ -549,14 +551,15 @@ fn extract_series_from_folder(folder_name: &str) -> (Option<String>, Option<Stri
         if let Some(caps) = re.captures(folder_name) {
             if let (Some(series), Some(num)) = (caps.get(1), caps.get(2)) {
                 let name = series.as_str().trim();
-                let n = num.as_str().trim_start_matches('0');
+                // Preserve a genuine zero sequence ("Wheel Time 0" -> "0"), matching
+                // item 6's normalize_seq_num behavior in the sequence path.
+                let n = normalize_seq_num(num.as_str());
                 if name.len() >= 3
                     && name.split_whitespace().count() >= 2
                     && !name.chars().all(|c| c.is_ascii_digit())
                     && !name.to_lowercase().ends_with(" book")
-                    && !n.is_empty()
                 {
-                    return (Some(normalize_series_name(name)), Some(n.to_string()));
+                    return (Some(normalize_series_name(name)), Some(n));
                 }
             }
         }
@@ -867,15 +870,38 @@ mod tests {
         assert!(!is_chapter_folder("1 - Prologue"));
         assert!(!is_chapter_folder("The Way of Kings"));
         assert!(!is_chapter_folder("Partials"));
-        // Real chapter/disc folders
+        // Pure-number folders are NOT chapter folders: they are usually distinct
+        // numbered BOOK folders (Series/1, Series/2), and a wrong merge mangles
+        // data while a wrong split is recoverable. Data-preservation wins.
+        assert!(!is_chapter_folder("01"));
+        assert!(!is_chapter_folder("5"));
+        // A titled folder that merely starts with a keyword+number is a book folder.
+        assert!(!is_chapter_folder("Part 3 - The Return"));
+        // Real chapter/disc folders: keyword + number and nothing after.
         assert!(is_chapter_folder("Disc 1"));
         assert!(is_chapter_folder("CD2"));
         assert!(is_chapter_folder("Chapter 05"));
         assert!(is_chapter_folder("Part 3"));
+        assert!(is_chapter_folder("Track 3"));
         assert!(is_chapter_folder("Track 07"));
         assert!(is_chapter_folder("disk 2"));
-        assert!(is_chapter_folder("01"));
-        assert!(is_chapter_folder("5"));
+    }
+
+    #[test]
+    fn numbered_book_folders_do_not_merge() {
+        // Series/1 and Series/2 are two DIFFERENT books, not two discs of one.
+        let mk = |dir: &str, fname: &str| RawFile {
+            path: format!("{}/{}", dir, fname),
+            filename: fname.to_string(),
+            parent_dir: dir.to_string(),
+            tags: EmbeddedTags::default(),
+        };
+        let files = vec![
+            mk("/audiobooks/Some Series/1", "audio.mp3"),
+            mk("/audiobooks/Some Series/2", "audio.mp3"),
+        ];
+        let groups = group_files(files);
+        assert_eq!(groups.len(), 2, "numbered book folders must stay separate");
     }
 
     #[test]
@@ -927,6 +953,11 @@ mod tests {
         let (s, n) = extract_series_from_folder("Harry Potter 3");
         assert_eq!(s.as_deref(), Some("Harry Potter"));
         assert_eq!(n.as_deref(), Some("3"));
+
+        // Genuine zero sequence is preserved, not dropped (item 6 parity).
+        let (s, n) = extract_series_from_folder("Wheel Time 0");
+        assert_eq!(s.as_deref(), Some("Wheel Time"));
+        assert_eq!(n.as_deref(), Some("0"));
     }
 
     // ---- Item 6: sequence zero preserved ----
