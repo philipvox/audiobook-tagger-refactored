@@ -25,6 +25,7 @@ import { useModals } from '../hooks/useModals';
 import { useApp } from '../context/AppContext';
 import { severityForKind } from '../lib/errorDetail';
 import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
+import { mergeClassifyTags } from '../lib/mergeClassifyTags';
 
 export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoSvg }) {
   const {
@@ -36,6 +37,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState(new Set());
   const [expandedGroups, setExpandedGroups] = useState(new Set());
+
+  // H3 (Run All stale groups): keep a live ref to `groups` so Run All's
+  // sequential enrichment steps read each prior step's merged results instead
+  // of the stale closure snapshot captured at render time.
+  const groupsRef = useRef(groups);
+  useEffect(() => { groupsRef.current = groups; }, [groups]);
+
+  // M2: true only while Run All is orchestrating. Standalone flows check this
+  // before nulling the shared gatheredDataRef so they don't wipe the gather
+  // hints out from under a later Run All step (ISBN/years reuse them).
+  const runAllActiveRef = useRef(false);
 
   // Consolidated modal and batch operation state
   const modals = useModals();
@@ -66,22 +78,50 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const handleUndo = useCallback(async () => {
     if (!undoStatus?.available || undoing) return;
 
+    // Capture the affected file paths before we clear undoStatus.
+    const affectedPaths = undoStatus.files || undoStatus.paths || undoStatus.affected_paths || [];
+
     setUndoing(true);
     try {
       const result = await callBackend('undo_last_write');
+
+      // M7: a stub/no-op or an explicit failure must surface an error toast,
+      // not silently swallow (the old code only ever no-op'd on success).
+      const failed = !result || result._stub || result.success === false || result.error;
+      if (failed) {
+        const msg = result?.error || result?.message || 'Could not revert the last tag write.';
+        toast.error('Undo Failed', String(msg));
+        return;
+      }
+
       setShowUndoToast(false);
       setUndoStatus(null);
 
-      // Refresh the scan to show restored state
-      if (result.success > 0) {
-        // Could trigger a rescan here if needed
+      // M5: revert the UI for the undone files. A cheap re-read (read_tags /
+      // rescan) is not wired here, so per the brief we take the "no cheap path"
+      // branch: mark the affected groups 'undone' so the user knows the on
+      // screen tags may be stale, clear the stale write-status pills, and tell
+      // them via toast to rescan.
+      const paths = result.restored_files || result.files || affectedPaths || [];
+      const pathSet = new Set(paths);
+      if (pathSet.size > 0) {
+        setGroups(prev => prev.map(g => {
+          const touched = (g.files || []).some(f => pathSet.has(f.path));
+          return touched ? { ...g, status: 'undone' } : g;
+        }));
       }
+      // The write-status overlay reflected the write we just reverted, so it is
+      // no longer accurate for any file - clear it.
+      clearFileStatuses();
+
+      toast.success('Changes Reverted', 'Restored the files from the last write. Rescan to refresh the on-screen tags.');
     } catch (error) {
       console.error('Undo failed:', error);
+      toast.error('Undo Failed', String(error?.message || error));
     } finally {
       setUndoing(false);
     }
-  }, [undoStatus, undoing]);
+  }, [undoStatus, undoing, toast, setGroups, clearFileStatuses]);
 
   // Dismiss undo toast
   const dismissUndo = useCallback(async () => {
@@ -563,9 +603,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
       // Handle ABS imports (no local files)
       if (absImports.length > 0) {
-        // For ABS imports, use force_fresh mode which searches APIs
-        // Pass selectiveFields to only update specific fields if custom rescan
-        const result = await handleRescanAbsImports(absImports, 'force_fresh', false, selectiveFields);
+        // M1: honor the user-chosen scan mode (was hardcoded 'force_fresh',
+        // which ignored smart/selective/deep choices from the Rescan modal).
+        // Pass selectiveFields to only update specific fields if custom rescan.
+        const result = await handleRescanAbsImports(absImports, scanMode, false, selectiveFields);
       }
 
       // Handle local files (if any mixed in)
@@ -765,43 +806,52 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         })
       );
 
+      // M3: compute success/failure counts from the results array BEFORE
+      // setGroups. Counting inside the updater double-counts under React
+      // StrictMode (updaters run twice) and races the async state commit.
+      for (const res of results) {
+        const v = res.status === 'fulfilled' ? res.value : null;
+        if (v && v.result && v.result.success && v.result.result) successCount++;
+        else failedCount++;
+      }
+
       // Update groups with new title/author/subtitle ONLY (not series - use Fix Series for that)
       setGroups(prevGroups => {
         return prevGroups.map(g => {
           const batchResult = results.find(r => r.status === 'fulfilled' && r.value.groupId === g.id);
-          if (batchResult && batchResult.status === 'fulfilled') {
-            const { result } = batchResult.value;
-            if (result.success && result.result) {
-              const r = result.result;
-              successCount++;
+          if (!batchResult) return g;
+          const { result, error } = batchResult.value;
+          // CR-2: the rejected/error branch returns { groupId, error } with no
+          // `result`. Guard before touching result.* so one failed lookup can
+          // never throw inside the updater and crash the whole batch. Surface
+          // the failure as a per-book error pill instead.
+          if (!result) {
+            const message = error?.message ? String(error.message) : 'Title lookup failed';
+            return { ...g, lastError: { stage: 'resolve', kind: 'network', message, severity: 'error' } };
+          }
+          if (result.success && result.result) {
+            const r = result.result;
 
-              // Log low confidence results with suggestions
-              if (r.confidence < 70 && r.suggested_title) {
-              }
+            // If confidence is very low (< 50) and we have a suggestion, prefer the suggestion
+            const useTitle = (r.confidence < 50 && r.suggested_title) ? r.suggested_title : r.title;
+            const useAuthor = (r.confidence < 50 && r.suggested_author) ? r.suggested_author : (r.author || g.metadata.author);
 
-              // If confidence is very low (< 50) and we have a suggestion, prefer the suggestion
-              const useTitle = (r.confidence < 50 && r.suggested_title) ? r.suggested_title : r.title;
-              const useAuthor = (r.confidence < 50 && r.suggested_author) ? r.suggested_author : (r.author || g.metadata.author);
-
-              return {
-                ...g,
-                metadata: {
-                  ...g.metadata,
-                  title: useTitle || g.metadata.title,
-                  author: useAuthor || g.metadata.author,
-                  subtitle: r.subtitle || g.metadata.subtitle,
-                  // Store suggestions for UI display
-                  title_suggestion: r.suggested_title || null,
-                  author_suggestion: r.suggested_author || null,
-                  suggestion_source: r.suggestion_source || null,
-                  title_confidence: r.confidence,
-                  // NOTE: series/sequence NOT updated here - use Fix Series button
-                },
-                total_changes: (g.total_changes || 0) + 1,
-              };
-            } else {
-              failedCount++;
-            }
+            return {
+              ...g,
+              metadata: {
+                ...g.metadata,
+                title: useTitle || g.metadata.title,
+                author: useAuthor || g.metadata.author,
+                subtitle: r.subtitle || g.metadata.subtitle,
+                // Store suggestions for UI display
+                title_suggestion: r.suggested_title || null,
+                author_suggestion: r.suggested_author || null,
+                suggestion_source: r.suggestion_source || null,
+                title_confidence: r.confidence,
+                // NOTE: series/sequence NOT updated here - use Fix Series button
+              },
+              total_changes: (g.total_changes || 0) + 1,
+            };
           }
           return g;
         });
@@ -917,6 +967,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     let fixedCount = 0;
     let skippedCount = 0;
     let failedCount = 0;
+    // M14: accumulate per-book results across chunks so the "Show details"
+    // toast action can scroll to the first errored book from FRESH data,
+    // instead of reading a stale `groups` closure that predates setGroups.
+    const authorErrorResults = [];
 
     // Listen for per-book progress events within each chunk
     let authorChunkOffset = 0;
@@ -979,6 +1033,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           fixedCount += result.total_fixed;
           skippedCount += result.total_skipped;
           failedCount += result.total_failed;
+          authorErrorResults.push(...result.results);
         }
 
         // Update progress after batch
@@ -1009,7 +1064,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (failedCount > 0 || authorWarnings > 0) {
       const summary = summarizeBatch({ op: 'authors', succeeded: fixedCount, skipped: skippedCount, warnings: authorWarnings, failed: failedCount });
       if (summary) {
-        const opts = { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(groups, summary.hasFailures ? 'error' : 'warn') } };
+        const opts = { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(authorErrorResults, summary.hasFailures ? 'error' : 'warn') } };
         toast[summary.type](summary.title, summary.message, opts);
       }
     }
@@ -1023,13 +1078,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
-    const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    // H3: read live groups so a Run All chain sees prior steps' merges.
+    const currentGroups = groupsRef.current;
+    const selectedGroups = allSelected ? currentGroups : currentGroups.filter(g => selectedGroupIds.has(g.id));
     batch.start('years', { total: selectedGroups.length, fixed: 0, skipped: 0 });
 
 
     let fixedCount = 0;
     let skippedCount = 0;
     let failedCount = 0;
+    // M14: accumulate per-book results across chunks for the fresh-data
+    // "Show details" scroll (see Fix Authors above).
+    const yearErrorResults = [];
 
     // Listen for per-book progress events within each chunk
     let yearChunkOffset = 0;
@@ -1090,10 +1150,23 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
                 newTags.push(yearResult.pub_tag);
               }
 
-              if (!yearResult.fixed) return {
-                ...g,
-                metadata: { ...g.metadata, tags: newTags },
-              };
+              // Skipped (year already valid) but we still stamped a pub- tag:
+              // M8 - record that as a real change so it counts toward the diff
+              // and shows as a changed field, otherwise the new tag never gets
+              // written on Write Tags.
+              if (!yearResult.fixed) {
+                if (yearResult.pub_tag) {
+                  const fields = new Set(g.changedFields || []);
+                  fields.add('tags');
+                  return {
+                    ...g,
+                    metadata: { ...g.metadata, tags: newTags },
+                    total_changes: (g.total_changes || 0) + 1,
+                    changedFields: [...fields],
+                  };
+                }
+                return { ...g, metadata: { ...g.metadata, tags: newTags } };
+              }
 
 
               const fields = new Set(g.changedFields || []);
@@ -1115,6 +1188,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           fixedCount += result.total_fixed;
           skippedCount += result.total_skipped;
           failedCount += result.total_failed;
+          yearErrorResults.push(...result.results);
         }
 
         // Update progress after batch
@@ -1144,10 +1218,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (failedCount > 0) {
       const summary = summarizeBatch({ op: 'years', succeeded: fixedCount, skipped: skippedCount, warnings: 0, failed: failedCount });
       if (summary) {
-        const opts = { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(groups, 'error') } };
+        const opts = { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(yearErrorResults, 'error') } };
         toast[summary.type](summary.title, summary.message, opts);
       }
     }
+
+    // M2: this flow read gather hints from gatheredDataRef; clear them when
+    // running standalone so a later unrelated flow doesn't reuse stale data.
+    // Guarded so a Run All step never nulls the shared ref mid-sequence.
+    if (!runAllActiveRef.current) gatheredDataRef.current = null;
 
     // Clear progress after a short delay
     batch.end('years', 1500);
@@ -1324,34 +1403,45 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         })
       );
 
+      // M3: compute counts from the results array before the updater (avoids
+      // StrictMode double-count and the async-commit race).
+      for (const res of results) {
+        const v = res.status === 'fulfilled' ? res.value : null;
+        if (v && v.result && v.result.success && v.result.result) successCount++;
+        else failedCount++;
+      }
+
       // Update groups with new series/sequence ONLY
       setGroups(prevGroups => {
         return prevGroups.map(g => {
           const batchResult = results.find(r => r.status === 'fulfilled' && r.value.groupId === g.id);
-          if (batchResult && batchResult.status === 'fulfilled') {
-            const { result } = batchResult.value;
-            if (result.success && result.result) {
-              const r = result.result;
-              successCount++;
-              const newSeries = r.series || g.metadata.series;
-              const newSequence = r.sequence || g.metadata.sequence;
-              // Update all_series array to keep UI in sync
-              const newAllSeries = newSeries
-                ? [{ name: newSeries, sequence: newSequence }, ...(g.metadata.all_series || []).filter(s => s.name !== newSeries).slice(0)]
-                : g.metadata.all_series;
-              return {
-                ...g,
-                metadata: {
-                  ...g.metadata,
-                  series: newSeries,
-                  sequence: newSequence,
-                  all_series: newAllSeries,
-                },
-                total_changes: (g.total_changes || 0) + 1,
-              };
-            } else {
-              failedCount++;
-            }
+          if (!batchResult) return g;
+          const { result, error } = batchResult.value;
+          // CR-2: rejected/error branch has no `result`. Guard before use so a
+          // single failed lookup can't throw inside the updater. Surface the
+          // failure as a per-book error pill.
+          if (!result) {
+            const message = error?.message ? String(error.message) : 'Series lookup failed';
+            return { ...g, lastError: { stage: 'resolve', kind: 'network', message, severity: 'error' } };
+          }
+          if (result.success && result.result) {
+            const r = result.result;
+            const newSeries = r.series || g.metadata.series;
+            const newSequence = r.sequence || g.metadata.sequence;
+            // Update all_series array to keep UI in sync
+            const newAllSeries = newSeries
+              ? [{ name: newSeries, sequence: newSequence }, ...(g.metadata.all_series || []).filter(s => s.name !== newSeries).slice(0)]
+              : g.metadata.all_series;
+            return {
+              ...g,
+              metadata: {
+                ...g.metadata,
+                series: newSeries,
+                sequence: newSequence,
+                all_series: newAllSeries,
+              },
+              total_changes: (g.total_changes || 0) + 1,
+            };
           }
           return g;
         });
@@ -1410,14 +1500,20 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         })
       );
 
+      // M3: compute counts from the results array before the updater.
+      for (const res of results) {
+        const v = res.status === 'fulfilled' ? res.value : null;
+        if (v && v.result && v.result.success && v.result.age_category) successCount++;
+        else failedCount++;
+      }
+
       // Update groups with new age ratings
       setGroups(prevGroups => {
         return prevGroups.map(g => {
           const batchResult = results.find(r => r.status === 'fulfilled' && r.value.groupId === g.id);
           if (batchResult && batchResult.status === 'fulfilled') {
             const { result } = batchResult.value;
-            if (result.success && result.age_category) {
-              successCount++;
+            if (result && result.success && result.age_category) {
               let newGenres = [...(g.metadata?.genres || [])];
               const ageCategory = result.age_category;
 
@@ -1446,8 +1542,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
                 },
                 total_changes: (g.total_changes || 0) + 1,
               };
-            } else {
-              failedCount++;
             }
           }
           return g;
@@ -1471,7 +1565,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     batch.start('isbn', {});
-    const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    // H3: read live groups so a Run All chain sees prior steps' merges.
+    const currentGroups = groupsRef.current;
+    const selectedGroups = allSelected ? currentGroups : currentGroups.filter(g => selectedGroupIds.has(g.id));
 
     // Smart skip: only look up books missing ISBN/ASIN unless forceFresh
     const needsIsbn = (g) => {
@@ -1527,14 +1623,20 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         })
       );
 
+      // M3: compute counts from the results array before the updater.
+      for (const res of results) {
+        const v = res.status === 'fulfilled' ? res.value : null;
+        if (v && v.result && v.result.success && (v.result.isbn || v.result.asin)) successCount++;
+        else failedCount++;
+      }
+
       // Update groups with ISBN/ASIN
       setGroups(prevGroups => {
         return prevGroups.map(g => {
           const batchResult = results.find(r => r.status === 'fulfilled' && r.value.groupId === g.id);
           if (batchResult && batchResult.status === 'fulfilled') {
             const { result } = batchResult.value;
-            if (result.success && (result.isbn || result.asin)) {
-              successCount++;
+            if (result && result.success && (result.isbn || result.asin)) {
               const fields = new Set(g.changedFields || []);
               if (result.isbn) fields.add('isbn');
               if (result.asin) fields.add('asin');
@@ -1548,8 +1650,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
                 total_changes: (g.total_changes || 0) + 1,
                 changedFields: [...fields],
               };
-            } else {
-              failedCount++;
             }
           }
           return g;
@@ -1571,6 +1671,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       if (failedCount > 0) parts.push(`${failedCount} not found`);
       toast.success('ISBN Lookup Complete', parts.join(', '));
     }
+
+    // M2: ISBN lookup reads gather hints from gatheredDataRef; clear them when
+    // standalone. Guarded so a Run All step never nulls the shared ref.
+    if (!runAllActiveRef.current) gatheredDataRef.current = null;
+
     batch.end('isbn');
   };
 
@@ -1580,7 +1685,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const handleMetadataResolution = async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
-    const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    // H3: read the LIVE groups (via ref) so that when Run All chains this step
+    // after an earlier one, we build payloads from the prior step's merged
+    // metadata, not a stale render snapshot. Standalone use is unaffected
+    // (groupsRef stays in sync with groups at rest).
+    const currentGroups = groupsRef.current;
+    const selectedGroups = allSelected ? currentGroups : currentGroups.filter(g => selectedGroupIds.has(g.id));
 
     // Smart skip: only process books with missing/suspect metadata unless forceFresh
     const needsMetadata = (g) => {
@@ -1731,8 +1841,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       batch.update('metadata', { current: booksToProcess.length, success: processed, failed, currentBook: 'Complete' });
       const summary = summarizeBatch({ op: 'resolve', succeeded: processed, skipped, warnings, failed });
       if (summary) {
+        const errResults = result.results || [];
         const opts = (summary.hasWarnings || summary.hasFailures)
-          ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(groups, summary.hasFailures ? 'error' : 'warn') } }
+          ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(errResults, summary.hasFailures ? 'error' : 'warn') } }
           : undefined;
         toast[summary.type](summary.title, summary.message, opts);
       }
@@ -1741,6 +1852,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       console.error('Metadata resolution error:', e);
       toast.error('Metadata Resolution Failed', e.toString());
     }
+    // M2: fix-metadata standalone may have populated gatheredDataRef via the
+    // inline gather; clear it so it doesn't leak into a later flow. Guarded so
+    // a Run All step never nulls the shared ref mid-sequence.
+    if (!runAllActiveRef.current) gatheredDataRef.current = null;
     batch.end('metadata', 2000);
   };
 
@@ -1750,7 +1865,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const handleDescriptionProcessing = async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
-    const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    // H3: read live groups so a Run All chain sees prior steps' merges.
+    const currentGroups = groupsRef.current;
+    const selectedGroups = allSelected ? currentGroups : currentGroups.filter(g => selectedGroupIds.has(g.id));
 
     // Smart skip: only process books with missing/short/bad descriptions unless forceFresh
     const needsDescription = (g) => {
@@ -1828,8 +1945,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       ).length;
       const descSummary = summarizeBatch({ op: 'description', succeeded: processed, skipped: skippedDesc, warnings: descWarnings, failed });
       if (descSummary) {
+        const errResults = result.results || [];
         const opts = (descSummary.hasWarnings || descSummary.hasFailures)
-          ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(groups, descSummary.hasFailures ? 'error' : 'warn') } }
+          ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(errResults, descSummary.hasFailures ? 'error' : 'warn') } }
           : undefined;
         toast[descSummary.type](descSummary.title, descSummary.message, opts);
       }
@@ -1849,6 +1967,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
+    // M2: mark Run All active so the standalone gatheredDataRef clears inside
+    // the step handlers no-op and don't wipe the shared gather hints out from
+    // under a later step. Reset in the finally no matter how we exit.
+    runAllActiveRef.current = true;
+
     // Phase 1: Gather all external API data upfront
     const totalSteps = 6; // gather + 5 enrichment steps
     batch.start('enrichment', {
@@ -1856,85 +1979,86 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       currentBook: 'Step 1/6: Gathering external data (ABS, Goodreads, Open Library, Google Books)...',
     });
 
-
-    const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-
     try {
-      const gatherBooks = selectedGroups.map(g => ({
-        id: g.id,
-        title: g.metadata?.title || g.group_name || '',
-        author: g.metadata?.author || '',
-        asin: g.metadata?.asin || null,
-        isbn: g.metadata?.isbn || null,
-      }));
-
-      const gatherResult = await callBackend('gather_external_data', { books: gatherBooks, config });
-
-      // Store gathered data in a Map keyed by book ID
-      const dataMap = new Map();
-      for (const item of (gatherResult.results || [])) {
-        dataMap.set(item.id, item);
-      }
-      gatheredDataRef.current = dataMap;
-    } catch (error) {
-      console.error('❌ Phase 1 (gather) failed:', error);
-      gatheredDataRef.current = null;
-      // Continue anyway, individual steps will fall back to their own API calls
-    }
-
-    batch.update('enrichment', {
-      current: 1,
-      success: 1,
-      currentBook: 'Finished gathering external data',
-    });
-
-    await new Promise(resolve => setTimeout(resolve, 300));
-
-    // Phase 2: Run enrichment steps sequentially (GPT-heavy, using pre-fetched data)
-    const steps = [
-      { name: 'Metadata Resolution (title, subtitle, author, series)', fn: handleMetadataResolution },
-      { name: 'ISBN/ASIN Lookup', fn: handleLookupISBN },
-      { name: 'Publication Year', fn: handleFixYears },
-      { name: 'Classification & Tagging (genres, tags, age, DNA)', fn: () => handleClassifyAll(false) },
-      { name: 'Description Processing (validate, clean, generate)', fn: handleDescriptionProcessing },
-    ];
-
-    let successCount = 1; // gather phase counted as 1
-    let failedCount = 0;
-
-    for (let i = 0; i < steps.length; i++) {
-      const step = steps[i];
-      const stepNum = i + 2; // offset by 1 for gather phase
-      batch.update('enrichment', {
-        current: stepNum - 1,
-        currentBook: `Step ${stepNum}/${totalSteps}: ${step.name}`,
-      });
+      const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
 
       try {
-        await step.fn();
-        successCount++;
+        const gatherBooks = selectedGroups.map(g => ({
+          id: g.id,
+          title: g.metadata?.title || g.group_name || '',
+          author: g.metadata?.author || '',
+          asin: g.metadata?.asin || null,
+          isbn: g.metadata?.isbn || null,
+        }));
+
+        const gatherResult = await callBackend('gather_external_data', { books: gatherBooks, config });
+
+        // Store gathered data in a Map keyed by book ID
+        const dataMap = new Map();
+        for (const item of (gatherResult.results || [])) {
+          dataMap.set(item.id, item);
+        }
+        gatheredDataRef.current = dataMap;
       } catch (error) {
-        console.error(`❌ ${step.name} failed:`, error);
-        failedCount++;
+        console.error('❌ Phase 1 (gather) failed:', error);
+        gatheredDataRef.current = null;
+        // Continue anyway, individual steps will fall back to their own API calls
       }
 
       batch.update('enrichment', {
-        current: stepNum,
-        success: successCount,
-        failed: failedCount,
-        currentBook: stepNum < totalSteps ? `Finished ${step.name}` : 'Complete!',
+        current: 1,
+        success: 1,
+        currentBook: 'Finished gathering external data',
       });
 
-      if (i + 1 < steps.length) {
-        await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 300));
+
+      // Phase 2: Run enrichment steps sequentially (GPT-heavy, using pre-fetched data)
+      const steps = [
+        { name: 'Metadata Resolution (title, subtitle, author, series)', fn: handleMetadataResolution },
+        { name: 'ISBN/ASIN Lookup', fn: handleLookupISBN },
+        { name: 'Publication Year', fn: handleFixYears },
+        { name: 'Classification & Tagging (genres, tags, age, DNA)', fn: () => handleClassifyAll(false) },
+        { name: 'Description Processing (validate, clean, generate)', fn: handleDescriptionProcessing },
+      ];
+
+      let successCount = 1; // gather phase counted as 1
+      let failedCount = 0;
+
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        const stepNum = i + 2; // offset by 1 for gather phase
+        batch.update('enrichment', {
+          current: stepNum - 1,
+          currentBook: `Step ${stepNum}/${totalSteps}: ${step.name}`,
+        });
+
+        try {
+          await step.fn();
+          successCount++;
+        } catch (error) {
+          console.error(`❌ ${step.name} failed:`, error);
+          failedCount++;
+        }
+
+        batch.update('enrichment', {
+          current: stepNum,
+          success: successCount,
+          failed: failedCount,
+          currentBook: stepNum < totalSteps ? `Finished ${step.name}` : 'Complete!',
+        });
+
+        if (i + 1 < steps.length) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
       }
+    } finally {
+      // Clear gathered data and release the guard no matter how we exit, so a
+      // future standalone flow starts clean and its M2 clear works again.
+      gatheredDataRef.current = null;
+      runAllActiveRef.current = false;
+      batch.end('enrichment', 2000);
     }
-
-    // Clear gathered data
-    gatheredDataRef.current = null;
-
-
-    batch.end('enrichment', 2000);
   };
 
   // ✅ GPT-powered tag assignment for selected books (with progress)
@@ -2185,7 +2309,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
-    const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    // H3: read live groups so a Run All chain sees prior steps' merges.
+    const currentGroups = groupsRef.current;
+    const selectedGroups = allSelected ? currentGroups : currentGroups.filter(g => selectedGroupIds.has(g.id));
 
     // Smart skip: only process books missing genres, tags, or age rating unless forceFresh
     const needsClassification = (g) => {
@@ -2281,13 +2407,14 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           // Genres
           if (r.genres?.length > 0) updatedMeta.genres = r.genres;
 
-          // Tags: merge classification tags + DNA tags + age tags (dedup)
-          const allTags = new Set([
-            ...(r.tags || []),
-            ...(r.dna_tags || []),
-            ...(r.age_tags || []),
-          ]);
-          updatedMeta.tags = [...allTags];
+          // Tags: H1 - only fully replace tags when the AI returned top-level
+          // classification tags; when only DNA/age tags come back, merge them
+          // additively so curated tags survive. See mergeClassifyTags for the
+          // full rationale and unit tests. The old inline code always did
+          // tags = [...new Set([...r.tags, ...dna, ...age])], which wiped every
+          // curated tag on the common DNA-only sub-step.
+          const { tags: mergedTags, changed: tagsChanged } = mergeClassifyTags(updatedMeta.tags, r);
+          updatedMeta.tags = mergedTags;
 
           // Themes & tropes
           if (r.themes?.length > 0) updatedMeta.themes = r.themes;
@@ -2300,7 +2427,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
           const fields = new Set(isForceReset ? [] : (g.changedFields || []));
           if (r.genres?.length > 0) fields.add('genres');
-          if (allTags.size > 0) fields.add('tags');
+          if (tagsChanged) fields.add('tags');
           if (r.themes?.length > 0) fields.add('themes');
           if (r.tropes?.length > 0) fields.add('tropes');
           if (r.description && r.description_changed) fields.add('description');
@@ -2333,8 +2460,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       ).length;
       const classifySummary = summarizeBatch({ op: 'classify', succeeded: successCount, skipped: skippedClassify, warnings: classifyWarnings, failed: failedCount });
       if (classifySummary) {
+        const errResults = result.results || [];
         const opts = (classifySummary.hasWarnings || classifySummary.hasFailures)
-          ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(groups, classifySummary.hasFailures ? 'error' : 'warn') } }
+          ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(errResults, classifySummary.hasFailures ? 'error' : 'warn') } }
           : undefined;
         toast[classifySummary.type](classifySummary.title, classifySummary.message, opts);
       }
@@ -2690,8 +2818,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       for (const validation of Object.values(validationResults)) {
         if (validation?.issues) {
           for (const issue of validation.issues) {
-            // Only count fixable issues (with suggested_value)
-            if (issue.suggested_value) {
+            // Only count fixable issues (with suggested_value). Use != null so
+            // a legitimate 0 (e.g. sequence 0) counts as fixable, matching the
+            // != null semantics used elsewhere in this branch.
+            if (issue.suggested_value != null) {
               validationFixCount++;
               byType[issue.issue_type] = (byType[issue.issue_type] || 0) + 1;
             }
@@ -3239,9 +3369,36 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           onConfirm={async () => {
             try {
               const actualSelectedFiles = getSelectedFileIds(groups);
-              await renameFiles(actualSelectedFiles);
+              const renameResult = await renameFiles(actualSelectedFiles);
               modals.close('rename');
-              await handleScan();
+
+              // M6: do NOT call handleScan() here. handleScan opens a folder
+              // picker and, if the user cancels, drops the entire in-memory
+              // session - every curated edit is lost just for renaming files.
+              // Instead patch each renamed file's path/filename in place from
+              // the rename result mapping (preview_rename returns { old_path,
+              // new_path }, so the batch result carries the same pair shape).
+              // Guard for a missing/stubbed result so nothing throws.
+              const renamed = renameResult?.renamed || renameResult?.results || [];
+              const pathMap = new Map();
+              for (const r of renamed) {
+                const oldPath = r?.old_path ?? r?.oldPath;
+                const newPath = r?.new_path ?? r?.newPath;
+                if (oldPath && newPath) pathMap.set(oldPath, newPath);
+              }
+              if (pathMap.size > 0) {
+                setGroups(prev => prev.map(g => {
+                  if (!(g.files || []).some(f => pathMap.has(f.path))) return g;
+                  return {
+                    ...g,
+                    files: g.files.map(f => {
+                      const np = pathMap.get(f.path);
+                      if (!np) return f;
+                      return { ...f, path: np, filename: np.split('/').pop() };
+                    }),
+                  };
+                }));
+              }
             } catch (error) {
               console.error('Rename failed:', error);
             }
