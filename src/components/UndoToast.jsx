@@ -1,13 +1,27 @@
 import { useState, useEffect } from 'react';
 import { Undo2, X, Clock, Loader2 } from 'lucide-react';
 
-export function UndoToast({ booksCount, ageSeconds, onUndo, onDismiss, undoing }) {
-  const [timeRemaining, setTimeRemaining] = useState(3600 - ageSeconds);
+const AUTO_DISMISS_SECONDS = 30;
 
-  // Countdown timer - undo expires after 1 hour
+export function UndoToast({ booksCount, ageSeconds = 0, onUndo, onDismiss, undoing }) {
+  // Time the undo action itself stays available (1 hour), shown as text.
+  const [timeRemaining, setTimeRemaining] = useState(3600 - ageSeconds);
+  // L4: separate countdown driving the auto-dismiss progress bar (30s).
+  const [dismissRemaining, setDismissRemaining] = useState(AUTO_DISMISS_SECONDS);
+
+  // Countdown timer - undo availability text (does not itself dismiss the toast).
   useEffect(() => {
     const interval = setInterval(() => {
-      setTimeRemaining(prev => {
+      setTimeRemaining(prev => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Auto-dismiss after 30 seconds, ticking every second so the progress bar
+  // below actually tracks the countdown it claims.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDismissRemaining(prev => {
         if (prev <= 1) {
           clearInterval(interval);
           onDismiss();
@@ -16,17 +30,7 @@ export function UndoToast({ booksCount, ageSeconds, onUndo, onDismiss, undoing }
         return prev - 1;
       });
     }, 1000);
-
     return () => clearInterval(interval);
-  }, [onDismiss]);
-
-  // Auto-dismiss after 30 seconds
-  useEffect(() => {
-    const timeout = setTimeout(() => {
-      onDismiss();
-    }, 30000);
-
-    return () => clearTimeout(timeout);
   }, [onDismiss]);
 
   const formatTime = (seconds) => {
@@ -41,7 +45,7 @@ export function UndoToast({ booksCount, ageSeconds, onUndo, onDismiss, undoing }
     <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 fade-in duration-300">
       <div className="bg-neutral-950 text-white rounded-xl shadow-2xl px-5 py-4 flex items-center gap-4 min-w-[320px]">
         {/* Icon */}
-        <div className="p-2 bg-blue-900/300/20 rounded-lg">
+        <div className="p-2 bg-blue-500/20 rounded-lg">
           <Undo2 className="w-5 h-5 text-blue-400" />
         </div>
 
@@ -86,11 +90,11 @@ export function UndoToast({ booksCount, ageSeconds, onUndo, onDismiss, undoing }
         </div>
       </div>
 
-      {/* Progress bar showing auto-dismiss */}
+      {/* Progress bar showing the 30s auto-dismiss countdown */}
       <div className="h-1 bg-neutral-800 rounded-b-xl overflow-hidden -mt-1">
         <div
-          className="h-full bg-blue-900/300 transition-all duration-1000 ease-linear"
-          style={{ width: `${(timeRemaining / 3600) * 100}%` }}
+          className="h-full bg-blue-500 transition-all duration-1000 ease-linear"
+          style={{ width: `${(dismissRemaining / AUTO_DISMISS_SECONDS) * 100}%` }}
         />
       </div>
     </div>

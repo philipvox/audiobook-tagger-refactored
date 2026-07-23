@@ -3165,9 +3165,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           fileStatuses={fileStatuses}
           onGroupClick={setSelectedGroup}
           onToggleGroup={(groupId) => {
-            const newExpanded = new Set(expandedGroups);
-            newExpanded.has(groupId) ? newExpanded.delete(groupId) : newExpanded.add(groupId);
-            setExpandedGroups(newExpanded);
+            // L7: single-row expansion. Auto-collapse the previously expanded row
+            // so the manual virtualizer only ever has one variable-height row,
+            // keeping the scroll geometry bounded and correct.
+            setExpandedGroups(prev => (prev.has(groupId) ? new Set() : new Set([groupId])));
           }}
           onSelectGroup={handleSelectGroup}
           onSelectFile={handleGroupClick}

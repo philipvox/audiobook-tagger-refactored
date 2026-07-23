@@ -25,7 +25,9 @@ export function ErrorPill({ detail, severity = 'warn', onDismiss }) {
     } catch { /* clipboard API unavailable */ }
   };
 
-  const shortMsg = detail.message.length > 60 ? detail.message.slice(0, 57) + '...' : detail.message;
+  // L6: detail.message can be absent on some error shapes; fall back to ''.
+  const message = detail.message || '';
+  const shortMsg = message.length > 60 ? message.slice(0, 57) + '...' : message;
 
   return (
     <div
@@ -39,13 +41,13 @@ export function ErrorPill({ detail, severity = 'warn', onDismiss }) {
         onClick={(e) => { e.stopPropagation(); setOpen(o => !o); }}
         className="flex items-center gap-1 px-1.5 py-0.5 font-semibold uppercase"
         aria-expanded={open}
-        aria-label={`${isError ? 'Error' : 'Warning'} at ${detail.stage}: ${detail.message}. Click to ${open ? 'collapse' : 'expand'} details.`}
-        title={detail.message}
+        aria-label={`${isError ? 'Error' : 'Warning'} at ${detail.stage}: ${message}. Click to ${open ? 'collapse' : 'expand'} details.`}
+        title={message}
       >
         <Icon className="w-3 h-3" aria-hidden="true" />
         <span>{detail.stage}</span>
         <span className="opacity-70 normal-case font-normal">
-          {open ? detail.message : shortMsg}
+          {open ? message : shortMsg}
         </span>
       </button>
       {open && (

@@ -1,10 +1,16 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { callBackend } from '../../api';
 import { ErrorPill } from './ErrorPill';
+import { computeListMetrics } from '../../lib/listLayout';
+import { aggregateGroupChanges } from '../../lib/aggregateChanges';
 import { CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, X, Sparkles, FileJson, Cloud, ArrowRight, ArrowUpDown, ArrowUp, ArrowDown, AlertTriangle, AlertCircle, Filter } from 'lucide-react';
 
 // Virtualized item height (approximate) - more compact
 const ITEM_HEIGHT = 80;
+// Approx height of one expanded file row (px-4 py-2 + border). Used only for
+// virtualization geometry; minHeight on the row keeps content from clipping if
+// the estimate is slightly off.
+const FILE_ROW_HEIGHT = 37;
 const BUFFER_SIZE = 10;
 
 // Check if a string looks like a person's name (2-3 words, capitalized)
@@ -110,19 +116,8 @@ const isValidSequence = (seq) => {
 function ChangePreviewTooltip({ group, position }) {
   if (!group || !group.files) return null;
 
-  // Collect all changes from all files in the group
-  const allChanges = {};
-  group.files.forEach(file => {
-    if (file.changes) {
-      Object.entries(file.changes).forEach(([field, change]) => {
-        // Use the first file's change for each field as representative
-        if (!allChanges[field]) {
-          allChanges[field] = change;
-        }
-      });
-    }
-  });
-
+  // L10: union of changed fields across all files (first old/new per field).
+  const allChanges = aggregateGroupChanges(group);
   const changeEntries = Object.entries(allChanges);
   if (changeEntries.length === 0) return null;
 
@@ -683,8 +678,14 @@ export function BookList({
   }
 
   // Calculate total height for virtualization
-  const totalHeight = filteredGroups.length * ITEM_HEIGHT;
-  const offsetY = visibleRange.start * ITEM_HEIGHT;
+  // L7: account for the (single) expanded row's file list in the scroll height
+  // and the translate offset so the last rows aren't clipped and don't overlap.
+  const { totalHeight, offsetY } = computeListMetrics(
+    filteredGroups,
+    expandedGroups,
+    visibleRange.start,
+    { rowHeight: ITEM_HEIGHT, fileRowHeight: FILE_ROW_HEIGHT }
+  );
 
   return (
     <div className="w-2/5 overflow-hidden bg-neutral-950 flex flex-col">
@@ -924,12 +925,12 @@ export function BookList({
                       ? 'bg-neutral-800/50'
                       : 'hover:bg-neutral-900/50'
                   }`}
-                  style={{ height: ITEM_HEIGHT }}
+                  style={{ minHeight: ITEM_HEIGHT }}
                   onClick={(e) => {
                     onSelectFile(group, actualIndex, e, filteredGroups);
                   }}
                 >
-                  <div className="h-full flex items-center gap-4 px-4">
+                  <div className="flex items-center gap-4 px-4" style={{ height: ITEM_HEIGHT }}>
                     {/* Cover thumbnail */}
                     <div className="flex-shrink-0 w-12 h-12 bg-neutral-800 rounded-lg overflow-hidden flex items-center justify-center">
                       {coverCache[group.id] ? (
