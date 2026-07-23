@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, act } from '@testing-library/react';
 import { renderHook } from '@testing-library/react';
-import { AppProvider, useApp } from './AppContext';
+import { AppProvider, useApp, shouldAutoEnableLocalAI } from './AppContext';
 
 // Mock Tauri APIs
 const mockInvoke = vi.fn();
@@ -18,6 +18,37 @@ vi.mock('../api', () => ({
     return () => {};
   },
 }));
+
+describe('shouldAutoEnableLocalAI (M9)', () => {
+  const runningWithModel = { running: true, models: [{ name: 'gemma:2b' }] };
+
+  it('auto-enables when the user has never chosen (use_local_ai undefined) and Ollama is ready', () => {
+    expect(shouldAutoEnableLocalAI({}, runningWithModel)).toBe(true);
+  });
+
+  it('never auto-enables when the user explicitly saved use_local_ai: false', () => {
+    expect(shouldAutoEnableLocalAI({ use_local_ai: false }, runningWithModel)).toBe(false);
+  });
+
+  it('does not re-enable when use_local_ai is already true', () => {
+    expect(shouldAutoEnableLocalAI({ use_local_ai: true }, runningWithModel)).toBe(false);
+  });
+
+  it('does not auto-enable when a cloud key is configured', () => {
+    expect(shouldAutoEnableLocalAI({ openai_api_key: 'sk-x' }, runningWithModel)).toBe(false);
+    expect(shouldAutoEnableLocalAI({ anthropic_api_key: 'sk-ant' }, runningWithModel)).toBe(false);
+  });
+
+  it('does not auto-enable when Ollama is not running or has no models', () => {
+    expect(shouldAutoEnableLocalAI({}, { running: false, models: [{ name: 'x' }] })).toBe(false);
+    expect(shouldAutoEnableLocalAI({}, { running: true, models: [] })).toBe(false);
+    expect(shouldAutoEnableLocalAI({}, null)).toBe(false);
+  });
+
+  it('handles a null config safely', () => {
+    expect(shouldAutoEnableLocalAI(null, runningWithModel)).toBe(false);
+  });
+});
 
 describe('AppContext', () => {
   beforeEach(() => {

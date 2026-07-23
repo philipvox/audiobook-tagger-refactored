@@ -5,6 +5,22 @@ import { isTauri } from '../lib/platform.js';
 
 const AppContext = createContext(null);
 
+/**
+ * Decide whether to auto-enable Local AI on startup.
+ * Only auto-enables when the user has NEVER made an explicit choice
+ * (`use_local_ai === undefined`) and no cloud key is set, and Ollama is
+ * actually running with at least one model. An explicit `false` is a user
+ * decision and is always respected.
+ * Shared by the AppContext startup effect and the SettingsPage poll so the
+ * two paths cannot fight each other.
+ */
+export function shouldAutoEnableLocalAI(config, ollamaStatus) {
+  if (!config) return false;
+  if (config.use_local_ai !== undefined) return false; // explicit user choice
+  if (config.openai_api_key || config.anthropic_api_key) return false;
+  return !!(ollamaStatus?.running && ollamaStatus?.models?.length > 0);
+}
+
 export function AppProvider({ children }) {
   const [config, setConfig] = useState(null);
   const [groups, setGroups] = useState([]);
@@ -42,13 +58,14 @@ export function AppProvider({ children }) {
   // If no AI is configured and Ollama is running with models, auto-enable local AI
   useEffect(() => {
     if (!isTauri() || !config || isLoadingConfig) return;
-    const hasAnyAI = config.openai_api_key || config.anthropic_api_key || config.use_local_ai;
-    if (hasAnyAI) return;
+    // Skip the Ollama probe entirely if the user has an explicit choice or a cloud key.
+    if (config.use_local_ai !== undefined) return;
+    if (config.openai_api_key || config.anthropic_api_key) return;
 
     (async () => {
       try {
         const status = await ollamaCall('ollama_get_status');
-        if (status?.running && status?.models?.length > 0) {
+        if (shouldAutoEnableLocalAI(config, status)) {
           const model = status.models[0].name;
           const newConfig = { ...config, use_local_ai: true, ollama_model: model };
           await callBackend('save_config', { config: newConfig });
