@@ -26,6 +26,8 @@ import { useApp } from '../context/AppContext';
 import { severityForKind } from '../lib/errorDetail';
 import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
 import { mergeClassifyTags } from '../lib/mergeClassifyTags';
+import { applyMetadataToGroup } from '../lib/applyMetadata';
+import { WritePreviewModal } from '../components/WritePreviewModal';
 
 export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoSvg }) {
   const {
@@ -690,14 +692,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             return prevGroups.map(g => {
               const genreResult = result.results.find(r => r.id === g.id);
               if (genreResult && genreResult.changed) {
-                return {
-                  ...g,
-                  metadata: {
-                    ...g.metadata,
-                    genres: genreResult.cleaned_genres,
-                  },
-                  total_changes: (g.total_changes || 0) + 1,
-                };
+                // H2/H6: stamp the cleaned genres into file.changes (genre field).
+                return applyMetadataToGroup(g, { genres: genreResult.cleaned_genres }, ['genre']);
               }
               return g;
             });
@@ -836,22 +832,30 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             const useTitle = (r.confidence < 50 && r.suggested_title) ? r.suggested_title : r.title;
             const useAuthor = (r.confidence < 50 && r.suggested_author) ? r.suggested_author : (r.author || g.metadata.author);
 
-            return {
-              ...g,
-              metadata: {
-                ...g.metadata,
-                title: useTitle || g.metadata.title,
-                author: useAuthor || g.metadata.author,
-                subtitle: r.subtitle || g.metadata.subtitle,
-                // Store suggestions for UI display
+            const newTitle = useTitle || g.metadata.title;
+            const newAuthor = useAuthor || g.metadata.author;
+            const newSubtitle = r.subtitle || g.metadata.subtitle;
+            // H2/H6: stamp title/author/subtitle into file.changes. Only stamp a
+            // field that actually changed so we don't create no-op diffs.
+            const changedFields = [];
+            if (newTitle !== g.metadata.title) changedFields.push('title');
+            if (newAuthor !== g.metadata.author) changedFields.push('author');
+            if (newSubtitle !== g.metadata.subtitle) changedFields.push('subtitle');
+            return applyMetadataToGroup(
+              g,
+              {
+                title: newTitle,
+                author: newAuthor,
+                subtitle: newSubtitle,
+                // Store suggestions for UI display (not stamped as changes)
                 title_suggestion: r.suggested_title || null,
                 author_suggestion: r.suggested_author || null,
                 suggestion_source: r.suggestion_source || null,
                 title_confidence: r.confidence,
                 // NOTE: series/sequence NOT updated here - use Fix Series button
               },
-              total_changes: (g.total_changes || 0) + 1,
-            };
+              changedFields
+            );
           }
           return g;
         });
@@ -914,15 +918,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
               const subResult = result.results.find(r => r.id === g.id);
               if (!subResult || !subResult.fixed || !subResult.subtitle) return g;
 
-
-              return {
-                ...g,
-                metadata: {
-                  ...g.metadata,
-                  subtitle: subResult.subtitle,
-                },
-                total_changes: (g.total_changes || 0) + 1,
-              };
+              // H2/H6: stamp the subtitle change into file.changes.
+              return applyMetadataToGroup(g, { subtitle: subResult.subtitle }, ['subtitle']);
             });
           });
 
@@ -1018,22 +1015,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
               if (!authResult.fixed || !authResult.author) {
                 return lastError ? { ...g, lastError } : g;
               }
-              return {
-                ...g,
-                metadata: {
-                  ...g.metadata,
-                  author: authResult.author,
-                },
-                total_changes: (g.total_changes || 0) + 1,
-                lastError, // undefined clears; preserved only if the AI errored on this book (unlikely on a fixed path, but safe)
-              };
+              // H2/H6: stamp the author change into file.changes so Write Tags
+              // actually writes it (not just group.metadata).
+              const next = applyMetadataToGroup(g, { author: authResult.author }, ['author']);
+              return { ...next, lastError }; // undefined clears; preserved if the AI errored (unlikely on a fixed path, but safe)
             });
           });
 
           fixedCount += result.total_fixed;
           skippedCount += result.total_skipped;
           failedCount += result.total_failed;
-          authorErrorResults.push(...result.results);
+          authorErrorResults.push(...(result.results || []));
         }
 
         // Update progress after batch
@@ -1156,39 +1148,24 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
               // written on Write Tags.
               if (!yearResult.fixed) {
                 if (yearResult.pub_tag) {
-                  const fields = new Set(g.changedFields || []);
-                  fields.add('tags');
-                  return {
-                    ...g,
-                    metadata: { ...g.metadata, tags: newTags },
-                    total_changes: (g.total_changes || 0) + 1,
-                    changedFields: [...fields],
-                  };
+                  // H2/H6/M8: pub- tag stamped even though the year was already
+                  // valid, so it still gets written on Write Tags.
+                  return applyMetadataToGroup(g, { tags: newTags }, ['tags']);
                 }
                 return { ...g, metadata: { ...g.metadata, tags: newTags } };
               }
 
-
-              const fields = new Set(g.changedFields || []);
-              fields.add('year');
-              if (yearResult.pub_tag) fields.add('tags');
-              return {
-                ...g,
-                metadata: {
-                  ...g.metadata,
-                  year: yearResult.year,
-                  tags: newTags,
-                },
-                total_changes: (g.total_changes || 0) + 1,
-                changedFields: [...fields],
-              };
+              // H2/H6: stamp the resolved year (and any pub- tag) into file.changes.
+              const changedFileFields = ['year'];
+              if (yearResult.pub_tag) changedFileFields.push('tags');
+              return applyMetadataToGroup(g, { year: yearResult.year, tags: newTags }, changedFileFields);
             });
           });
 
           fixedCount += result.total_fixed;
           skippedCount += result.total_skipped;
           failedCount += result.total_failed;
-          yearErrorResults.push(...result.results);
+          yearErrorResults.push(...(result.results || []));
         }
 
         // Update progress after batch
@@ -1432,16 +1409,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             const newAllSeries = newSeries
               ? [{ name: newSeries, sequence: newSequence }, ...(g.metadata.all_series || []).filter(s => s.name !== newSeries).slice(0)]
               : g.metadata.all_series;
-            return {
-              ...g,
-              metadata: {
-                ...g.metadata,
-                series: newSeries,
-                sequence: newSequence,
-                all_series: newAllSeries,
-              },
-              total_changes: (g.total_changes || 0) + 1,
-            };
+            // H2/H6: stamp series/sequence into file.changes (only what changed).
+            const changedFileFields = [];
+            if (newSeries !== g.metadata.series) changedFileFields.push('series');
+            if (newSequence !== g.metadata.sequence) changedFileFields.push('sequence');
+            return applyMetadataToGroup(
+              g,
+              { series: newSeries, sequence: newSequence, all_series: newAllSeries },
+              changedFileFields
+            );
           }
           return g;
         });
@@ -1805,17 +1781,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             return lastError ? { ...g, lastError } : g;
           }
 
-          const fields = new Set(g.changedFields || []);
-          if (r.title && r.title !== g.metadata.title) fields.add('title');
-          if (r.author && r.author !== g.metadata.author) fields.add('author');
-          if (r.subtitle && r.subtitle !== g.metadata.subtitle) fields.add('subtitle');
-          if (r.series !== undefined && r.series !== g.metadata.series) fields.add('series');
-          if (r.sequence !== undefined && r.sequence !== g.metadata.sequence) fields.add('sequence');
-          if (r.narrator && r.narrator !== g.metadata.narrator) fields.add('narrator');
-          return {
-            ...g,
-            metadata: {
-              ...g.metadata,
+          // H2/H6: stamp each resolved field that actually changed into
+          // file.changes so Write Tags writes the resolution output.
+          const changedFileFields = [];
+          if (r.title && r.title !== g.metadata.title) changedFileFields.push('title');
+          if (r.author && r.author !== g.metadata.author) changedFileFields.push('author');
+          if (r.subtitle && r.subtitle !== g.metadata.subtitle) changedFileFields.push('subtitle');
+          if (r.series !== undefined && r.series !== g.metadata.series) changedFileFields.push('series');
+          if (r.sequence !== undefined && r.sequence !== g.metadata.sequence) changedFileFields.push('sequence');
+          if (r.narrator && r.narrator !== g.metadata.narrator) changedFileFields.push('narrator');
+          const next = applyMetadataToGroup(
+            g,
+            {
               title: r.title || g.metadata.title,
               author: r.author || g.metadata.author,
               subtitle: r.subtitle || g.metadata.subtitle,
@@ -1823,10 +1800,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
               sequence: r.sequence !== undefined ? r.sequence : g.metadata.sequence,
               narrator: r.narrator || g.metadata.narrator,
             },
-            total_changes: (g.total_changes || 0) + 1,
-            changedFields: [...fields],
-            lastError,
-          };
+            changedFileFields
+          );
+          return { ...next, lastError };
         });
       });
 
@@ -1919,20 +1895,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           // Also try to extract narrator from the new description
           const narratorMatch = r.description?.match(/(?:read|narrated|voiced|performed)\s+by\s+([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)*)/i);
 
-          const fields = new Set(g.changedFields || []);
-          fields.add('description');
-          if (narratorMatch && !g.metadata.narrator) fields.add('narrator');
-
-          return {
-            ...g,
-            metadata: {
-              ...g.metadata,
+          // H2/H6: stamp description (and any extracted narrator) into file.changes.
+          const addNarrator = narratorMatch && !g.metadata.narrator;
+          const changedFileFields = ['description'];
+          if (addNarrator) changedFileFields.push('narrator');
+          return applyMetadataToGroup(
+            g,
+            {
               description: r.description,
-              ...(narratorMatch && !g.metadata.narrator ? { narrator: narratorMatch[1] } : {}),
+              ...(addNarrator ? { narrator: narratorMatch[1] } : {}),
             },
-            total_changes: (g.total_changes || 0) + 1,
-            changedFields: [...fields],
-          };
+            changedFileFields
+          );
         });
       });
 
@@ -2425,27 +2399,35 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             updatedMeta.description = r.description;
           }
 
-          const fields = new Set(isForceReset ? [] : (g.changedFields || []));
-          if (r.genres?.length > 0) fields.add('genres');
-          if (tagsChanged) fields.add('tags');
-          if (r.themes?.length > 0) fields.add('themes');
-          if (r.tropes?.length > 0) fields.add('tropes');
-          if (r.description && r.description_changed) fields.add('description');
-          if (r.age_category && r.age_category !== 'Unknown') fields.add('age');
-          if (r.dna_tags?.length > 0) fields.add('dna');
+          // H2/H6: stamp the writable classification output into file.changes.
+          // genres -> `genre` (comma-joined), tags, and description are what the
+          // write path can embed; themes/tropes/age/dna are ABS-only and stay in
+          // changedFields (below) for the UI + ABS push, but aren't file changes.
+          const changedFileFields = [];
+          if (r.genres?.length > 0) changedFileFields.push('genre');
+          if (tagsChanged) changedFileFields.push('tags');
+          if (r.description && r.description_changed) changedFileFields.push('description');
 
           // Sub-step warning (e.g. classification OK, DNA failed): amber pill.
           // Clear lastError if there was a prior failure and this run succeeded cleanly.
           const lastError = r.errorDetail
             ? { ...r.errorDetail, severity: 'warn' }
             : undefined;
-          return {
-            ...g,
-            metadata: updatedMeta,
-            total_changes: (g.total_changes || 0) + 1,
-            changedFields: [...fields],
-            lastError,
-          };
+
+          // On a force reset, drop the prior changedFields base (matches the old
+          // `isForceReset ? [] : g.changedFields` behavior); the helper unions the
+          // writable fields (genre->genres, tags, description) on top.
+          const next = applyMetadataToGroup(
+            { ...g, changedFields: isForceReset ? [] : (g.changedFields || []) },
+            updatedMeta,
+            changedFileFields
+          );
+          const cf = new Set(next.changedFields);
+          if (r.themes?.length > 0) cf.add('themes');
+          if (r.tropes?.length > 0) cf.add('tropes');
+          if (r.age_category && r.age_category !== 'Unknown') cf.add('age');
+          if (r.dna_tags?.length > 0) cf.add('dna');
+          return { ...next, changedFields: [...cf], lastError };
         });
       });
 
@@ -2544,14 +2526,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
               // If no updates, return unchanged
               if (Object.keys(updates).length === 0) return g;
 
-              return {
-                ...g,
-                metadata: {
-                  ...g.metadata,
-                  ...updates,
-                },
-                total_changes: (g.total_changes || 0) + changes,
-              };
+              // H2/H6: stamp description / narrator into file.changes.
+              const changedFileFields = [];
+              if (updates.description) changedFileFields.push('description');
+              if (updates.narrator) changedFileFields.push('narrator');
+              return applyMetadataToGroup(g, updates, changedFileFields);
             });
           });
 
@@ -3179,7 +3158,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           onInlineEdit={(groupId, field, value) => {
             setGroups(prev => prev.map(g => {
               if (g.id !== groupId) return g;
-              return { ...g, metadata: { ...g.metadata, [field]: value } };
+              // H2/H6: inline edits now stage real file.changes (previously they
+              // only touched group.metadata, so Write Tags dropped them). `field`
+              // is a metadata field name; map the genres array to the `genre`
+              // file-change field, otherwise the names match 1:1.
+              const fileField = field === 'genres' ? 'genre' : field;
+              return applyMetadataToGroup(g, { [field]: value }, [fileField]);
             }));
           }}
           validationData={selectedGroup ? validationResults[selectedGroup.id] : null}
