@@ -1,4 +1,4 @@
-// buildWritePayload — pure builder for the write_tags request (H3).
+// buildWritePayload - pure builder for the write_tags request (H3).
 //
 // Data-preservation constraint: what gets written must equal exactly what the
 // WritePreviewModal showed, minus the rows the user unchecked. The modal renders

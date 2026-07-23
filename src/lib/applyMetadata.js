@@ -1,4 +1,4 @@
-// applyMetadata — the pure write-path bridge for enrichment + inline edits.
+// applyMetadata - the pure write-path bridge for enrichment + inline edits.
 //
 // The core product gap this fixes: enrichment results and inline edits only ever
 // updated `group.metadata`, never `file.changes`. Write Tags builds its payload
@@ -17,7 +17,7 @@
 //     genre), tags, narrator (bare), etc.
 // Only `genre`/`genres` actually differ between the two; FILE_TO_META_FIELD maps
 // it. Fields the write path can't embed (tags, and ABS-only themes/tropes/dna)
-// are still safe to stamp — the backend simply ignores change keys it doesn't
+// are still safe to stamp - the backend simply ignores change keys it doesn't
 // read.
 
 // file.changes field name -> group.changedFields (metadata) field name.

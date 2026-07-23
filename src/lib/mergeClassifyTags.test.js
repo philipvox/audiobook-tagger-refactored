@@ -37,7 +37,7 @@ describe('mergeClassifyTags (H1 curated-tag preservation)', () => {
     });
     expect(changed).toBe(true);
     expect(tags).toEqual(expect.arrayContaining(['fantasy', 'epic', 'dna:pov:third', 'age-adult']));
-    // 'favorite' is NOT preserved on a full replace — replace is intentional
+    // 'favorite' is NOT preserved on a full replace - replace is intentional
     expect(tags).not.toContain('favorite');
   });
 

@@ -1,4 +1,4 @@
-// listFingerprint — a cheap identity fingerprint of the list a selection anchor
+// listFingerprint - a cheap identity fingerprint of the list a selection anchor
 // was taken against (M13).
 //
 // Shift-click range selection stores an anchor INDEX and later indexes back into

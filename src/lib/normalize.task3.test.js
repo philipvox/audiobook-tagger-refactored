@@ -10,7 +10,7 @@ import {
   validateYear,
 } from "./normalize.js";
 
-describe("H-2: cleanAuthorName — co-author corruption", () => {
+describe("H-2: cleanAuthorName - co-author corruption", () => {
   it("still swaps a plain Last, First", () => {
     expect(cleanAuthorName("King, Stephen")).toBe("Stephen King");
   });
