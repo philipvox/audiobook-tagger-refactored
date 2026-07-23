@@ -373,60 +373,65 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         const newMetadata = {
           ...group.metadata,
           ...updates,
-          // Mark source as manual for bulk edited fields
+          // Mark source as manual for bulk edited fields. H1: use key presence
+          // (not truthiness) so an intentional clear (present null) still marks
+          // the field manual rather than being ignored.
           sources: {
             ...group.metadata.sources,
-            ...(updates.author && { author: 'manual' }),
-            ...(updates.narrator && { narrator: 'manual' }),
-            ...(updates.genres && { genres: 'manual' }),
-            ...(updates.publisher && { publisher: 'manual' }),
-            ...(updates.language && { language: 'manual' }),
-            ...(updates.year && { year: 'manual' }),
-            ...(updates.series && { series: 'manual' }),
+            ...('author' in updates && { author: 'manual' }),
+            ...('narrator' in updates && { narrator: 'manual' }),
+            ...('genres' in updates && { genres: 'manual' }),
+            ...('publisher' in updates && { publisher: 'manual' }),
+            ...('language' in updates && { language: 'manual' }),
+            ...('year' in updates && { year: 'manual' }),
+            ...('series' in updates && { series: 'manual' }),
           },
         };
 
-        // Update file changes
+        // Update file changes. H1: an update KEY being present drives the change
+        // (a present null == intentional clear -> stamp an empty new value);
+        // absent keys are left untouched.
         const updatedFiles = (group.files || []).map(file => {
           const changes = { ...file.changes };
 
-          if (updates.author) {
+          if ('author' in updates) {
             const oldAuthor = file.changes.author?.old || '';
-            if (oldAuthor !== updates.author) {
-              changes.author = { old: oldAuthor, new: updates.author };
+            const newAuthor = updates.author || '';
+            if (oldAuthor !== newAuthor) {
+              changes.author = { old: oldAuthor, new: newAuthor };
             }
           }
 
-          if (updates.narrator) {
+          if ('narrator' in updates) {
             const oldNarrator = file.changes.narrator?.old || '';
-            const newNarratorValue = `Narrated by ${updates.narrator}`;
+            const newNarratorValue = updates.narrator ? `Narrated by ${updates.narrator}` : '';
             if (oldNarrator !== newNarratorValue) {
               changes.narrator = { old: oldNarrator, new: newNarratorValue };
             }
           }
 
-          if (updates.genres) {
+          if ('genres' in updates) {
             const oldGenre = file.changes.genre?.old || '';
-            const newGenre = updates.genres.join(', ');
+            const newGenre = (updates.genres || []).join(', ');
             if (oldGenre !== newGenre) {
               changes.genre = { old: oldGenre, new: newGenre };
             }
           }
 
-          if (updates.series !== undefined) {
+          if ('series' in updates) {
             changes.series = { old: '', new: updates.series || '' };
           }
 
-          if (updates.sequence) {
-            changes.sequence = { old: '', new: updates.sequence };
+          if ('sequence' in updates) {
+            changes.sequence = { old: '', new: updates.sequence || '' };
           }
 
-          if (updates.year) {
-            changes.year = { old: file.changes.year?.old || '', new: updates.year };
+          if ('year' in updates) {
+            changes.year = { old: file.changes.year?.old || '', new: updates.year || '' };
           }
 
-          if (updates.publisher) {
-            changes.publisher = { old: '', new: updates.publisher };
+          if ('publisher' in updates) {
+            changes.publisher = { old: '', new: updates.publisher || '' };
           }
 
           return {

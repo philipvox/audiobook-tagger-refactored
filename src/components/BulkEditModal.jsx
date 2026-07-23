@@ -1,6 +1,39 @@
 // src/components/BulkEditModal.jsx
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { X, Save, Users, AlertCircle } from 'lucide-react';
+import { computeBulkUpdates } from '../lib/bulkEditUpdates';
+
+// Compute the value shared by every selected group for a field, or '' if they
+// differ. Used both to prefill inputs (M10) and to skip no-op writes (H1).
+function commonValueOf(selectedGroups, field) {
+  const uniqueValues = new Set(
+    selectedGroups.map(g => {
+      if (field === 'genres') {
+        return g.metadata?.genres?.join(', ') || '';
+      }
+      return g.metadata?.[field] != null ? String(g.metadata[field]) : '';
+    }).filter(v => v)
+  );
+  return uniqueValues.size === 1 ? Array.from(uniqueValues)[0] : '';
+}
+
+// H1: a per-field "Clear" toggle. Rendered as a sibling of the field's main
+// checkbox (not nested inside its <label>) so clicking Clear doesn't also flip
+// the field-enable checkbox.
+function ClearToggle({ active, checked, onToggle }) {
+  if (!active) return null;
+  return (
+    <label className="flex items-center gap-1.5 cursor-pointer text-xs text-gray-500 hover:text-gray-300 flex-shrink-0">
+      <input
+        type="checkbox"
+        checked={!!checked}
+        onChange={onToggle}
+        className="w-3.5 h-3.5 text-red-500 rounded focus:ring-red-500"
+      />
+      Clear
+    </label>
+  );
+}
 
 export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
   const [fieldsToEdit, setFieldsToEdit] = useState({
@@ -15,6 +48,10 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
     content_rating: false,
   });
 
+  // H1: per-field "clear" flags. A checked field left blank is a SKIP; only an
+  // explicit clear intentionally wipes the value across the selection.
+  const [clearFields, setClearFields] = useState({});
+
   const [values, setValues] = useState({
     author: '',
     narrator: '',
@@ -28,47 +65,61 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
     content_rating: '',
   });
 
+  // M10: prefill inputs with the common value when the modal opens (was shown
+  // only as a placeholder before, so the value never survived to save).
+  useEffect(() => {
+    if (!isOpen || !selectedGroups || selectedGroups.length === 0) return;
+    setValues({
+      author: commonValueOf(selectedGroups, 'author'),
+      narrator: commonValueOf(selectedGroups, 'narrator'),
+      genres: commonValueOf(selectedGroups, 'genres'),
+      publisher: commonValueOf(selectedGroups, 'publisher'),
+      language: commonValueOf(selectedGroups, 'language'),
+      year: commonValueOf(selectedGroups, 'year'),
+      series: commonValueOf(selectedGroups, 'series'),
+      sequence: commonValueOf(selectedGroups, 'sequence'),
+      age_rating: commonValueOf(selectedGroups, 'age_rating'),
+      content_rating: commonValueOf(selectedGroups, 'content_rating'),
+    });
+    setFieldsToEdit({
+      author: false, narrator: false, genres: false, publisher: false,
+      language: false, year: false, series: false, age_rating: false, content_rating: false,
+    });
+    setClearFields({});
+  }, [isOpen, selectedGroups]);
+
   if (!isOpen || !selectedGroups || selectedGroups.length === 0) return null;
+
+  const getCommonValue = (field) => commonValueOf(selectedGroups, field);
 
   const handleToggleField = (field) => {
     setFieldsToEdit(prev => ({ ...prev, [field]: !prev[field] }));
+  };
+
+  const handleToggleClear = (field) => {
+    setClearFields(prev => ({ ...prev, [field]: !prev[field] }));
   };
 
   const handleValueChange = (field, value) => {
     setValues(prev => ({ ...prev, [field]: value }));
   };
 
+  // H1/M10: precedence per field = clear > non-empty-and-changed > skip.
+  // Delegated to a pure helper so the semantics are unit-tested.
   const handleSave = () => {
-    const updates = {};
-
-    if (fieldsToEdit.author && values.author.trim()) {
-      updates.author = values.author.trim();
-    }
-    if (fieldsToEdit.narrator && values.narrator.trim()) {
-      updates.narrator = values.narrator.trim();
-    }
-    if (fieldsToEdit.genres && values.genres.trim()) {
-      updates.genres = values.genres.split(',').map(g => g.trim()).filter(g => g).slice(0, 3);
-    }
-    if (fieldsToEdit.publisher && values.publisher.trim()) {
-      updates.publisher = values.publisher.trim();
-    }
-    if (fieldsToEdit.language && values.language) {
-      updates.language = values.language;
-    }
-    if (fieldsToEdit.year && values.year.trim()) {
-      updates.year = values.year.trim();
-    }
-    if (fieldsToEdit.series) {
-      updates.series = values.series.trim() || null;
-      updates.sequence = values.sequence.trim() || null;
-    }
-    if (fieldsToEdit.age_rating && values.age_rating) {
-      updates.age_rating = values.age_rating;
-    }
-    if (fieldsToEdit.content_rating && values.content_rating) {
-      updates.content_rating = values.content_rating;
-    }
+    const commonValues = {
+      author: getCommonValue('author'),
+      narrator: getCommonValue('narrator'),
+      publisher: getCommonValue('publisher'),
+      year: getCommonValue('year'),
+      language: getCommonValue('language'),
+      age_rating: getCommonValue('age_rating'),
+      content_rating: getCommonValue('content_rating'),
+      genres: getCommonValue('genres'),
+      series: getCommonValue('series'),
+      sequence: getCommonValue('sequence'),
+    };
+    const updates = computeBulkUpdates({ fieldsToEdit, clearFields, values, commonValues });
 
     if (Object.keys(updates).length > 0) {
       onSave(updates);
@@ -77,19 +128,6 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
   };
 
   const hasAnyFieldSelected = Object.values(fieldsToEdit).some(v => v);
-
-  // Get common values from selected groups
-  const getCommonValue = (field) => {
-    const uniqueValues = new Set(
-      selectedGroups.map(g => {
-        if (field === 'genres') {
-          return g.metadata?.genres?.join(', ') || '';
-        }
-        return g.metadata?.[field] || '';
-      }).filter(v => v)
-    );
-    return uniqueValues.size === 1 ? Array.from(uniqueValues)[0] : '';
-  };
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -135,13 +173,17 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                 <span className="text-sm font-medium text-gray-300">Author</span>
               </label>
               {fieldsToEdit.author && (
-                <input
-                  type="text"
-                  value={values.author}
-                  onChange={(e) => handleValueChange('author', e.target.value)}
-                  placeholder={getCommonValue('author') || "Enter author name"}
-                  className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
+                <div className="mt-3 flex items-center gap-3">
+                  <input
+                    type="text"
+                    value={clearFields.author ? '' : values.author}
+                    disabled={clearFields.author}
+                    onChange={(e) => handleValueChange('author', e.target.value)}
+                    placeholder={clearFields.author ? 'Will be cleared' : 'Enter author name'}
+                    className="flex-1 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
+                  />
+                  <ClearToggle active={fieldsToEdit.author} checked={clearFields.author} onToggle={() => handleToggleClear('author')} />
+                </div>
               )}
             </div>
 
@@ -157,13 +199,17 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                 <span className="text-sm font-medium text-gray-300">Narrator</span>
               </label>
               {fieldsToEdit.narrator && (
-                <input
-                  type="text"
-                  value={values.narrator}
-                  onChange={(e) => handleValueChange('narrator', e.target.value)}
-                  placeholder={getCommonValue('narrator') || "Enter narrator name"}
-                  className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
+                <div className="mt-3 flex items-center gap-3">
+                  <input
+                    type="text"
+                    value={clearFields.narrator ? '' : values.narrator}
+                    disabled={clearFields.narrator}
+                    onChange={(e) => handleValueChange('narrator', e.target.value)}
+                    placeholder={clearFields.narrator ? 'Will be cleared' : 'Enter narrator name'}
+                    className="flex-1 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
+                  />
+                  <ClearToggle active={fieldsToEdit.narrator} checked={clearFields.narrator} onToggle={() => handleToggleClear('narrator')} />
+                </div>
               )}
             </div>
 
@@ -179,22 +225,29 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                 <span className="text-sm font-medium text-gray-300">Series</span>
               </label>
               {fieldsToEdit.series && (
-                <div className="mt-3 grid grid-cols-3 gap-2">
-                  <input
-                    type="text"
-                    value={values.series}
-                    onChange={(e) => handleValueChange('series', e.target.value)}
-                    placeholder={getCommonValue('series') || "Series name"}
-                    className="col-span-2 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                  <input
-                    type="text"
-                    value={values.sequence}
-                    onChange={(e) => handleValueChange('sequence', e.target.value)}
-                    placeholder="Book #"
-                    className="px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                </div>
+                <>
+                  <div className="mt-3 grid grid-cols-3 gap-2">
+                    <input
+                      type="text"
+                      value={clearFields.series ? '' : values.series}
+                      disabled={clearFields.series}
+                      onChange={(e) => handleValueChange('series', e.target.value)}
+                      placeholder={clearFields.series ? 'Will be cleared' : 'Series name'}
+                      className="col-span-2 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
+                    />
+                    <input
+                      type="text"
+                      value={clearFields.series ? '' : values.sequence}
+                      disabled={clearFields.series}
+                      onChange={(e) => handleValueChange('sequence', e.target.value)}
+                      placeholder="Book #"
+                      className="px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
+                    />
+                  </div>
+                  <div className="mt-2 flex justify-end">
+                    <ClearToggle active={fieldsToEdit.series} checked={clearFields.series} onToggle={() => handleToggleClear('series')} />
+                  </div>
+                </>
               )}
             </div>
 
@@ -212,13 +265,17 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                 </span>
               </label>
               {fieldsToEdit.genres && (
-                <input
-                  type="text"
-                  value={values.genres}
-                  onChange={(e) => handleValueChange('genres', e.target.value)}
-                  placeholder={getCommonValue('genres') || "Fantasy, Adventure, Fiction"}
-                  className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
+                <div className="mt-3 flex items-center gap-3">
+                  <input
+                    type="text"
+                    value={clearFields.genres ? '' : values.genres}
+                    disabled={clearFields.genres}
+                    onChange={(e) => handleValueChange('genres', e.target.value)}
+                    placeholder={clearFields.genres ? 'Will be cleared' : 'Fantasy, Adventure, Fiction'}
+                    className="flex-1 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
+                  />
+                  <ClearToggle active={fieldsToEdit.genres} checked={clearFields.genres} onToggle={() => handleToggleClear('genres')} />
+                </div>
               )}
             </div>
 
@@ -234,13 +291,17 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                 <span className="text-sm font-medium text-gray-300">Publisher</span>
               </label>
               {fieldsToEdit.publisher && (
-                <input
-                  type="text"
-                  value={values.publisher}
-                  onChange={(e) => handleValueChange('publisher', e.target.value)}
-                  placeholder={getCommonValue('publisher') || "Enter publisher name"}
-                  className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
+                <div className="mt-3 flex items-center gap-3">
+                  <input
+                    type="text"
+                    value={clearFields.publisher ? '' : values.publisher}
+                    disabled={clearFields.publisher}
+                    onChange={(e) => handleValueChange('publisher', e.target.value)}
+                    placeholder={clearFields.publisher ? 'Will be cleared' : 'Enter publisher name'}
+                    className="flex-1 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
+                  />
+                  <ClearToggle active={fieldsToEdit.publisher} checked={clearFields.publisher} onToggle={() => handleToggleClear('publisher')} />
+                </div>
               )}
             </div>
 
@@ -257,13 +318,19 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   <span className="text-sm font-medium text-gray-300">Year</span>
                 </label>
                 {fieldsToEdit.year && (
-                  <input
-                    type="text"
-                    value={values.year}
-                    onChange={(e) => handleValueChange('year', e.target.value)}
-                    placeholder="YYYY"
-                    className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
+                  <>
+                    <input
+                      type="text"
+                      value={clearFields.year ? '' : values.year}
+                      disabled={clearFields.year}
+                      onChange={(e) => handleValueChange('year', e.target.value)}
+                      placeholder={clearFields.year ? 'Will be cleared' : 'YYYY'}
+                      className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
+                    />
+                    <div className="mt-2 flex justify-end">
+                      <ClearToggle active={fieldsToEdit.year} checked={clearFields.year} onToggle={() => handleToggleClear('year')} />
+                    </div>
+                  </>
                 )}
               </div>
 
@@ -278,10 +345,12 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   <span className="text-sm font-medium text-gray-300">Language</span>
                 </label>
                 {fieldsToEdit.language && (
+                  <>
                   <select
-                    value={values.language}
+                    value={clearFields.language ? '' : values.language}
+                    disabled={clearFields.language}
                     onChange={(e) => handleValueChange('language', e.target.value)}
-                    className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
                   >
                     <option value="">Select...</option>
                     <option value="en">English</option>
@@ -293,6 +362,10 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                     <option value="ja">Japanese</option>
                     <option value="zh">Chinese</option>
                   </select>
+                  <div className="mt-2 flex justify-end">
+                    <ClearToggle active={fieldsToEdit.language} checked={clearFields.language} onToggle={() => handleToggleClear('language')} />
+                  </div>
+                  </>
                 )}
               </div>
             </div>
@@ -310,10 +383,12 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   <span className="text-sm font-medium text-gray-300">Age Rating</span>
                 </label>
                 {fieldsToEdit.age_rating && (
+                  <>
                   <select
-                    value={values.age_rating}
+                    value={clearFields.age_rating ? '' : values.age_rating}
+                    disabled={clearFields.age_rating}
                     onChange={(e) => handleValueChange('age_rating', e.target.value)}
-                    className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
                   >
                     <option value="">Select...</option>
                     <option value="Childrens">Children's</option>
@@ -321,6 +396,10 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                     <option value="Young Adult">Young Adult</option>
                     <option value="Adult">Adult</option>
                   </select>
+                  <div className="mt-2 flex justify-end">
+                    <ClearToggle active={fieldsToEdit.age_rating} checked={clearFields.age_rating} onToggle={() => handleToggleClear('age_rating')} />
+                  </div>
+                  </>
                 )}
               </div>
 
@@ -335,10 +414,12 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                   <span className="text-sm font-medium text-gray-300">Content Rating</span>
                 </label>
                 {fieldsToEdit.content_rating && (
+                  <>
                   <select
-                    value={values.content_rating}
+                    value={clearFields.content_rating ? '' : values.content_rating}
+                    disabled={clearFields.content_rating}
                     onChange={(e) => handleValueChange('content_rating', e.target.value)}
-                    className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full mt-3 px-3 py-2 text-sm border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50"
                   >
                     <option value="">Select...</option>
                     <option value="G">G - General Audiences</option>
@@ -347,6 +428,10 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
                     <option value="R">R - Restricted</option>
                     <option value="X">X - Adults Only</option>
                   </select>
+                  <div className="mt-2 flex justify-end">
+                    <ClearToggle active={fieldsToEdit.content_rating} checked={clearFields.content_rating} onToggle={() => handleToggleClear('content_rating')} />
+                  </div>
+                  </>
                 )}
               </div>
             </div>
