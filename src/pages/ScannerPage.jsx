@@ -589,6 +589,37 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
       if (result.success > 0) {
         toast.success('Write Complete', `Successfully wrote ${result.success} file${result.success > 1 ? 's' : ''}.`);
+
+        // Post-write staging: clear the file.changes entries that were actually
+        // written so the same edits are not re-offered on the next write (and undo
+        // journals are not overwritten by a no-op re-write). Only files reported
+        // `success` are cleared; excluded `fileId:field` pairs stay staged, and
+        // group.metadata / changedFields are left intact (they drive the ABS push).
+        const excluded = excludedChanges instanceof Set ? excludedChanges : new Set();
+        const writtenFileIds = new Set(
+          (result.results || [])
+            .filter(r => r.status === 'success' && r.file_id != null)
+            .map(r => r.file_id)
+        );
+        if (writtenFileIds.size > 0) {
+          setGroups(prev => prev.map(g => {
+            if (!(g.files || []).some(f => writtenFileIds.has(f.id))) return g;
+            return {
+              ...g,
+              files: g.files.map(f => {
+                if (!writtenFileIds.has(f.id) || !f.changes) return f;
+                const kept = {};
+                for (const [field, change] of Object.entries(f.changes)) {
+                  // A field the user unchecked in the preview was NOT written, so
+                  // it stays staged; everything else was written and is cleared.
+                  if (excluded.has(`${f.id}:${field}`)) kept[field] = change;
+                }
+                return { ...f, changes: kept };
+              }),
+            };
+          }));
+        }
+
         handleClearSelection();
         // Check undo status after successful write
         await checkUndoStatus();
@@ -3442,6 +3473,16 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
               }));
               modals.close('rename');
               toast.success('Files Renamed', `Renamed ${pathMap.size} file${pathMap.size === 1 ? '' : 's'}.`);
+              // Truthful partial-failure: some pairs applied, others did not.
+              // Surface the failed count alongside the success toast (not gated
+              // behind the all-failed early return above).
+              const renameFailed = renameResult?.failed || 0;
+              if (renameFailed > 0) {
+                toast.error(
+                  'Some Renames Failed',
+                  `${renameFailed} file${renameFailed === 1 ? '' : 's'} could not be renamed. Check console for details.`
+                );
+              }
             } catch (error) {
               console.error('Rename failed:', error);
               toast.error('Rename Failed', error?.message || String(error));

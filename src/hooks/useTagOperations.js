@@ -38,8 +38,12 @@ export function useTagOperations() {
       });
 
       const newStatuses = {};
+      // Guard result.errors: the browser stub returns `{ _stub: true }` with no
+      // errors array, so an unguarded .some() would throw a TypeError and turn a
+      // legible "not available" toast into a crash.
+      const writeErrors = result?.errors || [];
       idsToWrite.forEach(fileId => {
-        const hasError = result.errors.some(e => e.file_id === fileId);
+        const hasError = writeErrors.some(e => e.file_id === fileId);
         newStatuses[fileId] = hasError ? 'failed' : 'success';
       });
       updateFileStatuses(newStatuses);

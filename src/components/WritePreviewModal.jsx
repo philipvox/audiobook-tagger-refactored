@@ -1,6 +1,13 @@
 import { useState, useMemo, useCallback } from 'react';
 import { X, FileAudio, AlertTriangle, CheckCircle, Zap, Check, Square, CheckSquare } from 'lucide-react';
 
+// Fields that live only in AudiobookShelf and are NOT embeddable in the audio
+// file's tags (the Rust writer reports these as skipped_fields). They still push
+// to ABS, but the file-write preview must not over-promise that they land in the
+// file. Note the singular `genre` IS written (ID3 TCON / MP4 gnre); only the
+// plural ABS-only collections below are unwritable.
+const ABS_ONLY_FIELDS = new Set(['tags', 'genres', 'dna_tags', 'dna', 'age_tags', 'age']);
+
 export function WritePreviewModal({
   isOpen,
   onClose,
@@ -119,7 +126,7 @@ export function WritePreviewModal({
                 {backupEnabled && !skipBackup && (
                   <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 px-3 py-1.5 rounded-lg">
                     <CheckCircle className="w-4 h-4" />
-                    Original files will be backed up (.backup extension)
+                    Original files will be backed up (.bak extension)
                   </div>
                 )}
                 
@@ -209,6 +216,12 @@ export function WritePreviewModal({
                                 {change.new || <span className="text-green-600 italic">(empty)</span>}
                               </div>
                             </div>
+
+                            {ABS_ONLY_FIELDS.has(field) && (
+                              <div className="text-xs text-amber-500 italic">
+                                ABS only - not written to file
+                              </div>
+                            )}
 
                             {isExcluded && (
                               <div className="text-xs text-gray-400 italic">This change will be skipped</div>

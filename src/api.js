@@ -1908,8 +1908,24 @@ Return JSON: {"year":"2005"}`;
   cancel_scan: () => {},
 
   // === Undo (client-side) ===
-  get_undo_status: () => ({ has_undo: false }),
+  // Match the Rust get_undo_status shape so callers reading `.available`/`.files`
+  // (UndoToast/ScannerPage) work identically in the browser build.
+  get_undo_status: () => ({ available: false, books_count: 0, count: 0, age_seconds: 0, files: [] }),
   clear_undo_state: () => {},
+
+  // === Rename templates (client-side; used by RenamePreviewModal in both the
+  // Tauri and browser builds since it is not a TAURI_COMMANDS override). Shape is
+  // { id, name, file_template } exactly as the modal's dropdown + preview consume.
+  // Tokens use ONLY the plain vars the Rust render_template resolves
+  // ({title}/{author}/{series}/{sequence}/{year}); any other {...} block is
+  // stripped, so conditional-block syntax is avoided here.
+  get_rename_templates: () => ([
+    { id: 'standard', name: 'Standard (Title)', file_template: '{title}' },
+    { id: 'author-title', name: 'Author - Title', file_template: '{author} - {title}' },
+    { id: 'series', name: 'Series # - Title', file_template: '{series} {sequence} - {title}' },
+    { id: 'author-series-title', name: 'Author - Series # - Title', file_template: '{author} - {series} {sequence} - {title}' },
+    { id: 'title-year', name: 'Title (Year)', file_template: '{title} ({year})' },
+  ]),
 
   // === Ollama (disabled in web mode) ===
   ollama_get_status: () => ({ installed: false, running: false, models: [] }),
