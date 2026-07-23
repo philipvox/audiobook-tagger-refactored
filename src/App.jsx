@@ -63,22 +63,27 @@ function AppContent() {
           </div>
         ) : (
           <>
-            {activeTab === 'scanner' && (
+            {/* Both pages stay mounted; only visibility toggles. This preserves
+                in-flight batch state, progress bars, and undo toasts on the
+                Scanner page across tab switches. Neither page sets up event
+                subscriptions at mount (ScannerPage subscribes per-operation),
+                so keeping them mounted does not duplicate any listeners. */}
+            <div className={activeTab === 'scanner' ? 'h-full' : 'hidden'}>
               <ScannerPage
                 onNavigateToSettings={navigateToSettings}
                 activeTab={activeTab}
                 navigateTo={navigateTo}
                 logoSvg={logoSvg}
               />
-            )}
-            {activeTab === 'settings' && (
+            </div>
+            <div className={activeTab === 'settings' ? 'h-full' : 'hidden'}>
               <SettingsPage
                 activeTab={activeTab}
                 navigateTo={navigateTo}
                 logoSvg={logoSvg}
                 onOpenWizard={() => setShowWizard(true)}
               />
-            )}
+            </div>
           </>
         )}
       </main>
