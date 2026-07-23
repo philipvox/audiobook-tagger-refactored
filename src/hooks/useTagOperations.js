@@ -37,11 +37,17 @@ export function useTagOperations() {
         }
       });
 
+      // Visible-failure guard: the browser build has no write_tags backend, so
+      // callBackend returns `{ _stub: true, message }` (no `results`). Reject
+      // BEFORE marking any status so the caller shows a legible failure toast
+      // instead of silently marking every file 'success' (which an unguarded
+      // `result.errors.some()` would also do by throwing, but less legibly).
+      if (result?._stub || !Array.isArray(result?.results)) {
+        throw new Error(result?.message || 'Write backend not available.');
+      }
+
       const newStatuses = {};
-      // Guard result.errors: the browser stub returns `{ _stub: true }` with no
-      // errors array, so an unguarded .some() would throw a TypeError and turn a
-      // legible "not available" toast into a crash.
-      const writeErrors = result?.errors || [];
+      const writeErrors = Array.isArray(result.errors) ? result.errors : [];
       idsToWrite.forEach(fileId => {
         const hasError = writeErrors.some(e => e.file_id === fileId);
         newStatuses[fileId] = hasError ? 'failed' : 'success';

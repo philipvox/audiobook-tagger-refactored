@@ -13,11 +13,12 @@ vi.mock('../api', () => ({
 }));
 
 let mockGroups = [];
+const mockUpdateFileStatuses = vi.fn();
 vi.mock('../context/AppContext', () => ({
   useApp: () => ({
     config: {},
     groups: mockGroups,
-    updateFileStatuses: vi.fn(),
+    updateFileStatuses: mockUpdateFileStatuses,
     setWriteProgress: vi.fn(),
   }),
 }));
@@ -64,6 +65,57 @@ describe('useTagOperations.renameFiles (CR-6a: explicit old->new pairs)', () => 
     expect(mockCallBackend).toHaveBeenCalledWith('rename_files', {
       renames: [{ file_id: 'f1', old_path: '/a/1.m4b', new_path: '/a/y.m4b' }],
     });
+  });
+});
+
+describe('useTagOperations.writeSelectedTags (browser-stub visible failure)', () => {
+  it('rejects on a stub-shaped result and marks nothing success', async () => {
+    // Browser build has no write_tags backend: callBackend returns the stub shape.
+    mockGroups = [{
+      id: 'g1',
+      metadata: { title: 'Book' },
+      files: [{ id: 'f1', path: '/a/1.m4b', changes: { title: { old: '', new: 'New' } } }],
+    }];
+    mockCallBackend.mockResolvedValue({ _stub: true, message: "'write_tags' is not available in the web version." });
+
+    const { result } = renderHook(() => useTagOperations());
+
+    await expect(
+      act(async () => {
+        await result.current.writeSelectedTags(new Set(['f1']));
+      })
+    ).rejects.toThrow(/not available/i);
+
+    // The guard runs BEFORE any status marking, so no file is marked 'success'.
+    expect(mockUpdateFileStatuses).not.toHaveBeenCalled();
+  });
+
+  it('marks per-file status from a real backend result (no stub)', async () => {
+    mockGroups = [{
+      id: 'g1',
+      metadata: { title: 'Book' },
+      files: [
+        { id: 'f1', path: '/a/1.m4b', changes: { title: { old: '', new: 'A' } } },
+        { id: 'f2', path: '/a/2.m4b', changes: { title: { old: '', new: 'B' } } },
+      ],
+    }];
+    mockCallBackend.mockResolvedValue({
+      success: 1,
+      failed: 1,
+      errors: [{ file_id: 'f2', error: 'save failed' }],
+      results: [
+        { file_id: 'f1', status: 'success', skipped_fields: [] },
+        { file_id: 'f2', status: 'failed', skipped_fields: [] },
+      ],
+    });
+
+    const { result } = renderHook(() => useTagOperations());
+
+    await act(async () => {
+      await result.current.writeSelectedTags(new Set(['f1', 'f2']));
+    });
+
+    expect(mockUpdateFileStatuses).toHaveBeenCalledWith({ f1: 'success', f2: 'failed' });
   });
 });
 

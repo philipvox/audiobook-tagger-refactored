@@ -9,7 +9,7 @@
 //
 // Two vocabularies are in play and MUST stay distinct:
 //   - `file.changes` keys use the TAG vocabulary the Rust write path embeds
-//     (see commands/tags.rs build_metadata_from_changes): title, author,
+//     (see src-tauri/src/writer.rs apply_changes_to_tag): title, author,
 //     narrator ("Narrated by X"), genre (comma-joined), series, sequence,
 //     subtitle, year, publisher, description, isbn, language.
 //   - `group.changedFields` uses the METADATA vocabulary the UI highlights and
