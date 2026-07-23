@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { callBackend } from '../api';
 import { useApp } from '../context/AppContext';
+import { buildWritePayload } from '../lib/writePayload';
 
 export function useTagOperations() {
   const { config, groups, updateFileStatuses, setWriteProgress } = useApp();
@@ -16,24 +17,14 @@ export function useTagOperations() {
     try {
       setWriting(true);
 
-      // Build the payload from file.changes, honoring per-field exclusions.
-      // Only selected files with at least one surviving change are written.
-      const filesMap = {};
-      const idsToWrite = [];
-      groups.forEach(group => {
-        group.files.forEach(file => {
-          if (file.id == null || !selectedFiles.has(file.id)) return;
-          const allChanges = file.changes || {};
-          const changes = {};
-          for (const [field, val] of Object.entries(allChanges)) {
-            if (excludedChanges && excludedChanges.has(`${file.id}:${field}`)) continue;
-            changes[field] = val;
-          }
-          if (Object.keys(changes).length === 0) return;
-          filesMap[file.id] = { path: file.path, changes };
-          idsToWrite.push(file.id);
-        });
-      });
+      // Build the payload from file.changes, honoring per-field exclusions, via
+      // the shared pure builder so the write payload equals exactly what the
+      // WritePreviewModal displayed minus the excluded rows.
+      const { fileIds: idsToWrite, filesMap } = buildWritePayload(
+        groups,
+        selectedFiles,
+        excludedChanges
+      );
 
       // ✅ Set initial progress to the count we will actually write
       setWriteProgress({ current: 0, total: idsToWrite.length });
