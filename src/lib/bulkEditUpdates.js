@@ -1,4 +1,4 @@
-// bulkEditUpdates — pure computation of the `updates` object BulkEditModal emits.
+// bulkEditUpdates - pure computation of the `updates` object BulkEditModal emits.
 //
 // H1: precedence per field is clear > non-empty-and-changed > skip. A checked
 // field left at its prefilled common value (M10) is a no-op and must NOT

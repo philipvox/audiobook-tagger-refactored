@@ -1,4 +1,4 @@
-// coverMatch — pure title<->image matching for BulkCoverAssignment.
+// coverMatch - pure title<->image matching for BulkCoverAssignment.
 //
 // H4: exact normalized equality scores 1.0; a substring containment only earns
 // the 0.9 credit when the shorter string is >= 80% the length of the longer

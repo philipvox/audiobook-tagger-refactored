@@ -1,4 +1,4 @@
-// ageCategory — map the backend's free-form age_category values onto the
+// ageCategory - map the backend's free-form age_category values onto the
 // EditMetadataModal <select> vocabulary (Childrens / Teens / Young Adult /
 // Adult). L8: values like "Middle Grade" or "Teen 13-17" previously landed in
 // the select verbatim and showed as blank because they aren't valid options.

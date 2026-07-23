@@ -1,4 +1,4 @@
-// seriesFixMap — pure helpers for keying SeriesIssueModal's fix selections.
+// seriesFixMap - pure helpers for keying SeriesIssueModal's fix selections.
 //
 // M3 bug: the modal keyed its "which fix is selected" map by `${book_id}-${field}`.
 // Two distinct suggested fixes that target the same book + field but propose
