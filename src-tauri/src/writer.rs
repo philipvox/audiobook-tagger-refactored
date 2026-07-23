@@ -32,7 +32,7 @@ use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::{Accessor, ItemKey};
 use lofty::probe::Probe;
-use lofty::tag::Tag;
+use lofty::tag::{ItemValue, Tag, TagItem, TagType};
 
 // ============================================================================
 // write_tags
@@ -91,6 +91,10 @@ fn leading_u32(s: &str) -> Option<u32> {
 /// ABS-only fields (tags, dna, subtitle, isbn, ...) are skipped silently.
 pub fn apply_changes_to_tag(tag: &mut Tag, changes: &HashMap<String, Value>) -> Vec<String> {
     let mut unsupported = Vec::new();
+    // MP4/m4b (the primary AudiobookShelf format) stores series in freeform atoms
+    // that scanner.rs's lookup_tag_field fallback reads; write those too so ABS
+    // and other tools see the series and any stale freeform value is overwritten.
+    let is_mp4 = tag.tag_type() == TagType::Mp4Ilst;
     for (field, raw) in changes {
         let value = match change_value(raw) {
             Some(v) => v,
@@ -119,9 +123,19 @@ pub fn apply_changes_to_tag(tag: &mut Tag, changes: &HashMap<String, Value>) -> 
             }
             // Series / sequence via the same movement keys scanner.rs reads. On
             // Mp4Ilst these map to the ©mvn/©mvi atoms, on ID3v2 to MVNM/MVIN.
-            "series" => tag.insert_text(ItemKey::Movement, value),
+            "series" => {
+                let ok = tag.insert_text(ItemKey::Movement, value.clone());
+                if is_mp4 {
+                    set_mp4_freeform(tag, "----:com.apple.iTunes:SERIES", &value);
+                }
+                ok
+            }
             "sequence" | "series_number" | "series-part" => {
-                tag.insert_text(ItemKey::MovementNumber, value)
+                let ok = tag.insert_text(ItemKey::MovementNumber, value.clone());
+                if is_mp4 {
+                    set_mp4_freeform(tag, "----:com.apple.iTunes:SERIES-PART", &value);
+                }
+                ok
             }
             "year" => {
                 match leading_u32(&value) {
@@ -148,6 +162,16 @@ pub fn apply_changes_to_tag(tag: &mut Tag, changes: &HashMap<String, Value>) -> 
         }
     }
     unsupported
+}
+
+/// Write (replacing any stale value) an MP4 freeform atom by its exact stored key
+/// string, e.g. "----:com.apple.iTunes:SERIES". lofty's checked insert rejects
+/// Unknown keys, so remove-then-push_unchecked mirrors how such atoms exist on a
+/// real MP4 file (see scanner.rs's freeform read + its reads_mp4_freeform test).
+fn set_mp4_freeform(tag: &mut Tag, atom_key: &str, value: &str) {
+    let key = ItemKey::Unknown(atom_key.to_string());
+    tag.remove_key(&key);
+    tag.push_unchecked(TagItem::new(key, ItemValue::Text(value.to_string())));
 }
 
 /// `<path>.bak` alongside the original.
@@ -351,21 +375,23 @@ pub fn clear_journal(path: &Path) -> Result<(), String> {
 }
 
 /// Restore every backup recorded in the journal (rename .bak back over the
-/// original). Returns (restored original paths, failed count).
-pub fn restore_from_journal(journal: &UndoJournal) -> (Vec<String>, usize) {
+/// original). Returns (restored original paths, failed entries with their reason).
+/// Failed entries are returned intact so the caller can keep them in the journal
+/// for a later retry rather than orphaning their `.bak`.
+pub fn restore_from_journal(journal: &UndoJournal) -> (Vec<String>, Vec<(JournalEntry, String)>) {
     let mut restored = Vec::new();
-    let mut failed = 0usize;
+    let mut failed: Vec<(JournalEntry, String)> = Vec::new();
     for entry in &journal.entries {
         let bak = PathBuf::from(&entry.backup_path);
         let orig = PathBuf::from(&entry.original_path);
         if !bak.exists() {
-            failed += 1;
+            failed.push((entry.clone(), "backup file missing".to_string()));
             continue;
         }
         // rename replaces the (modified) original with the backup and removes .bak.
         match fs::rename(&bak, &orig) {
             Ok(()) => restored.push(entry.original_path.clone()),
-            Err(_) => failed += 1,
+            Err(e) => failed.push((entry.clone(), e.to_string())),
         }
     }
     (restored, failed)
@@ -417,8 +443,22 @@ pub fn undo_last_write() -> Value {
     };
 
     let (restored, failed) = restore_from_journal(&journal);
-    // The journal is single-shot: clear it whether or not every file restored.
-    let _ = clear_journal(&journal_path);
+    let failed_count = failed.len();
+    let total = restored.len() + failed_count;
+
+    // Keep failed entries (with their backup paths) in the journal so
+    // get_undo_status still reports them and a retry can restore them; only clear
+    // the journal outright when every file restored. Preserve the original
+    // timestamp so undo-availability age still reflects the original write.
+    if failed.is_empty() {
+        let _ = clear_journal(&journal_path);
+    } else {
+        let remaining = UndoJournal {
+            timestamp: journal.timestamp,
+            entries: failed.iter().map(|(entry, _)| entry.clone()).collect(),
+        };
+        let _ = write_journal(&journal_path, &remaining);
+    }
 
     let results: Vec<Value> = restored
         .iter()
@@ -427,16 +467,28 @@ pub fn undo_last_write() -> Value {
 
     let mut resp = json!({
         "success": restored.len(),
-        "failed": failed,
+        "failed": failed_count,
         "restored_files": restored,
         "files": restored,
         "results": results,
     });
-    // success:0 is not detected as failure by the JS `success === false` check,
-    // so attach an explicit error when nothing was restored.
-    if restored.is_empty() {
+    // ANY failure must read as failure to the JS guard (`success === false ||
+    // error`): a numeric `success` (even 0) is never `=== false`, and a partial
+    // restore that reported success would tell the user everything reverted while
+    // a failed file's backup still sits unrestored. Report truthfully.
+    if failed_count > 0 {
+        let first_reason = failed
+            .first()
+            .map(|(_, reason)| reason.clone())
+            .unwrap_or_default();
         resp["success"] = json!(false);
-        resp["error"] = json!("Could not restore any files from the last write.");
+        resp["error"] = json!(format!(
+            "Restored {} of {} files; {} failed: {}",
+            restored.len(),
+            total,
+            failed_count,
+            first_reason
+        ));
     }
     resp
 }
@@ -700,6 +752,46 @@ mod tests {
         let unsupported = apply_changes_to_tag(&mut tag, &roundtrip_changes());
         assert!(unsupported.is_empty(), "unexpected unsupported fields: {unsupported:?}");
         assert_roundtrip(&tag);
+        // AND the MP4 freeform atoms scanner's fallback / ABS read must be written.
+        assert_eq!(
+            tag.get_string(&ItemKey::Unknown("----:com.apple.iTunes:SERIES".into())),
+            Some("Stormlight Archive")
+        );
+        assert_eq!(
+            tag.get_string(&ItemKey::Unknown("----:com.apple.iTunes:SERIES-PART".into())),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn mp4_freeform_series_overwrites_stale_value() {
+        // A previous tagger left a stale freeform SERIES atom; a write must replace
+        // it (not append a second), so ABS never sees two-sources drift.
+        let mut tag = Tag::new(TagType::Mp4Ilst);
+        tag.push_unchecked(TagItem::new(
+            ItemKey::Unknown("----:com.apple.iTunes:SERIES".into()),
+            ItemValue::Text("Old Series".into()),
+        ));
+        let mut c = HashMap::new();
+        c.insert("series".into(), json!({ "old": "", "new": "New Series" }));
+        apply_changes_to_tag(&mut tag, &c);
+        let key = ItemKey::Unknown("----:com.apple.iTunes:SERIES".into());
+        let values: Vec<&str> = tag.get_strings(&key).collect();
+        assert_eq!(values, vec!["New Series"], "stale freeform value must be replaced, not duplicated");
+    }
+
+    #[test]
+    fn id3_does_not_write_mp4_freeform_atoms() {
+        // The MP4-only freeform atoms must not leak onto ID3v2 files.
+        let mut tag = Tag::new(TagType::Id3v2);
+        let mut c = HashMap::new();
+        c.insert("series".into(), json!({ "old": "", "new": "S" }));
+        apply_changes_to_tag(&mut tag, &c);
+        assert_eq!(
+            tag.get_string(&ItemKey::Unknown("----:com.apple.iTunes:SERIES".into())),
+            None
+        );
+        assert_eq!(tag.get_string(&ItemKey::Movement), Some("S"));
     }
 
     #[test]
@@ -737,11 +829,114 @@ mod tests {
 
         let loaded = read_journal(&journal_path).unwrap();
         let (restored, failed) = restore_from_journal(&loaded);
-        assert_eq!(failed, 0);
+        assert!(failed.is_empty());
         assert_eq!(restored.len(), 1);
         // Original content is back and the .bak was consumed.
         assert_eq!(fs::read(&orig).unwrap(), b"ORIGINAL");
         assert!(!bak.exists());
+    }
+
+    // Helper mirroring undo_last_write's journal-keeping decision so the partial/
+    // full/none cases are testable without touching the global app-data journal.
+    fn resolve_journal_after_undo(
+        journal_path: &Path,
+        journal: &UndoJournal,
+    ) -> (Vec<String>, Vec<(JournalEntry, String)>) {
+        let (restored, failed) = restore_from_journal(journal);
+        if failed.is_empty() {
+            clear_journal(journal_path).unwrap();
+        } else {
+            let remaining = UndoJournal {
+                timestamp: journal.timestamp,
+                entries: failed.iter().map(|(e, _)| e.clone()).collect(),
+            };
+            write_journal(journal_path, &remaining).unwrap();
+        }
+        (restored, failed)
+    }
+
+    #[test]
+    fn undo_partial_failure_keeps_failed_entries_in_journal() {
+        let dir = tempdir().unwrap();
+        // Entry 1: real backup present -> restores. Entry 2: backup missing -> fails.
+        let orig1 = dir.path().join("a.m4b");
+        let bak1 = backup_path_for(&orig1);
+        fs::write(&orig1, b"MODIFIED").unwrap();
+        fs::write(&bak1, b"ORIGINAL").unwrap();
+        let orig2 = dir.path().join("b.m4b");
+        let bak2 = backup_path_for(&orig2);
+
+        let journal_path = dir.path().join("undo.json");
+        let journal = UndoJournal {
+            timestamp: now_secs(),
+            entries: vec![
+                JournalEntry {
+                    original_path: orig1.to_string_lossy().to_string(),
+                    backup_path: bak1.to_string_lossy().to_string(),
+                },
+                JournalEntry {
+                    original_path: orig2.to_string_lossy().to_string(),
+                    backup_path: bak2.to_string_lossy().to_string(),
+                },
+            ],
+        };
+        write_journal(&journal_path, &journal).unwrap();
+
+        let (restored, failed) = resolve_journal_after_undo(&journal_path, &journal);
+        assert_eq!(restored, vec![orig1.to_string_lossy().to_string()]);
+        assert_eq!(failed.len(), 1);
+        assert!(!failed[0].1.is_empty(), "failure must carry a reason");
+        // The failed entry (and its backup path) is retained for retry.
+        let remaining = read_journal(&journal_path).unwrap();
+        assert_eq!(remaining.entries.len(), 1);
+        assert_eq!(remaining.entries[0].original_path, orig2.to_string_lossy().to_string());
+        assert_eq!(remaining.timestamp, journal.timestamp, "timestamp preserved");
+    }
+
+    #[test]
+    fn undo_full_success_clears_journal() {
+        let dir = tempdir().unwrap();
+        let orig = dir.path().join("a.m4b");
+        let bak = backup_path_for(&orig);
+        fs::write(&orig, b"MODIFIED").unwrap();
+        fs::write(&bak, b"ORIGINAL").unwrap();
+        let journal_path = dir.path().join("undo.json");
+        let journal = UndoJournal {
+            timestamp: now_secs(),
+            entries: vec![JournalEntry {
+                original_path: orig.to_string_lossy().to_string(),
+                backup_path: bak.to_string_lossy().to_string(),
+            }],
+        };
+        write_journal(&journal_path, &journal).unwrap();
+
+        let (restored, failed) = resolve_journal_after_undo(&journal_path, &journal);
+        assert_eq!(restored.len(), 1);
+        assert!(failed.is_empty());
+        assert!(read_journal(&journal_path).is_none(), "journal cleared on full success");
+    }
+
+    #[test]
+    fn undo_full_failure_keeps_journal() {
+        let dir = tempdir().unwrap();
+        // Backup missing -> the sole entry fails and must be retained.
+        let orig = dir.path().join("a.m4b");
+        let bak = backup_path_for(&orig);
+        let journal_path = dir.path().join("undo.json");
+        let journal = UndoJournal {
+            timestamp: now_secs(),
+            entries: vec![JournalEntry {
+                original_path: orig.to_string_lossy().to_string(),
+                backup_path: bak.to_string_lossy().to_string(),
+            }],
+        };
+        write_journal(&journal_path, &journal).unwrap();
+
+        let (restored, failed) = resolve_journal_after_undo(&journal_path, &journal);
+        assert!(restored.is_empty());
+        assert_eq!(failed.len(), 1);
+        let remaining = read_journal(&journal_path).unwrap();
+        assert_eq!(remaining.entries.len(), 1);
     }
 
     #[test]
