@@ -1,4 +1,4 @@
-// aggregateChanges — union the pending changes across all files of a group.
+// aggregateChanges - union the pending changes across all files of a group.
 //
 // L10: the ChangePreviewTooltip should show the union of changed fields across
 // every file in the group, using the first file's old/new for each field as the

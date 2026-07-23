@@ -1,4 +1,4 @@
-// listLayout — pure geometry for BookList's manual virtualization.
+// listLayout - pure geometry for BookList's manual virtualization.
 //
 // L7: an expanded row renders its file list below the fixed collapsed row, so
 // the total scroll height and the translate offset must account for that extra
