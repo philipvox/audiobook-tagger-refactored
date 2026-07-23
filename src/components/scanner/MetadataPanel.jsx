@@ -159,7 +159,7 @@ function changedClass(group, field) {
   return isChanged(group, field) ? 'ring-1 ring-amber-500/40 bg-amber-500/5' : '';
 }
 
-export function MetadataPanel({ group, onEdit, onInlineEdit }) {
+export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce = 0 }) {
   const toast = useToast();
   const [coverData, setCoverData] = useState(null);
   const [coverUrl, setCoverUrl] = useState(null);
@@ -324,7 +324,9 @@ export function MetadataPanel({ group, onEdit, onInlineEdit }) {
       setCoverData(null);
       setAbsChapters([]);
     }
-  }, [group?.id, refreshTrigger]);
+    // M9: coverRefreshNonce bumps after a cover assignment so the open book
+    // reloads its (now updated) cover art.
+  }, [group?.id, refreshTrigger, coverRefreshNonce]);
 
   // Load chapters when switching to chapters tab
   useEffect(() => {

@@ -197,6 +197,7 @@ export function BookList({
   hasAbsConnection = false,
   onImportFromAbs,
   onNavigateToSettings,
+  coverInvalidation = { nonce: 0, ids: [] }, // M9: { nonce, ids } to evict cached covers
 }) {
   const [coverCache, setCoverCache] = useState({});
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 30 });
@@ -589,6 +590,26 @@ export function BookList({
       clearTimeout(timeoutId);
     };
   }, [visibleRange.start, visibleRange.end, filteredGroups]);
+
+  // M9: evict cached covers for the given group ids when a cover assignment
+  // reports success, so the next visible-cover pass re-fetches the new art.
+  useEffect(() => {
+    const ids = coverInvalidation?.ids;
+    if (!ids || ids.length === 0) return;
+    for (const id of ids) {
+      const url = blobUrlsRef.current.get(id);
+      if (url) {
+        URL.revokeObjectURL(url);
+        blobUrlsRef.current.delete(id);
+      }
+      coverLoadingRef.current.delete(id);
+    }
+    setCoverCache(prev => {
+      const next = { ...prev };
+      for (const id of ids) delete next[id];
+      return next;
+    });
+  }, [coverInvalidation?.nonce]);
 
   const getFileStatusIcon = (fileId) => {
     const status = fileStatuses[fileId];
