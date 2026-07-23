@@ -2,9 +2,18 @@
 import { useState } from 'react';
 import { X, Save, Library, Type, Loader2, Users } from 'lucide-react';
 import { callBackend } from '../api';
+import { mapAgeCategory } from '../lib/ageCategory';
+
+// M1: parse a comma-separated genres string into a capped, trimmed array.
+function parseGenres(str) {
+  return String(str || '').split(',').map(g => g.trim()).filter(Boolean).slice(0, 3);
+}
 
 export function EditMetadataModal({ isOpen, onClose, onSave, metadata, groupName, folderPath }) {
   const [editedMetadata, setEditedMetadata] = useState(metadata);
+  // M1: keep genres as a raw string while typing so commas/partial input don't
+  // fight the array parse on every keystroke; parse to an array on blur/save.
+  const [genresText, setGenresText] = useState((metadata?.genres || []).join(', '));
   const [isFixingTitle, setIsFixingTitle] = useState(false);
   const [isFixingSeries, setIsFixingSeries] = useState(false);
   const [isLookingUpAge, setIsLookingUpAge] = useState(false);
@@ -13,7 +22,7 @@ export function EditMetadataModal({ isOpen, onClose, onSave, metadata, groupName
   if (!isOpen) return null;
 
   const handleSave = () => {
-    onSave(editedMetadata);
+    onSave({ ...editedMetadata, genres: parseGenres(genresText) });
     onClose();
   };
 
@@ -21,9 +30,9 @@ export function EditMetadataModal({ isOpen, onClose, onSave, metadata, groupName
     setEditedMetadata(prev => ({ ...prev, [field]: value }));
   };
 
-  const updateGenres = (genresString) => {
-    const genresArray = genresString.split(',').map(g => g.trim()).filter(g => g);
-    setEditedMetadata(prev => ({ ...prev, genres: genresArray }));
+  // Commit the raw genres text into the working metadata as an array.
+  const commitGenres = () => {
+    setEditedMetadata(prev => ({ ...prev, genres: parseGenres(genresText) }));
   };
 
   // Fix title/author/subtitle only (no series)
@@ -117,9 +126,12 @@ export function EditMetadataModal({ isOpen, onClose, onSave, metadata, groupName
         // Update genres with age category if it's a children's/YA book
         let newGenres = [...(editedMetadata.genres || [])];
         const ageCategory = result.age_category;
+        // L8: normalize the backend's free-form age_category onto the select
+        // vocabulary so it doesn't render blank (e.g. "Middle Grade" -> "Childrens").
+        const mappedAge = mapAgeCategory(ageCategory);
 
         // Add age-specific genre if applicable
-        if (ageCategory && ageCategory !== 'Adult') {
+        if (ageCategory && mappedAge !== 'Adult') {
           // Remove any existing age genres first
           newGenres = newGenres.filter(g =>
             !g.startsWith("Children's") &&
@@ -127,18 +139,21 @@ export function EditMetadataModal({ isOpen, onClose, onSave, metadata, groupName
             g !== "Young Adult" &&
             g !== "Middle Grade"
           );
-          // Add the new age genre
+          // Add the new age genre, then enforce the max-3 genre limit (L8).
           if (!newGenres.includes(ageCategory)) {
             newGenres.splice(1, 0, ageCategory); // Insert after primary genre
           }
+          newGenres = newGenres.slice(0, 3);
         }
 
         setEditedMetadata(prev => ({
           ...prev,
           genres: newGenres,
-          age_rating: ageCategory,
+          age_rating: mappedAge ?? prev.age_rating,
           content_rating: result.content_rating
         }));
+        // Keep the raw genres input in sync with the programmatic change.
+        setGenresText(newGenres.join(', '));
 
         // Show the reasoning as a success message
         if (result.reasoning) {
@@ -321,8 +336,9 @@ export function EditMetadataModal({ isOpen, onClose, onSave, metadata, groupName
               </label>
               <input
                 type="text"
-                value={editedMetadata.genres.join(', ')}
-                onChange={(e) => updateGenres(e.target.value)}
+                value={genresText}
+                onChange={(e) => setGenresText(e.target.value)}
+                onBlur={commitGenres}
                 placeholder="Fiction, Fantasy, Adventure"
                 className="w-full px-4 py-2 bg-neutral-800 text-gray-100 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder-gray-500"
               />
