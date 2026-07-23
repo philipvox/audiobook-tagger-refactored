@@ -1,3 +1,5 @@
+import { severityForKind } from './errorDetail';
+
 // batchToast — pure helper that maps batch-operation counts to a toast
 // payload (type, title, message). The caller supplies an optional action
 // (for "Show details" scroll-to-first) since that closure needs ScannerPage
@@ -56,16 +58,33 @@ export function summarizeBatch({ op, succeeded = 0, skipped = 0, warnings = 0, f
   };
 }
 
-// Scroll the first group whose lastError matches the requested severity into
-// view. Exported for reuse; uses the data-book-id attribute that BookList
-// rows now carry.
-export function scrollToFirstErrorGroup(groups, severity = 'any') {
-  const match = groups.find((g) => {
-    if (!g.lastError) return false;
+// Derive the render severity of a single per-book result. A hard failure
+// (r.error set or r.success === false) is always 'error'; otherwise fall back
+// to the errorDetail kind mapping. Returns null when the book carries no error
+// signal at all.
+function resultSeverity(r) {
+  if (!r) return null;
+  if (r.error || r.success === false) return 'error';
+  if (r.errorDetail) return severityForKind(r.errorDetail.kind);
+  return null;
+}
+
+// Scroll the first errored book into view, using the data-book-id attribute
+// that BookList rows carry. Takes the handler's OWN fresh results array (the
+// one it just received from the backend), not the component's `groups` state:
+// the toast is created synchronously after an async setGroups that has not yet
+// committed, so `groups` would be stale and miss the just-set lastError.
+// `results` is an array of per-book objects shaped
+// { id, errorDetail?, error?, success? }.
+export function scrollToFirstErrorGroup(results, severity = 'any') {
+  if (!Array.isArray(results)) return false;
+  const match = results.find((r) => {
+    const sev = resultSeverity(r);
+    if (!sev) return false;
     if (severity === 'any') return true;
-    return g.lastError.severity === severity;
+    return sev === severity;
   });
-  if (!match) return false;
+  if (!match || match.id == null) return false;
   if (typeof document === 'undefined') return false;
   const el = document.querySelector(`[data-book-id="${match.id}"]`);
   if (!el) return false;
