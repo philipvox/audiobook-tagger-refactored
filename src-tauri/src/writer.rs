@@ -20,6 +20,12 @@
 // Tag keys written here MATCH the keys scanner.rs reads (title/AlbumArtist/
 // Composer/Genre/Movement/MovementNumber/year), so a write is round-trippable by
 // a later scan on both ID3v2 (mp3) and Mp4Ilst (m4b) files.
+//
+// Write-field honesty: apply_changes_to_tag embeds every field the tag format can
+// express and returns the fields it did NOT embed as a `skipped` list. A skipped
+// field is never a hard failure (support is asymmetric across ID3v2/MP4, and some
+// fields are ABS-only, e.g. tags/genres/dna). write_tags surfaces this per file as
+// a `skipped_fields` array so the frontend can stop over-promising in its preview.
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -86,11 +92,13 @@ fn leading_u32(s: &str) -> Option<u32> {
 }
 
 /// Apply the change set to a tag in place. Returns the list of requested fields
-/// that could NOT be written for this tag type (checked `insert_text` returned
-/// false), so the caller can report the file as failed truthfully. Unknown /
-/// ABS-only fields (tags, dna, subtitle, isbn, ...) are skipped silently.
+/// that could NOT be embedded in this tag type -- either a checked `insert_text`
+/// returned false (the key has no home in this format, e.g. publisher on MP4 or
+/// description/isbn/asin on ID3v2) or the field is ABS-only (tags/genres/dna).
+/// A skipped field is reported to the caller, NEVER treated as a hard failure.
+/// A change whose value is null (nothing to write) is not counted as skipped.
 pub fn apply_changes_to_tag(tag: &mut Tag, changes: &HashMap<String, Value>) -> Vec<String> {
-    let mut unsupported = Vec::new();
+    let mut skipped = Vec::new();
     // MP4/m4b (the primary AudiobookShelf format) stores series in freeform atoms
     // that scanner.rs's lookup_tag_field fallback reads; write those too so ABS
     // and other tools see the series and any stale freeform value is overwritten.
@@ -137,31 +145,60 @@ pub fn apply_changes_to_tag(tag: &mut Tag, changes: &HashMap<String, Value>) -> 
                 }
                 ok
             }
-            "year" => {
-                match leading_u32(&value) {
-                    Some(y) => {
-                        tag.set_year(y);
-                        true
-                    }
-                    // Unparseable year is skipped, not a failure.
-                    None => continue,
+            // Descriptive metadata other tools + AudiobookShelf read. Support is
+            // asymmetric across formats: insert_text returns false when a key has
+            // no home in this tag type, so that field lands in `skipped` (reported,
+            // never a hard failure).
+            //   description -> MP4 `desc` atom; no ID3v2 home (skipped on mp3).
+            "description" => tag.insert_text(ItemKey::Description, value),
+            //   publisher -> ID3v2 TPUB; no ILST atom (skipped on m4b).
+            "publisher" => tag.insert_text(ItemKey::Publisher, value),
+            //   language -> ID3v2 TLAN / MP4 ----:com.apple.iTunes:LANGUAGE (both).
+            "language" => tag.insert_text(ItemKey::Language, value),
+            //   subtitle -> ID3v2 TIT3 / MP4 ----:com.apple.iTunes:SUBTITLE (both);
+            //   TrackSubtitle maps to that exact freeform atom on MP4.
+            "subtitle" => tag.insert_text(ItemKey::TrackSubtitle, value),
+            // ISBN/ASIN have no ItemKey; only MP4 has a conventional freeform home,
+            // written the same way as the SERIES atoms above. Skipped on ID3v2.
+            "isbn" => {
+                if is_mp4 {
+                    set_mp4_freeform(tag, "----:com.apple.iTunes:ISBN", &value);
+                    true
+                } else {
+                    false
                 }
             }
+            "asin" => {
+                if is_mp4 {
+                    set_mp4_freeform(tag, "----:com.apple.iTunes:ASIN", &value);
+                    true
+                } else {
+                    false
+                }
+            }
+            "year" => match leading_u32(&value) {
+                Some(y) => {
+                    tag.set_year(y);
+                    true
+                }
+                // Unparseable year: requested but not embedded -> reported skipped.
+                None => false,
+            },
             "track" => match leading_u32(&value) {
                 Some(t) => {
                     tag.set_track(t);
                     true
                 }
-                None => continue,
+                None => false,
             },
-            // Unknown / ABS-only field: skip silently.
-            _ => continue,
+            // Unknown / ABS-only field (tags, genres, dna, age, ...): not embeddable.
+            _ => false,
         };
         if !wrote {
-            unsupported.push(field.clone());
+            skipped.push(field.clone());
         }
     }
-    unsupported
+    skipped
 }
 
 /// Write (replacing any stale value) an MP4 freeform atom by its exact stored key
@@ -183,10 +220,13 @@ pub fn backup_path_for(path: &Path) -> PathBuf {
 
 /// Result of attempting to write one file. `journal` is Some whenever a backup
 /// landed (even if the subsequent tag save failed), so undo can restore a
-/// partially written file. `result` is the truthful per-file outcome.
+/// partially written file. `result` is the truthful per-file outcome. `skipped`
+/// lists the requested fields that could not be embedded in this file's format
+/// (reported to the caller, never a hard failure).
 struct FileWriteOutcome {
     result: Result<(), String>,
     journal: Option<JournalEntry>,
+    skipped: Vec<String>,
 }
 
 fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
@@ -195,6 +235,7 @@ fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
         return FileWriteOutcome {
             result: Err("file not found".to_string()),
             journal: None,
+            skipped: Vec::new(),
         };
     }
 
@@ -206,6 +247,7 @@ fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
             return FileWriteOutcome {
                 result: Err(format!("backup failed: {e}")),
                 journal: None,
+                skipped: Vec::new(),
             };
         }
         journal = Some(JournalEntry {
@@ -221,6 +263,7 @@ fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
             return FileWriteOutcome {
                 result: Err(format!("read failed: {e}")),
                 journal,
+                skipped: Vec::new(),
             }
         }
     };
@@ -234,28 +277,24 @@ fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
             return FileWriteOutcome {
                 result: Err("could not create a writable tag".to_string()),
                 journal,
+                skipped: Vec::new(),
             }
         }
     };
-    let unsupported = apply_changes_to_tag(tag, &file.changes);
-    if !unsupported.is_empty() {
-        return FileWriteOutcome {
-            result: Err(format!(
-                "fields not writable for this file format: {}",
-                unsupported.join(", ")
-            )),
-            journal,
-        };
-    }
+    // Embed everything this format can express; unembeddable/ABS-only fields are
+    // reported as `skipped` rather than failing the write.
+    let skipped = apply_changes_to_tag(tag, &file.changes);
 
     match tagged.save_to_path(&path, WriteOptions::default()) {
         Ok(()) => FileWriteOutcome {
             result: Ok(()),
             journal,
+            skipped,
         },
         Err(e) => FileWriteOutcome {
             result: Err(format!("save failed: {e}")),
             journal,
+            skipped,
         },
     }
 }
@@ -283,24 +322,28 @@ pub fn write_tags(request: WriteRequest) -> Value {
             None => {
                 failed += 1;
                 errors.push(json!({ "file_id": id, "path": "", "error": "no file payload for this id" }));
-                results.push(json!({ "file_id": id, "path": "", "status": "failed" }));
+                results.push(json!({ "file_id": id, "path": "", "status": "failed", "skipped_fields": [] }));
                 continue;
             }
         };
 
-        let outcome = write_one_file(file, request.backup);
-        if let Some(entry) = outcome.journal {
+        let FileWriteOutcome {
+            result,
+            journal,
+            skipped,
+        } = write_one_file(file, request.backup);
+        if let Some(entry) = journal {
             journal_entries.push(entry);
         }
-        match outcome.result {
+        match result {
             Ok(()) => {
                 success += 1;
-                results.push(json!({ "file_id": id, "path": file.path, "status": "success" }));
+                results.push(json!({ "file_id": id, "path": file.path, "status": "success", "skipped_fields": skipped }));
             }
             Err(e) => {
                 failed += 1;
                 errors.push(json!({ "file_id": id, "path": file.path, "error": e }));
-                results.push(json!({ "file_id": id, "path": file.path, "status": "failed" }));
+                results.push(json!({ "file_id": id, "path": file.path, "status": "failed", "skipped_fields": skipped }));
             }
         }
     }
@@ -740,8 +783,9 @@ mod tests {
     #[test]
     fn tag_roundtrip_id3v2() {
         let mut tag = Tag::new(TagType::Id3v2);
-        let unsupported = apply_changes_to_tag(&mut tag, &roundtrip_changes());
-        assert!(unsupported.is_empty(), "unexpected unsupported fields: {unsupported:?}");
+        let skipped = apply_changes_to_tag(&mut tag, &roundtrip_changes());
+        // Only the ABS-only `tags` field is unembeddable; the rest round-trip.
+        assert_eq!(skipped, vec!["tags"], "only ABS-only tags should skip");
         assert_roundtrip(&tag);
     }
 
@@ -749,8 +793,8 @@ mod tests {
     fn tag_roundtrip_mp4ilst() {
         // m4b is the real production format; series maps to the ©mvn/©mvi atoms.
         let mut tag = Tag::new(TagType::Mp4Ilst);
-        let unsupported = apply_changes_to_tag(&mut tag, &roundtrip_changes());
-        assert!(unsupported.is_empty(), "unexpected unsupported fields: {unsupported:?}");
+        let skipped = apply_changes_to_tag(&mut tag, &roundtrip_changes());
+        assert_eq!(skipped, vec!["tags"], "only ABS-only tags should skip");
         assert_roundtrip(&tag);
         // AND the MP4 freeform atoms scanner's fallback / ABS read must be written.
         assert_eq!(
@@ -792,6 +836,51 @@ mod tests {
             None
         );
         assert_eq!(tag.get_string(&ItemKey::Movement), Some("S"));
+    }
+
+    fn descriptive_changes() -> HashMap<String, Value> {
+        let mut c = HashMap::new();
+        c.insert("description".into(), json!({ "old": "", "new": "A sweeping epic." }));
+        c.insert("publisher".into(), json!({ "old": "", "new": "Tor Books" }));
+        c.insert("language".into(), json!({ "old": "", "new": "English" }));
+        c.insert("subtitle".into(), json!({ "old": "", "new": "Book One" }));
+        c.insert("isbn".into(), json!({ "old": "", "new": "9780765326355" }));
+        c.insert("asin".into(), json!({ "old": "", "new": "B003ZWFO7E" }));
+        c
+    }
+
+    #[test]
+    fn writes_descriptive_fields_id3v2() {
+        // ID3v2 expresses publisher (TPUB), language (TLAN), subtitle (TIT3) but
+        // has no home for description, isbn, or asin -> those three are skipped.
+        let mut tag = Tag::new(TagType::Id3v2);
+        let skipped = apply_changes_to_tag(&mut tag, &descriptive_changes());
+        assert_eq!(tag.get_string(&ItemKey::Publisher), Some("Tor Books"));
+        assert_eq!(tag.get_string(&ItemKey::Language), Some("English"));
+        assert_eq!(tag.get_string(&ItemKey::TrackSubtitle), Some("Book One"));
+        let mut got: Vec<&str> = skipped.iter().map(|s| s.as_str()).collect();
+        got.sort();
+        assert_eq!(got, vec!["asin", "description", "isbn"]);
+    }
+
+    #[test]
+    fn writes_descriptive_fields_mp4ilst() {
+        // MP4 expresses description (desc), language, subtitle (SUBTITLE freeform),
+        // isbn/asin (freeform) but has no publisher atom -> publisher is skipped.
+        let mut tag = Tag::new(TagType::Mp4Ilst);
+        let skipped = apply_changes_to_tag(&mut tag, &descriptive_changes());
+        assert_eq!(tag.get_string(&ItemKey::Description), Some("A sweeping epic."));
+        assert_eq!(tag.get_string(&ItemKey::Language), Some("English"));
+        assert_eq!(tag.get_string(&ItemKey::TrackSubtitle), Some("Book One"));
+        assert_eq!(
+            tag.get_string(&ItemKey::Unknown("----:com.apple.iTunes:ISBN".into())),
+            Some("9780765326355")
+        );
+        assert_eq!(
+            tag.get_string(&ItemKey::Unknown("----:com.apple.iTunes:ASIN".into())),
+            Some("B003ZWFO7E")
+        );
+        assert_eq!(skipped, vec!["publisher"]);
     }
 
     #[test]
