@@ -58,22 +58,21 @@ export function useTagOperations() {
       throw error;
     }
   }, [groups, updateFileStatuses, setWriteProgress]);  // ✅ Remove config dependency
-  const renameFiles = useCallback(async (selectedFiles) => {
+  // CR-6a: rename by explicit old->new pairs computed by RenamePreviewModal from
+  // the previews it already generated with the chosen template. `pairs` is
+  // [{ fileId, oldPath, newPath }]; we forward the old->new mapping to the
+  // backend. (Task 9b implements the Rust `rename_files` to accept `renames`.)
+  const renameFiles = useCallback(async (pairs = []) => {
     try {
       setWriting(true);
 
-      const filePairs = [];
-      groups.forEach(group => {
-        group.files.forEach(file => {
-          // CR-3: skip files with a null/undefined id defensively.
-          if (file.id != null && selectedFiles.has(file.id)) {
-            filePairs.push([file.path, group.metadata]);
-          }
-        });
-      });
+      // CR-3: skip any pair with a null/undefined fileId defensively.
+      const renames = pairs
+        .filter(p => p && p.fileId != null && p.oldPath && p.newPath)
+        .map(p => ({ file_id: p.fileId, old_path: p.oldPath, new_path: p.newPath }));
 
-      const result = await callBackend('rename_files', { files: filePairs });
-      
+      const result = await callBackend('rename_files', { renames });
+
       setWriting(false);
       return result;
     } catch (error) {
@@ -81,7 +80,7 @@ export function useTagOperations() {
       setWriting(false);
       throw error;
     }
-  }, [groups]);
+  }, []);
 
   const previewRename = useCallback(async (filePath, metadata) => {
     try {

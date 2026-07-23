@@ -29,6 +29,7 @@ import { mergeClassifyTags } from '../lib/mergeClassifyTags';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
 import { WritePreviewModal } from '../components/WritePreviewModal';
+import { ConfirmModal } from '../components/ConfirmModal';
 
 export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoSvg }) {
   const {
@@ -40,6 +41,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState(new Set());
   const [expandedGroups, setExpandedGroups] = useState(new Set());
+  // H2: staged full-library JSON import awaiting user confirmation (replacing
+  // the current in-memory groups is destructive, so it goes through a warning).
+  const [pendingImport, setPendingImport] = useState(null);
 
   // H3 (Run All stale groups): keep a live ref to `groups` so Run All's
   // sequential enrichment steps read each prior step's merged results instead
@@ -447,10 +451,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const handleDataImport = (updates) => {
     if (!updates || updates.length === 0) return;
 
-    // If updates is an array of BookGroups (from JSON import)
+    // H2: a full JSON import is an array of BookGroups (each has `files`).
+    // Replacing the current in-memory groups is destructive, so stage it and
+    // ask for confirmation instead of applying (or silently dropping) it.
     if (updates[0]?.files) {
-      // Full JSON import - replace groups
-      // For now just log - could merge or replace
+      setPendingImport(updates);
       return;
     }
 
@@ -516,6 +521,27 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       })
     );
 
+  };
+
+  // H2: apply a staged full JSON import, replacing all groups. Normalize the
+  // imported groups defensively so downstream (selection, write) never crashes:
+  // every group needs an id, every file an id and a `changes` object.
+  const applyPendingImport = () => {
+    if (!pendingImport) return;
+    const normalized = pendingImport.map((group, gi) => {
+      const groupId = group.id ?? `import-${gi}`;
+      const files = (group.files || []).map((file, fi) => ({
+        ...file,
+        id: file.id ?? `${groupId}-f${fi}`,
+        changes: file.changes ?? {},
+      }));
+      return { ...group, id: groupId, files };
+    });
+    setGroups(normalized);
+    setSelectedGroup(null);
+    setSelectedGroupIds(new Set());
+    setPendingImport(null);
+    toast.success('Library Imported', `Replaced the workspace with ${normalized.length} imported book${normalized.length === 1 ? '' : 's'}.`);
   };
 
   // H3: open the Write Tags preview modal. The user reviews the exact per-file
@@ -3335,32 +3361,43 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         />
       )}
 
+      {/* H2: full JSON import replace-groups confirmation */}
+      <ConfirmModal
+        isOpen={!!pendingImport}
+        onClose={() => setPendingImport(null)}
+        onConfirm={applyPendingImport}
+        type="danger"
+        title="Replace current library?"
+        message={`Importing this file will replace all ${groups.length} book${groups.length === 1 ? '' : 's'} currently loaded (and any unsaved edits) with ${pendingImport?.length || 0} imported book${pendingImport?.length === 1 ? '' : 's'}. This cannot be undone.`}
+        confirmText="Replace"
+        cancelText="Cancel"
+      />
+
       {modals.isOpen('rename') && (
         <RenamePreviewModal
-          selectedFiles={(() => {
+          // CR-6b: each file carries its OWN group's metadata so previews are
+          // per-book, not all rendered against a single selected group's data.
+          files={(() => {
             const fileIds = getSelectedFileIds(groups);
-            return Array.from(fileIds).map(id => {
-              for (const group of groups) {
-                const file = group.files.find(f => f.id === id);
-                if (file) return file.path;
+            const out = [];
+            for (const group of groups) {
+              for (const file of (group.files || [])) {
+                if (file.id != null && fileIds.has(file.id)) {
+                  out.push({ fileId: file.id, path: file.path, metadata: group.metadata });
+                }
               }
-              return null;
-            }).filter(Boolean);
+            }
+            return out;
           })()}
-          metadata={selectedGroup?.metadata}
-          onConfirm={async () => {
+          onConfirm={async (pairs, _template) => {
             try {
-              const actualSelectedFiles = getSelectedFileIds(groups);
-              const renameResult = await renameFiles(actualSelectedFiles);
-              modals.close('rename');
+              // CR-6a: rename by the explicit old->new pairs the modal computed
+              // from its previews (with the chosen template).
+              const renameResult = await renameFiles(pairs);
 
-              // M6: do NOT call handleScan() here. handleScan opens a folder
-              // picker and, if the user cancels, drops the entire in-memory
-              // session - every curated edit is lost just for renaming files.
-              // Instead patch each renamed file's path/filename in place from
-              // the rename result mapping (preview_rename returns { old_path,
-              // new_path }, so the batch result carries the same pair shape).
-              // Guard for a missing/stubbed result so nothing throws.
+              // M6: do NOT call handleScan() here - it opens a folder picker and,
+              // on cancel, drops the entire in-memory session (every curated
+              // edit). Instead patch each renamed file's path/filename in place.
               const renamed = renameResult?.renamed || renameResult?.results || [];
               const pathMap = new Map();
               for (const r of renamed) {
@@ -3368,21 +3405,34 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
                 const newPath = r?.new_path ?? r?.newPath;
                 if (oldPath && newPath) pathMap.set(oldPath, newPath);
               }
-              if (pathMap.size > 0) {
-                setGroups(prev => prev.map(g => {
-                  if (!(g.files || []).some(f => pathMap.has(f.path))) return g;
-                  return {
-                    ...g,
-                    files: g.files.map(f => {
-                      const np = pathMap.get(f.path);
-                      if (!np) return f;
-                      return { ...f, path: np, filename: np.split('/').pop() };
-                    }),
-                  };
-                }));
+
+              // Visible-failure guard (Tasks 5-6 pattern): the Rust rename_files
+              // is a stub until Task 9b. If nothing came back applied, surface
+              // it and keep the modal open rather than silently "succeeding".
+              if (pathMap.size === 0) {
+                toast.error(
+                  'Rename Failed',
+                  'The rename backend applied no changes (not yet implemented). Your files were not renamed.'
+                );
+                return;
               }
+
+              setGroups(prev => prev.map(g => {
+                if (!(g.files || []).some(f => pathMap.has(f.path))) return g;
+                return {
+                  ...g,
+                  files: g.files.map(f => {
+                    const np = pathMap.get(f.path);
+                    if (!np) return f;
+                    return { ...f, path: np, filename: np.split('/').pop() };
+                  }),
+                };
+              }));
+              modals.close('rename');
+              toast.success('Files Renamed', `Renamed ${pathMap.size} file${pathMap.size === 1 ? '' : 's'}.`);
             } catch (error) {
               console.error('Rename failed:', error);
+              toast.error('Rename Failed', error?.message || String(error));
             }
           }}
           onCancel={() => modals.close('rename')}

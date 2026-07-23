@@ -1,8 +1,9 @@
 // src/components/SeriesIssueModal.jsx
 // Modal for reviewing series analysis issues before applying fixes
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { X, Check, AlertTriangle, Info, ChevronDown, ChevronRight, BookOpen, Wrench, Filter } from 'lucide-react';
+import { buildFixIndexMap, fixIndexForIssue } from '../lib/seriesFixMap';
 
 const ISSUE_TYPES = {
   inconsistent_naming: { label: 'Inconsistent Naming', color: 'text-yellow-400' },
@@ -27,11 +28,19 @@ export function SeriesIssueModal({ isOpen, onClose, seriesAnalysis, onApplyFixes
   const [filterType, setFilterType] = useState('all');
   const [filterSeverity, setFilterSeverity] = useState('all');
 
-  // Initialize selected fixes with all fixable issues
-  useState(() => {
+  // M4: seed selected fixes once per analysis (the old `useState(fn, deps)`
+  // ignored deps and never re-ran; a naive useEffect would re-seed on every
+  // recompute and wipe the user's manual toggles). Key init to the analysis
+  // object identity so it runs exactly once for a given result set.
+  const initializedRef = useRef(null);
+  useEffect(() => {
+    if (initializedRef.current === seriesAnalysis) return;
+    initializedRef.current = seriesAnalysis;
     if (seriesAnalysis?.all_fixes) {
       const fixIds = seriesAnalysis.all_fixes.map((_, idx) => idx);
       setSelectedFixes(new Set(fixIds));
+    } else {
+      setSelectedFixes(new Set());
     }
   }, [seriesAnalysis]);
 
@@ -112,17 +121,13 @@ export function SeriesIssueModal({ isOpen, onClose, seriesAnalysis, onApplyFixes
     return counts;
   }, [seriesAnalysis]);
 
-  // Map fix index to fix object
-  const fixMap = useMemo(() => {
-    if (!seriesAnalysis?.all_fixes) return new Map();
-
-    const map = new Map();
-    seriesAnalysis.all_fixes.forEach((fix, idx) => {
-      const key = `${fix.book_id}-${fix.field}`;
-      map.set(key, idx);
-    });
-    return map;
-  }, [seriesAnalysis]);
+  // M3: map a fix's identity (book_id + field + suggested_value) to its index in
+  // all_fixes. Including suggested_value keeps two different-valued fixes for the
+  // same book/field independently selectable. Extracted to src/lib for unit tests.
+  const fixMap = useMemo(
+    () => buildFixIndexMap(seriesAnalysis?.all_fixes || []),
+    [seriesAnalysis]
+  );
 
   const handleApply = () => {
     if (!seriesAnalysis?.all_fixes) return;
@@ -302,10 +307,7 @@ export function SeriesIssueModal({ isOpen, onClose, seriesAnalysis, onApplyFixes
 
                       {/* Issues */}
                       {(group.issues || []).map((issue, issueIdx) => {
-                        const fixKey = issue.suggested_fix
-                          ? `${issue.suggested_fix.book_id}-${issue.suggested_fix.field}`
-                          : null;
-                        const fixIdx = fixKey ? fixMap.get(fixKey) : null;
+                        const fixIdx = fixIndexForIssue(issue, fixMap);
                         const isSelected = fixIdx !== null && selectedFixes.has(fixIdx);
 
                         return (
