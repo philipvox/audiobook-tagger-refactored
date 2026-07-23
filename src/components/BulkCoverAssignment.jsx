@@ -1,104 +1,42 @@
 import { useState, useCallback, useEffect } from 'react';
 import { callBackend, pickPath } from '../api';
 import { X, Upload, Image as ImageIcon, Check, AlertCircle, Sparkles, Trash2, RefreshCw } from 'lucide-react';
-
-// Calculate string similarity using Levenshtein distance
-function stringSimilarity(str1, str2) {
-  const s1 = str1.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const s2 = str2.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-  if (s1 === s2) return 1;
-  if (s1.length === 0 || s2.length === 0) return 0;
-
-  // Check for substring containment
-  if (s1.includes(s2) || s2.includes(s1)) {
-    return 0.9;
-  }
-
-  // Levenshtein distance
-  const matrix = Array(s2.length + 1).fill(null).map(() => Array(s1.length + 1).fill(null));
-  for (let i = 0; i <= s1.length; i++) matrix[0][i] = i;
-  for (let j = 0; j <= s2.length; j++) matrix[j][0] = j;
-
-  for (let j = 1; j <= s2.length; j++) {
-    for (let i = 1; i <= s1.length; i++) {
-      const indicator = s1[i - 1] === s2[j - 1] ? 0 : 1;
-      matrix[j][i] = Math.min(
-        matrix[j][i - 1] + 1,
-        matrix[j - 1][i] + 1,
-        matrix[j - 1][i - 1] + indicator
-      );
-    }
-  }
-
-  const maxLen = Math.max(s1.length, s2.length);
-  return 1 - matrix[s2.length][s1.length] / maxLen;
-}
-
-// Extract potential title from filename
-function extractTitleFromFilename(filename) {
-  // Remove extension
-  let name = filename.replace(/\.(jpg|jpeg|png|webp|gif)$/i, '');
-
-  // Remove common suffixes
-  name = name.replace(/_cover$/i, '');
-  name = name.replace(/-cover$/i, '');
-  name = name.replace(/_artwork$/i, '');
-
-  // Replace underscores and dashes with spaces
-  name = name.replace(/[_-]/g, ' ');
-
-  // Clean up
-  return name.trim();
-}
+import { assignCovers } from '../lib/coverMatch';
 
 export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversAssigned }) {
   const [droppedImages, setDroppedImages] = useState([]);
-  const [assignments, setAssignments] = useState({}); // groupId -> imageIndex
+  const [assignments, setAssignments] = useState({}); // groupId -> { imageIndex, score, manual? }
   const [isDragging, setIsDragging] = useState(false);
   const [applying, setApplying] = useState(false);
   const [applyingIndex, setApplyingIndex] = useState(-1);
+  // M8: books whose cover write failed on the last apply (modal stays open).
+  const [failedBooks, setFailedBooks] = useState([]);
 
   // Reset when modal opens
   useEffect(() => {
     if (isOpen) {
       setDroppedImages([]);
       setAssignments({});
+      setFailedBooks([]);
     }
   }, [isOpen]);
 
-  // Auto-match covers to books when images are added
-  const autoMatchCovers = useCallback((images) => {
-    if (images.length === 0 || selectedGroups.length === 0) return;
-
-    const newAssignments = {};
-    const usedImages = new Set();
-
-    // For each book, find the best matching image
-    selectedGroups.forEach(group => {
-      const title = group.metadata?.title || '';
-      let bestMatch = -1;
-      let bestScore = 0;
-
-      images.forEach((img, imgIndex) => {
-        if (usedImages.has(imgIndex)) return;
-
-        const imgTitle = extractTitleFromFilename(img.name);
-        const score = stringSimilarity(title, imgTitle);
-
-        if (score > bestScore && score > 0.3) {
-          bestScore = score;
-          bestMatch = imgIndex;
-        }
+  // H4/H5: auto-match via the shared greedy scorer, PRESERVING existing manual
+  // assignments (only unassigned books/images are matched). Auto assignments
+  // from a prior pass are discarded so re-matching can improve them.
+  const autoMatchCovers = useCallback((images, baseAssignments) => {
+    if (selectedGroups.length === 0) return;
+    setAssignments(prev => {
+      const source = baseAssignments ?? prev;
+      const manual = Object.fromEntries(
+        Object.entries(source).filter(([, a]) => a.manual)
+      );
+      return assignCovers({
+        books: selectedGroups.map(g => ({ id: g.id, title: g.metadata?.title || '' })),
+        images,
+        existing: manual,
       });
-
-      if (bestMatch >= 0) {
-        newAssignments[group.id] = { imageIndex: bestMatch, score: bestScore };
-        usedImages.add(bestMatch);
-      }
     });
-
-    setAssignments(newAssignments);
   }, [selectedGroups]);
 
   // Handle file drop
@@ -194,7 +132,8 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
           delete newAssignments[gId];
         }
       });
-      newAssignments[groupId] = { imageIndex, score: 1 }; // Manual = score 1
+      // Manual = score 1, flagged so re-matching (H5) preserves it.
+      newAssignments[groupId] = { imageIndex, score: 1, manual: true };
       return newAssignments;
     });
   };
@@ -231,11 +170,15 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
     setDroppedImages(prev => prev.filter((_, i) => i !== index));
   };
 
-  // Apply all assignments
+  // Apply all assignments. M8: on partial failure keep the modal open, keep the
+  // failed books' assignments (drop only the succeeded ones), surface the failed
+  // list, and report { succeeded, failed } to the parent.
   const applyAssignments = async () => {
     setApplying(true);
+    setFailedBooks([]);
     const assignmentEntries = Object.entries(assignments);
-    let successCount = 0;
+    const succeeded = [];
+    const failed = [];
 
     for (let i = 0; i < assignmentEntries.length; i++) {
       const [groupId, assignment] = assignmentEntries[i];
@@ -248,24 +191,44 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
           imageData: image.data,
           mimeType: image.mimeType,
         });
-        successCount++;
+        succeeded.push(groupId);
       } catch (error) {
         console.error(`Failed to set cover for group ${groupId}:`, error);
+        const group = selectedGroups.find(g => g.id === groupId);
+        failed.push({
+          groupId,
+          title: group?.metadata?.title || groupId,
+          error: String(error?.message || error),
+        });
       }
     }
 
     setApplying(false);
     setApplyingIndex(-1);
 
-    if (successCount > 0) {
-      onCoversAssigned?.(successCount);
+    // Report the full outcome so the parent can toast successes AND failures.
+    onCoversAssigned?.({ succeeded, failed });
+
+    if (failed.length === 0) {
       onClose();
+      return;
     }
+
+    // Keep the modal open, drop the succeeded assignments so the remaining rows
+    // (and a retry) target only the failures.
+    setFailedBooks(failed);
+    setAssignments(prev => {
+      const next = {};
+      for (const [gid, a] of Object.entries(prev)) {
+        if (!succeeded.includes(gid)) next[gid] = a;
+      }
+      return next;
+    });
   };
 
-  // Re-run auto-match
+  // Re-run auto-match (H5: preserves manual assignments, re-matches the rest).
   const reAutoMatch = () => {
-    setAssignments({});
+    setFailedBooks([]);
     autoMatchCovers(droppedImages);
   };
 
@@ -473,6 +436,21 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
             </div>
           </div>
         </div>
+
+        {/* M8: failed-cover banner - the modal stays open so failures can be retried */}
+        {failedBooks.length > 0 && (
+          <div className="px-4 py-2 bg-red-500/10 border-t border-red-500/30">
+            <div className="flex items-center gap-2 text-sm text-red-300 font-medium">
+              <AlertCircle className="w-4 h-4" />
+              {failedBooks.length} cover{failedBooks.length !== 1 ? 's' : ''} failed to apply - fix and retry
+            </div>
+            <ul className="mt-1 text-xs text-red-300/80 max-h-20 overflow-y-auto list-disc list-inside">
+              {failedBooks.map(f => (
+                <li key={f.groupId} className="truncate" title={f.error}>{f.title}</li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {/* Footer */}
         <div className="p-4 border-t border-neutral-800 bg-neutral-950 flex items-center justify-between">

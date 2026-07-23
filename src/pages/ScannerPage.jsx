@@ -44,6 +44,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   // H2: staged full-library JSON import awaiting user confirmation (replacing
   // the current in-memory groups is destructive, so it goes through a warning).
   const [pendingImport, setPendingImport] = useState(null);
+  // M9: bump to invalidate cached covers after a cover assignment. `ids` are the
+  // affected group ids (cleared from BookList's coverCache); `nonce` also
+  // re-triggers MetadataPanel's cover load for the open book.
+  const [coverRefresh, setCoverRefresh] = useState({ nonce: 0, ids: [] });
 
   // H3 (Run All stale groups): keep a live ref to `groups` so Run All's
   // sequential enrichment steps read each prior step's merged results instead
@@ -3179,6 +3183,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           validationResults={validationResults}
           hasAbsConnection={!!(config?.abs_base_url && config?.abs_api_token)}
           onNavigateToSettings={onNavigateToSettings}
+          coverInvalidation={coverRefresh}
         />
 
         <MetadataPanel
@@ -3197,6 +3202,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           }}
           validationData={selectedGroup ? validationResults[selectedGroup.id] : null}
           onFixIssue={handleFixSingleIssue}
+          coverRefreshNonce={coverRefresh.nonce}
         />
       </div>
 
@@ -3483,9 +3489,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           isOpen={modals.isOpen('bulkCover')}
           onClose={() => modals.close('bulkCover')}
           selectedGroups={getSelectedGroups()}
-          onCoversAssigned={(count) => {
-            // Trigger refresh of cover cache
-            setGroups([...groups]);
+          onCoversAssigned={({ succeeded = [], failed = [] }) => {
+            // M9: invalidate cached covers for the books that were updated so
+            // BookList + MetadataPanel reload the new art instead of the stale one.
+            if (succeeded.length > 0) {
+              setCoverRefresh(prev => ({ nonce: prev.nonce + 1, ids: succeeded }));
+              setGroups([...groups]);
+              toast.success('Covers Applied', `Updated ${succeeded.length} cover${succeeded.length === 1 ? '' : 's'}.`);
+            }
+            if (failed.length > 0) {
+              toast.error('Some Covers Failed', `${failed.length} cover${failed.length === 1 ? '' : 's'} could not be applied.`);
+            }
           }}
         />
       )}
