@@ -48,6 +48,11 @@ export function RenamePreviewModal({ files = [], onConfirm, onCancel }) {
 
   const currentTemplate = getCurrentTemplate();
 
+  // Stable signature of the selected files so the preview effect doesn't re-run
+  // (restarting the debounce/spinner) just because the parent rebuilt the `files`
+  // array reference on an unrelated render.
+  const filesKey = files.map(f => f.fileId ?? f.path).join('|');
+
   // L9: debounce (300ms) + cancellation token so rapid template edits don't
   // race. A token captured per run is compared before every setState; a stale
   // run (superseded by a newer edit or an unmount) is dropped.
@@ -92,7 +97,8 @@ export function RenamePreviewModal({ files = [], onConfirm, onCancel }) {
       clearTimeout(timer);
       runTokenRef.current++; // invalidate any in-flight run on cleanup
     };
-  }, [files, currentTemplate, templatesLoaded]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filesKey, currentTemplate, templatesLoaded]);
 
   const changedPreviews = previews.filter(p => p.changed);
   const changedCount = changedPreviews.length;

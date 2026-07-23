@@ -1,7 +1,9 @@
 // src/components/BulkEditModal.jsx
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { X, Save, Users, AlertCircle } from 'lucide-react';
 import { computeBulkUpdates } from '../lib/bulkEditUpdates';
+
+const FIELD_KEYS = ['author', 'narrator', 'genres', 'publisher', 'language', 'year', 'series', 'sequence', 'age_rating', 'content_rating'];
 
 // Compute the value shared by every selected group for a field, or '' if they
 // differ. Used both to prefill inputs (M10) and to skip no-op writes (H1).
@@ -52,41 +54,13 @@ export function BulkEditModal({ isOpen, onClose, onSave, selectedGroups }) {
   // explicit clear intentionally wipes the value across the selection.
   const [clearFields, setClearFields] = useState({});
 
-  const [values, setValues] = useState({
-    author: '',
-    narrator: '',
-    genres: '',
-    publisher: '',
-    language: '',
-    year: '',
-    series: '',
-    sequence: '',
-    age_rating: '',
-    content_rating: '',
-  });
-
-  // M10: prefill inputs with the common value when the modal opens (was shown
-  // only as a placeholder before, so the value never survived to save).
-  useEffect(() => {
-    if (!isOpen || !selectedGroups || selectedGroups.length === 0) return;
-    setValues({
-      author: commonValueOf(selectedGroups, 'author'),
-      narrator: commonValueOf(selectedGroups, 'narrator'),
-      genres: commonValueOf(selectedGroups, 'genres'),
-      publisher: commonValueOf(selectedGroups, 'publisher'),
-      language: commonValueOf(selectedGroups, 'language'),
-      year: commonValueOf(selectedGroups, 'year'),
-      series: commonValueOf(selectedGroups, 'series'),
-      sequence: commonValueOf(selectedGroups, 'sequence'),
-      age_rating: commonValueOf(selectedGroups, 'age_rating'),
-      content_rating: commonValueOf(selectedGroups, 'content_rating'),
-    });
-    setFieldsToEdit({
-      author: false, narrator: false, genres: false, publisher: false,
-      language: false, year: false, series: false, age_rating: false, content_rating: false,
-    });
-    setClearFields({});
-  }, [isOpen, selectedGroups]);
+  // M10: prefill inputs with the common value at OPEN. Lazy-initialized (not a
+  // useEffect) because the parent passes a freshly-built selectedGroups array on
+  // every render; a dep-driven effect would re-run and wipe in-progress edits.
+  // The modal is remounted per open, so this snapshot re-seeds each time.
+  const [values, setValues] = useState(() =>
+    Object.fromEntries(FIELD_KEYS.map(f => [f, commonValueOf(selectedGroups || [], f)]))
+  );
 
   if (!isOpen || !selectedGroups || selectedGroups.length === 0) return null;
 
