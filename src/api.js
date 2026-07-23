@@ -111,6 +111,15 @@ async function getTauriInvoke() {
 // Commands that route to Rust when running in Tauri
 const TAURI_COMMANDS = new Set([
   'scan_library',
+  // Task 9b: local-file write/undo/rename backend (Tauri-only; the browser build
+  // keeps the stub behavior, which the frontend already reports as a visible
+  // failure). No HANDLERS fallback by design.
+  'write_tags',
+  'get_undo_status',
+  'undo_last_write',
+  'clear_undo_state',
+  'preview_rename',
+  'rename_files',
   'ollama_get_status',
   'ollama_get_model_presets',
   'ollama_get_disk_usage',
