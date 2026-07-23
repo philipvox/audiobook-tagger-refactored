@@ -13,6 +13,26 @@ pub fn effective_base(base: &str) -> String {
     if trimmed.is_empty() { OLLAMA_DEFAULT_BASE.to_string() } else { trimmed.to_string() }
 }
 
+/// Whether an (already effective) base URL points at the local machine. Only a
+/// local Ollama can be started/stopped by this app; remote ones must be managed
+/// on their own host.
+fn is_localhost(base: &str) -> bool {
+    let b = base.to_lowercase();
+    b.contains("127.0.0.1") || b.contains("localhost") || b.contains("[::1]") || b.contains("0.0.0.0")
+}
+
+/// Validate an Ollama model name. Allows alphanumerics plus / . : - _ (registry
+/// namespaces, tags, versions); rejects whitespace, shell metacharacters, empty,
+/// over-long, and ".." path traversal.
+fn is_valid_model_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | ':' | '-' | '_'))
+}
+
 static OLLAMA_PID: Mutex<Option<u32>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,8 +98,14 @@ async fn is_running(base: &str) -> bool {
 fn find_system_ollama() -> Option<PathBuf> {
     #[cfg(unix)]
     {
-        // Check common install paths first (AppImage/Flatpak may have limited PATH)
-        for path in &["/usr/local/bin/ollama", "/usr/bin/ollama", "/snap/bin/ollama"] {
+        // Check common install paths first (GUI apps / AppImage / Flatpak may have
+        // a limited PATH that omits Homebrew and other install locations).
+        for path in &[
+            "/opt/homebrew/bin/ollama",
+            "/usr/local/bin/ollama",
+            "/usr/bin/ollama",
+            "/snap/bin/ollama",
+        ] {
             let p = PathBuf::from(path);
             if p.exists() {
                 return Some(p);
@@ -180,6 +206,12 @@ pub async fn ollama_start(base_url: Option<String>) -> Result<String, String> {
     if is_running(&base).await {
         return Ok("Ollama is already running".to_string());
     }
+    // Never spawn a local server for a remotely-configured Ollama.
+    if !is_localhost(&base) {
+        return Err(
+            "Configured Ollama is remote; start it on the remote host instead.".to_string(),
+        );
+    }
     let binary = find_best_binary()
         .ok_or_else(|| "Ollama is not installed. Install it via the button above, or install Ollama system-wide from https://ollama.com/download".to_string())?;
     let models_dir = ollama_models_dir()?;
@@ -221,26 +253,35 @@ pub async fn ollama_start(base_url: Option<String>) -> Result<String, String> {
     Err("Ollama started but didn't become responsive within 15 seconds".to_string())
 }
 
+/// Kill ONLY the Ollama process this app spawned, if any. Takes the stored PID so
+/// it runs at most once. Never touches an Ollama the user started themselves
+/// (no pkill "ollama serve"). Returns true if a spawned process was signalled.
+pub fn kill_spawned_ollama() -> bool {
+    let pid = OLLAMA_PID.lock().ok().and_then(|mut guard| guard.take());
+    match pid {
+        Some(pid) => {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/F"])
+                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                    .output();
+            }
+            true
+        }
+        None => false,
+    }
+}
+
 #[tauri::command]
 pub async fn ollama_stop() -> Result<String, String> {
-    let pid = OLLAMA_PID.lock().ok().and_then(|mut guard| guard.take());
-    if let Some(pid) = pid {
-        #[cfg(unix)]
-        unsafe { libc::kill(pid as i32, libc::SIGTERM); }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            let _ = tokio::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                .output().await;
-        }
-    }
-    #[cfg(unix)]
-    {
-        let _ = tokio::process::Command::new("pkill")
-            .args(["-f", "ollama serve"])
-            .output().await;
+    if !kill_spawned_ollama() {
+        return Ok("Ollama was not started by this app; leaving it running".to_string());
     }
     for _ in 0..10 {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -372,7 +413,7 @@ pub async fn ollama_uninstall() -> Result<String, String> {
 pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String, base_url: Option<String>) -> Result<String, String> {
     let base = effective_base(base_url.as_deref().unwrap_or(""));
     let model_name = model_name.trim().to_string();
-    if model_name.is_empty() || model_name.len() > 200 || model_name.contains("..") || model_name.contains("/") {
+    if !is_valid_model_name(&model_name) {
         return Err("Invalid model name".to_string());
     }
     if !is_running(&base).await {
@@ -392,7 +433,6 @@ pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String,
     }
 
     // Stream the response line by line, emit progress events
-    use tokio::io::AsyncBufReadExt;
     let stream = resp.bytes_stream();
     use futures::StreamExt;
     let mut buffer = String::new();
@@ -402,8 +442,14 @@ pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String,
         let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
+        // Guard against unbounded growth, but cut at the last newline so a
+        // partially-received JSON line stays intact for the next chunk to complete.
         if buffer.len() > 1_000_000 {
-            buffer.clear(); // Reset if buffer gets too large
+            if let Some(pos) = buffer.rfind('\n') {
+                buffer.drain(..=pos);
+            } else {
+                buffer.clear();
+            }
         }
 
         // Process complete JSON lines
@@ -448,4 +494,36 @@ pub async fn ollama_delete_model(model_name: String, base_url: Option<String>) -
         return Err(format!("Delete failed: {}", text));
     }
     Ok(format!("Model '{}' deleted", model_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_model_names_accept_real_forms() {
+        assert!(is_valid_model_name("qwen3:4b"));
+        assert!(is_valid_model_name("gemma4:e2b"));
+        assert!(is_valid_model_name("llama3.2:3b"));
+        assert!(is_valid_model_name("hf.co/user/model-name:Q4_K_M"));
+        assert!(is_valid_model_name("library/phi4-mini"));
+    }
+
+    #[test]
+    fn invalid_model_names_rejected() {
+        assert!(!is_valid_model_name(""));
+        assert!(!is_valid_model_name("model; rm -rf /"));
+        assert!(!is_valid_model_name("model name")); // whitespace
+        assert!(!is_valid_model_name("bad$(whoami)"));
+        assert!(!is_valid_model_name("../etc/passwd"));
+        assert!(!is_valid_model_name("model|pipe"));
+    }
+
+    #[test]
+    fn localhost_detection() {
+        assert!(is_localhost("http://127.0.0.1:11434"));
+        assert!(is_localhost("http://localhost:11434"));
+        assert!(!is_localhost("http://192.168.1.50:11434"));
+        assert!(!is_localhost("https://ollama.example.com"));
+    }
 }

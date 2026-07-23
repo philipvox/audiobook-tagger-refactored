@@ -31,9 +31,9 @@ pub fn run() {
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                if let Ok(rt) = tokio::runtime::Runtime::new() {
-                    let _ = rt.block_on(ollama::ollama_stop());
-                }
+                // Best-effort, synchronous, scoped kill: only the Ollama process this
+                // app spawned (if any) is signalled. No fresh Tokio runtime, no pkill.
+                ollama::kill_spawned_ollama();
             }
         })
         .run(tauri::generate_context!())
