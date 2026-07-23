@@ -1775,6 +1775,54 @@ Return JSON: {"year":"2005"}`;
       body: { toMergeAuthorIds: args.secondaryIds },
     });
   },
+  // Push staged name/description edits (useAuthors.js's pendingChanges) to
+  // ABS. Contract useAuthors.js's pushToAbs trusts:
+  // { updated: number, failed: number, errors: [{ id, error }] }.
+  push_author_changes_to_abs: async (args) => {
+    const config = getLocalConfig();
+    const { abs_base_url: baseUrl, abs_api_token: token } = config;
+    const items = args.items || args.request?.items || [];
+
+    // Fail fast with a single result instead of issuing N doomed requests
+    // when ABS isn't configured (same pattern as push_abs_updates).
+    if (!baseUrl || !token) {
+      return {
+        updated: 0,
+        failed: 1,
+        errors: [{ id: 'config', error: 'ABS is not configured: missing base URL or API token' }],
+      };
+    }
+
+    let updated = 0;
+    let failed = 0;
+    const errors = [];
+
+    for (const item of items) {
+      const id = item.id;
+      if (!id) {
+        failed++;
+        errors.push({ id: 'unknown', error: 'Missing author id' });
+        continue;
+      }
+      try {
+        // Only send fields that were actually staged, so an unstaged field
+        // (sent as null by pushToAbs) never overwrites the real value.
+        const payload = {};
+        if (item.name != null) payload.name = item.name;
+        if (item.description != null) payload.description = item.description;
+        await absApi(baseUrl, token, `/api/authors/${id}`, {
+          method: 'PATCH',
+          body: payload,
+        });
+        updated++;
+      } catch (err) {
+        failed++;
+        errors.push({ id, error: err.message });
+      }
+    }
+
+    return { updated, failed, errors };
+  },
   get_abs_author_image: async (args) => {
     const config = getLocalConfig();
     try {
