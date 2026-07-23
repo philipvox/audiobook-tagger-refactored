@@ -78,6 +78,64 @@ describe('useAuthors.pushToAbs (H5/M-8)', () => {
     });
   });
 
+  it('keeps every staged change and reports failure when the backend returns the generic unimplemented-command stub shape', async () => {
+    // push_author_changes_to_abs isn't wired up in src/api.js's HANDLERS (or
+    // TAURI_COMMANDS), so callBackend actually returns this shape today:
+    // { _stub: true, message: "'push_author_changes_to_abs' is not
+    // available in the web version." }. Without a shape check, that reads
+    // as updated=0/failed=0/errors=[] and pushToAbs would clear every
+    // staged change with zero feedback - a live data-destruction bug.
+    mockCallBackend.mockImplementation(async (cmd) => {
+      if (cmd === 'get_abs_authors') return [];
+      if (cmd === 'push_author_changes_to_abs') {
+        return { _stub: true, message: "'push_author_changes_to_abs' is not available in the web version." };
+      }
+      return {};
+    });
+
+    const { result } = renderHook(() => useAuthors());
+
+    act(() => {
+      result.current.stageChange('a1', 'name', 'A1 New');
+      result.current.stageChange('a2', 'name', 'A2 New');
+    });
+
+    let pushResult;
+    await act(async () => {
+      pushResult = await result.current.pushToAbs();
+    });
+
+    expect(result.current.pendingChanges).toEqual({
+      a1: { name: 'A1 New' },
+      a2: { name: 'A2 New' },
+    });
+    expect(pushResult.failed).toBe(2);
+    expect(pushResult.updated).toBe(0);
+    expect(pushResult.errors.length).toBeGreaterThan(0);
+  });
+
+  it('keeps every staged change and reports failure when the backend returns nothing at all', async () => {
+    mockCallBackend.mockImplementation(async (cmd) => {
+      if (cmd === 'get_abs_authors') return [];
+      if (cmd === 'push_author_changes_to_abs') return undefined;
+      return {};
+    });
+
+    const { result } = renderHook(() => useAuthors());
+
+    act(() => {
+      result.current.stageChange('a1', 'name', 'A1 New');
+    });
+
+    let pushResult;
+    await act(async () => {
+      pushResult = await result.current.pushToAbs();
+    });
+
+    expect(result.current.pendingChanges).toEqual({ a1: { name: 'A1 New' } });
+    expect(pushResult.failed).toBe(1);
+  });
+
   it('clears all staged changes when the backend confirms full success', async () => {
     mockCallBackend.mockImplementation(async (cmd) => {
       if (cmd === 'get_abs_authors') return [];

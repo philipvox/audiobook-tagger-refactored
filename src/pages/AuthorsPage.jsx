@@ -154,13 +154,18 @@ export function AuthorsPage() {
         setConfirmModal(null);
         const result = await pushToAbs();
         // H5/M-8: pushToAbs keeps failed entries staged instead of silently
-        // dropping them, so tell the user what actually happened.
+        // dropping them, so tell the user what actually happened. When
+        // pushToAbs can't trust the backend's result shape (e.g. the
+        // unimplemented-command stub), it reports the whole batch as
+        // failed with a specific message in result.errors - surface that
+        // instead of a generic count so this failure mode is never silent.
+        const firstErrorMessage = typeof result?.errors?.[0] === 'string' ? result.errors[0] : null;
         if (!result) {
           toast.error('Push Failed', 'Could not push changes to AudiobookShelf.');
         } else if (result.failed > 0 && result.updated > 0) {
           toast.warning('Push Partially Failed', `Updated ${result.updated}, failed ${result.failed}. Failed changes remain staged.`);
         } else if (result.failed > 0) {
-          toast.error('Push Failed', `Failed to push ${result.failed} change(s). They remain staged.`);
+          toast.error('Push Failed', firstErrorMessage || `Failed to push ${result.failed} change(s). They remain staged.`);
         } else if (result.updated > 0) {
           toast.success('Pushed to ABS', `Updated ${result.updated} author${result.updated === 1 ? '' : 's'}.`);
         }
