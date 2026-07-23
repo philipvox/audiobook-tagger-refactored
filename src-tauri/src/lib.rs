@@ -1,4 +1,5 @@
 mod scanner;
+mod writer;
 mod ollama;
 mod whisper;
 mod whisper_local;
@@ -9,6 +10,12 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .invoke_handler(tauri::generate_handler![
             scanner::scan_library,
+            writer::write_tags,
+            writer::get_undo_status,
+            writer::undo_last_write,
+            writer::clear_undo_state,
+            writer::preview_rename,
+            writer::rename_files,
             ollama::ollama_get_status,
             ollama::ollama_get_model_presets,
             ollama::ollama_get_disk_usage,
