@@ -46,7 +46,9 @@ const DEFAULT_CONFIG = {
   performance_preset: 'balanced',
   ai_model: 'gpt-5-nano',
   ai_base_url: 'https://api.openai.com',
-  use_local_ai: false,
+  // use_local_ai is intentionally omitted from defaults: `undefined` means the
+  // user has never made a choice (allows one-time Ollama auto-detect), while an
+  // explicit `true`/`false` is a user decision that auto-detect must respect.
   ollama_model: null,
   ollama_base_url: '',
   local_concurrency: 2,
