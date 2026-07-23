@@ -1,4 +1,4 @@
-// mergeClassifyTags — pure helper for the classify handler's tag merge (H1).
+// mergeClassifyTags - pure helper for the classify handler's tag merge (H1).
 //
 // The classifier can return three kinds of tags: top-level classification
 // tags (`tags`), DNA tags (`dna:` prefixed), and age tags (`age-*`, `rated-*`,
@@ -45,6 +45,6 @@ export function mergeClassifyTags(existingTags, result = {}) {
     return { tags: [...new Set([...preserved, ...dnaTags, ...ageTags])], changed };
   }
 
-  // No tag data at all — leave the existing tags untouched.
+  // No tag data at all - leave the existing tags untouched.
   return { tags: existing, changed };
 }

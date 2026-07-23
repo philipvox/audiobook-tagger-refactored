@@ -390,7 +390,7 @@ describe('AppContext', () => {
     });
   });
 
-  describe('applyBatchFixes — sequence 0 is real data (L-7)', () => {
+  describe('applyBatchFixes - sequence 0 is real data (L-7)', () => {
     const wrapper = ({ children }) => (
       <AppProvider>{children}</AppProvider>
     );
