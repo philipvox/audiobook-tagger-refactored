@@ -58,12 +58,13 @@ describe('summarizeBatch (V1/V2/V3 copy)', () => {
   });
 });
 
-describe('scrollToFirstErrorGroup', () => {
-  it('returns false when no group has a lastError', () => {
+describe('scrollToFirstErrorGroup (fresh results array)', () => {
+  it('returns false for non-arrays and empty/clean results', () => {
+    expect(scrollToFirstErrorGroup(null)).toBe(false);
     expect(scrollToFirstErrorGroup([{ id: 'a' }, { id: 'b' }])).toBe(false);
   });
 
-  it('scrolls the first matching book into view', () => {
+  it('scrolls the first errored book into view (hard failure via error field)', () => {
     document.body.innerHTML = `
       <div data-book-id="a">A</div>
       <div data-book-id="b">B</div>
@@ -71,15 +72,15 @@ describe('scrollToFirstErrorGroup', () => {
     const bEl = document.querySelector('[data-book-id="b"]');
     bEl.scrollIntoView = vi.fn();
 
-    const groups = [
+    const results = [
       { id: 'a' },
-      { id: 'b', lastError: { severity: 'error', stage: 'classify', kind: 'http', message: 'x' } },
+      { id: 'b', error: 'boom' },
     ];
-    expect(scrollToFirstErrorGroup(groups)).toBe(true);
+    expect(scrollToFirstErrorGroup(results)).toBe(true);
     expect(bEl.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' });
   });
 
-  it('filters by severity when requested', () => {
+  it('derives severity from errorDetail.kind and filters by severity', () => {
     document.body.innerHTML = `
       <div data-book-id="a">A</div>
       <div data-book-id="b">B</div>
@@ -89,12 +90,24 @@ describe('scrollToFirstErrorGroup', () => {
     const bEl = document.querySelector('[data-book-id="b"]');
     bEl.scrollIntoView = vi.fn();
 
-    const groups = [
-      { id: 'a', lastError: { severity: 'warn', stage: 'dna', kind: 'parse', message: 'x' } },
-      { id: 'b', lastError: { severity: 'error', stage: 'classify', kind: 'http', message: 'x' } },
+    // 'a' is a warn (empty-content maps to warn), 'b' is a hard http error.
+    const results = [
+      { id: 'a', errorDetail: { stage: 'dna', kind: 'empty-content', message: 'x' } },
+      { id: 'b', errorDetail: { stage: 'classify', kind: 'http', message: 'x' } },
     ];
-    expect(scrollToFirstErrorGroup(groups, 'error')).toBe(true);
+    expect(scrollToFirstErrorGroup(results, 'error')).toBe(true);
     expect(bEl.scrollIntoView).toHaveBeenCalled();
     expect(aEl.scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it('finds a warn book when severity is warn', () => {
+    document.body.innerHTML = `<div data-book-id="a">A</div>`;
+    const aEl = document.querySelector('[data-book-id="a"]');
+    aEl.scrollIntoView = vi.fn();
+    const results = [
+      { id: 'a', errorDetail: { stage: 'dna', kind: 'empty-response', message: 'x' } },
+    ];
+    expect(scrollToFirstErrorGroup(results, 'warn')).toBe(true);
+    expect(aEl.scrollIntoView).toHaveBeenCalled();
   });
 });
