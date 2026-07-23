@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
-const WHISPER_VERSION: &str = "1.8.4";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WhisperModelPreset {
@@ -205,27 +204,74 @@ fn list_models() -> Vec<WhisperLocalModel> {
     models
 }
 
-/// Get the download URL for whisper-cpp binary for this platform
+/// Get the download URL for whisper-cpp binary for this platform.
+/// macOS and Linux install via Homebrew (see whisper_local_install); only
+/// Windows fetches a prebuilt zip. The macOS xcframework download was removed
+/// because those archives are static libraries, not a runnable CLI binary.
 fn get_binary_download_url() -> Result<(&'static str, &'static str), String> {
     // Returns (url, archive_type)
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    return Ok(("https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-v1.8.4-xcframework.zip", "xcframework"));
-
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     return Ok(("https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-x64.zip", "zip"));
 
     #[cfg(all(target_os = "windows", target_arch = "x86"))]
     return Ok(("https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-Win32.zip", "zip"));
 
-    // For macOS Intel and Linux, try brew or build from source
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    // macOS (both arches) and Linux go through the package manager path.
+    #[cfg(target_os = "macos")]
     return Ok(("brew", "brew"));
 
     #[cfg(target_os = "linux")]
-    return Ok(("brew", "brew")); // Placeholder - will try system package manager
+    return Ok(("brew", "brew"));
 
     #[allow(unreachable_code)]
     Err("Unsupported platform".to_string())
+}
+
+/// Resolve the Homebrew binary via absolute paths first (GUI apps don't inherit
+/// the shell PATH), then fall back to a PATH lookup.
+#[cfg(unix)]
+fn find_brew() -> Option<PathBuf> {
+    for candidate in &["/opt/homebrew/bin/brew", "/usr/local/bin/brew"] {
+        let p = PathBuf::from(candidate);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(output) = std::process::Command::new("which").arg("brew").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+    None
+}
+
+/// True only if the file begins with a recognized executable magic number
+/// (ELF, Mach-O thin/fat either endian, or Windows PE). Rejects headers,
+/// dylibs' text stubs, and other non-runnable files picked up by a dir walk.
+fn passes_executable_check(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut buf = [0u8; 4];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    if f.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    if &buf == b"\x7FELF" {
+        return true; // ELF (Linux)
+    }
+    let magic = u32::from_be_bytes(buf);
+    // Mach-O thin (32/64) and fat, both byte orders.
+    if matches!(
+        magic,
+        0xFEED_FACE | 0xFEED_FACF | 0xCEFA_EDFE | 0xCFFA_EDFE | 0xCAFE_BABE | 0xBEBA_FECA
+    ) {
+        return true;
+    }
+    &buf[..2] == b"MZ" // Windows PE
 }
 
 // ---- Tauri commands ----
@@ -270,35 +316,38 @@ pub async fn whisper_local_install(window: tauri::Window) -> Result<String, Stri
 
     let (url, archive_type) = get_binary_download_url()?;
 
-    // macOS/Linux: try brew first (handles Metal acceleration, easy updates)
+    // macOS/Linux: install via Homebrew (handles Metal acceleration, easy updates).
     if archive_type == "brew" {
-        let _ = window.emit("whisper_install_progress", serde_json::json!({
-            "stage": "installing", "status": "Installing whisper-cpp via Homebrew...",
-        }));
-
-        // Try brew
-        if let Ok(output) = std::process::Command::new("brew").args(["install", "whisper-cpp"]).output() {
-            if output.status.success() {
+        #[cfg(unix)]
+        {
+            if let Some(brew) = find_brew() {
                 let _ = window.emit("whisper_install_progress", serde_json::json!({
-                    "stage": "complete", "status": "whisper-cpp installed via Homebrew",
+                    "stage": "installing", "status": "Installing whisper-cpp via Homebrew...",
                 }));
-                return Ok("whisper-cpp installed via Homebrew".to_string());
+                if let Ok(output) = std::process::Command::new(&brew)
+                    .args(["install", "whisper-cpp"])
+                    .output()
+                {
+                    if output.status.success() {
+                        let _ = window.emit("whisper_install_progress", serde_json::json!({
+                            "stage": "complete", "status": "whisper-cpp installed via Homebrew",
+                        }));
+                        return Ok("whisper-cpp installed via Homebrew".to_string());
+                    }
+                }
             }
         }
 
-        // Brew failed - try downloading prebuilt for macOS ARM
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            let _ = window.emit("whisper_install_progress", serde_json::json!({
-                "stage": "downloading", "status": "Homebrew not available, downloading binary...",
-            }));
-            return download_and_install_binary(
-                "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-v1.8.4-xcframework.zip",
-                &window,
-            ).await;
-        }
+        // Brew unavailable or the install failed. There is no reliable prebuilt
+        // CLI binary to fall back to, so return an actionable message.
+        #[cfg(target_os = "macos")]
+        return Err("Homebrew is required to install whisper-cpp automatically. Install Homebrew (https://brew.sh) or run 'brew install whisper-cpp' manually, then restart the app.".to_string());
 
-        return Err("Could not install whisper-cpp. Install Homebrew (https://brew.sh) and try again, or install manually.".to_string());
+        #[cfg(target_os = "linux")]
+        return Err("Install whisper-cpp with your package manager (e.g. 'sudo apt install whisper-cpp', 'sudo dnf install whisper-cpp', or 'sudo pacman -S whisper.cpp') or build it from https://github.com/ggml-org/whisper.cpp, then restart the app.".to_string());
+
+        #[allow(unreachable_code)]
+        return Err("Could not install whisper-cpp automatically. Install it manually, then restart the app.".to_string());
     }
 
     // Windows: download prebuilt binary
@@ -425,7 +474,6 @@ async fn download_and_install_binary(url: &str, window: &tauri::Window) -> Resul
         "stage": "extracting", "status": "Extracting binary...",
     }));
 
-    let dir = whisper_dir()?;
     let binary_path = bundled_binary_path()?;
 
     // Extract from zip
@@ -445,7 +493,8 @@ async fn download_and_install_binary(url: &str, window: &tauri::Window) -> Resul
         return Err(format!("Unzip failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
-    // Find the whisper-cli or whisper-cpp binary in the extracted files
+    // Find the whisper-cli or whisper-cpp binary in the extracted files. Only accept
+    // real executables (magic-byte check) so we never copy a header or static lib.
     let mut found_binary = None;
     for name in &["whisper-cli", "whisper-cpp", "whisper", "main"] {
         let candidates = [
@@ -454,7 +503,7 @@ async fn download_and_install_binary(url: &str, window: &tauri::Window) -> Resul
             temp_dir.path().join("build").join("bin").join(name),
         ];
         for candidate in &candidates {
-            if candidate.exists() {
+            if candidate.exists() && passes_executable_check(candidate) {
                 found_binary = Some(candidate.clone());
                 break;
             }
@@ -469,6 +518,7 @@ async fn download_and_install_binary(url: &str, window: &tauri::Window) -> Resul
                 if let Some(name) = e.file_name().to_str() {
                     if (name.starts_with("whisper") || name == "main" || name == "main.exe")
                         && e.file_type().is_file()
+                        && passes_executable_check(e.path())
                     {
                         found_binary = Some(e.path().to_path_buf());
                         break;
@@ -510,8 +560,21 @@ pub async fn whisper_local_download_model(
     std::fs::create_dir_all(&models_dir).map_err(|e| format!("Dir error: {}", e))?;
 
     let model_path = models_dir.join(preset.filename);
+    let partial_path = models_dir.join(format!("{}.partial", preset.filename));
+
+    // Clean up any stale partial from a previous interrupted download.
+    if partial_path.exists() {
+        let _ = std::fs::remove_file(&partial_path);
+    }
+
+    // Treat an existing final file as valid only if it's not absurdly small
+    // (a truncated/failed download). Otherwise remove it and re-download.
     if model_path.exists() {
-        return Ok(format!("Model {} already downloaded", model_id));
+        let size = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
+        if size >= 1_000_000 {
+            return Ok(format!("Model {} already downloaded", model_id));
+        }
+        let _ = std::fs::remove_file(&model_path);
     }
 
     let url = format!("{}/{}", MODEL_BASE_URL, preset.filename);
@@ -531,15 +594,27 @@ pub async fn whisper_local_download_model(
 
     let total_size = resp.content_length().unwrap_or(0);
     let mut downloaded: u64 = 0;
-    let mut file = std::fs::File::create(&model_path).map_err(|e| format!("File error: {}", e))?;
+    // Download into a .partial file; only rename to the final name once the size
+    // is verified, so an interrupted download never masquerades as a valid model.
+    let mut file =
+        std::fs::File::create(&partial_path).map_err(|e| format!("File error: {}", e))?;
 
     use futures::StreamExt;
     use std::io::Write;
     let mut stream = resp.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
-        file.write_all(&chunk).map_err(|e| format!("Write error: {}", e))?;
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_file(&partial_path);
+                return Err(format!("Stream error: {}", e));
+            }
+        };
+        if let Err(e) = file.write_all(&chunk) {
+            let _ = std::fs::remove_file(&partial_path);
+            return Err(format!("Write error: {}", e));
+        }
         downloaded += chunk.len() as u64;
 
         if total_size > 0 {
@@ -553,6 +628,31 @@ pub async fn whisper_local_download_model(
             }));
         }
     }
+
+    drop(file);
+
+    // Verify the downloaded size is within 20% of the expected size when known.
+    let expected = (preset.size_mb as u64) * 1_000_000;
+    if expected > 0 {
+        let low = expected * 8 / 10;
+        let high = expected * 12 / 10;
+        if downloaded < low || downloaded > high {
+            let _ = std::fs::remove_file(&partial_path);
+            return Err(format!(
+                "Downloaded {} looks wrong: got {} bytes, expected ~{} bytes. Please retry.",
+                preset.label, downloaded, expected
+            ));
+        }
+    } else if downloaded < 1_000_000 {
+        let _ = std::fs::remove_file(&partial_path);
+        return Err(format!(
+            "Downloaded {} is too small ({} bytes). Please retry.",
+            preset.label, downloaded
+        ));
+    }
+
+    std::fs::rename(&partial_path, &model_path)
+        .map_err(|e| format!("Finalize error: {}", e))?;
 
     let _ = window.emit("whisper_install_progress", serde_json::json!({
         "stage": "complete",
@@ -621,6 +721,17 @@ pub fn whisper_local_get_disk_usage() -> Result<u64, String> {
 
 // ---- Transcription ----
 
+/// Parse the detected language code from whisper-cpp stderr output.
+/// Input line looks like "auto-detected language: en (p = 0.98)"; returns "en".
+fn parse_detected_language(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .find(|l| l.contains("auto-detected language:"))
+        .and_then(|l| l.split(':').last())
+        .map(|s| s.trim().split(" (").next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Run whisper-cpp locally on an audio file. Returns transcript text and detected language.
 pub fn transcribe_local(
     audio_path: &str,
@@ -664,11 +775,9 @@ pub fn transcribe_local(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    // Extract language from stderr (whisper-cpp prints "auto-detected language: en")
-    let language = stderr.lines()
-        .find(|l| l.contains("auto-detected language:"))
-        .and_then(|l| l.split(':').last())
-        .map(|s| s.trim().to_string());
+    // Extract language from stderr. whisper-cpp prints e.g.
+    // "auto-detected language: en (p = 0.98)"; take just the code before " (".
+    let language = parse_detected_language(&stderr);
 
     // Transcript from stdout, or from .txt file whisper-cpp may create
     let transcript = if !stdout.trim().is_empty() {
@@ -685,4 +794,58 @@ pub fn transcribe_local(
     }
 
     Ok((transcript, language))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    // ---- Item 16: language code parsing ----
+
+    #[test]
+    fn parses_language_code_before_paren() {
+        let stderr = "whisper_full_with_state: auto-detected language: en (p = 0.98)\nother line";
+        assert_eq!(parse_detected_language(stderr).as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn parses_language_code_without_paren() {
+        let stderr = "auto-detected language: fr";
+        assert_eq!(parse_detected_language(stderr).as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn returns_none_when_absent() {
+        assert_eq!(parse_detected_language("no language line here"), None);
+    }
+
+    // ---- Item 14: executable magic-byte check ----
+
+    #[test]
+    fn executable_check_accepts_elf_and_pe_rejects_text() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let elf = tmp.path().join("elf.bin");
+        std::fs::File::create(&elf).unwrap().write_all(b"\x7FELF\x02\x01").unwrap();
+        assert!(passes_executable_check(&elf));
+
+        let pe = tmp.path().join("app.exe");
+        std::fs::File::create(&pe).unwrap().write_all(b"MZ\x90\x00").unwrap();
+        assert!(passes_executable_check(&pe));
+
+        let macho = tmp.path().join("macho.bin");
+        std::fs::File::create(&macho).unwrap().write_all(&[0xCF, 0xFA, 0xED, 0xFE]).unwrap();
+        assert!(passes_executable_check(&macho));
+
+        // A text header / stub must be rejected.
+        let text = tmp.path().join("readme.txt");
+        std::fs::File::create(&text).unwrap().write_all(b"#include <stdio.h>\n").unwrap();
+        assert!(!passes_executable_check(&text));
+
+        // Too short to have a magic number.
+        let tiny = tmp.path().join("tiny");
+        std::fs::File::create(&tiny).unwrap().write_all(b"MZ").unwrap();
+        assert!(!passes_executable_check(&tiny));
+    }
 }
