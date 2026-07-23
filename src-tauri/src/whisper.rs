@@ -5,12 +5,38 @@
 use regex::Regex;
 use reqwest::multipart;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use tempfile::NamedTempFile;
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+lazy_static::lazy_static! {
+    /// Temp files this process created. cleanup_temp_files removes exactly these,
+    /// never a blind glob of the shared system temp dir.
+    static ref TEMP_REGISTRY: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+}
+
+fn register_temp_file(path: &str) {
+    if let Ok(mut set) = TEMP_REGISTRY.lock() {
+        set.insert(path.to_string());
+    }
+}
+
+/// Truncate a string to at most `max` bytes without splitting a UTF-8 char.
+fn truncate_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 /// Result of audio intro extraction
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,14 +93,20 @@ pub fn cancel_audio_extraction() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn extract_audio_intro(request: AudioIntroRequest, window: tauri::Window) -> Result<AudioIntroResult, String> {
+pub async fn extract_audio_intro(
+    request: AudioIntroRequest,
+    force: Option<bool>,
+    window: tauri::Window,
+) -> Result<AudioIntroResult, String> {
     if !check_ffmpeg_available() {
         return Err("FFmpeg is not installed. Install it with: brew install ffmpeg".to_string());
     }
 
-    // Check cache
-    if let Some(cached) = get_cached_transcript(&request.item_id) {
-        return Ok(cached);
+    // Check cache unless the caller forces a fresh extraction.
+    if !force.unwrap_or(false) {
+        if let Some(cached) = get_cached_transcript(&request.item_id) {
+            return Ok(cached);
+        }
     }
 
     Ok(extract_intro_metadata_with_stages(&request, &window, 1, 1).await)
@@ -100,6 +132,7 @@ pub async fn batch_extract_audio_intros(
     let mut found_count = 0;
     let mut cached_count = 0;
     let mut skipped_count = 0;
+    let mut failed_count = 0;
 
     for (i, request) in items.into_iter().enumerate() {
         // Check if cancelled
@@ -137,8 +170,15 @@ pub async fn batch_extract_audio_intros(
         }));
 
         let result = extract_intro_metadata_with_stages(&request, &window, i + 1, total).await;
-        if !result.narrators.is_empty() { found_count += 1; }
-        if result.narrators.is_empty() && result.transcript.is_none() { skipped_count += 1; }
+        if !result.narrators.is_empty() {
+            found_count += 1;
+        } else if result.transcript.is_none() {
+            // No transcript at all: extraction/transcription failed.
+            failed_count += 1;
+        } else {
+            // Transcript produced but no narrator found: processed, nothing useful.
+            skipped_count += 1;
+        }
         results.push(result);
     }
 
@@ -148,8 +188,9 @@ pub async fn batch_extract_audio_intros(
     if !CANCELLED.load(Ordering::SeqCst) {
         let _ = window.emit("audio_intro_progress", serde_json::json!({
             "current": total, "total": total, "found": found_count, "cached": cached_count,
+            "skipped": skipped_count, "failed": failed_count,
             "stage": "complete",
-            "status": format!("Done! {} found, {} cached, {} skipped", found_count, cached_count, skipped_count),
+            "status": format!("Done! {} found, {} cached, {} skipped, {} failed", found_count, cached_count, skipped_count, failed_count),
         }));
     }
 
@@ -200,13 +241,15 @@ async fn extract_intro_metadata_with_stages(
         ].iter().filter(|&&v| v).count();
 
         if fields_found >= 2 {
-            cache_transcript(&result);
+            cache_if_worthwhile(&result);
             return result;
         }
 
-        // If this is the last pass, return whatever we got (even if empty)
+        // If this is the last pass, return whatever we got (even if empty).
+        // Only cache real transcripts; never cache empty/error results so a
+        // transient failure isn't remembered forever.
         if pass_idx == time_windows.len() - 1 {
-            cache_transcript(&result);
+            cache_if_worthwhile(&result);
             return result;
         }
 
@@ -253,6 +296,9 @@ async fn try_extract_at_offset(
         }
     };
     let out_path = temp_audio.path().to_string_lossy().to_string();
+    register_temp_file(&out_path);
+    // whisper-cpp may drop a sidecar transcript next to the audio file.
+    register_temp_file(&format!("{}.txt", out_path));
 
     // Build FFmpeg input: stream from ABS URL or read local file
     let extract_result = if request.source == "abs" {
@@ -340,7 +386,7 @@ async fn try_extract_at_offset(
     }));
 
     // Try LLM parsing first (more accurate), fall back to regex
-    let (extracted, method) = match try_llm_parse(&transcript, request.title.as_deref(), request).await {
+    let (extracted, method) = match try_llm_parse(&transcript, request).await {
         Ok(info) => (info, "llm"),
         Err(e) => {
             println!("   LLM parse failed, using regex: {}", e);
@@ -565,25 +611,32 @@ fn cache_transcript(result: &AudioIntroResult) {
     }
 }
 
+/// Cache only results worth remembering: a real, non-empty transcript.
+/// Empty/error results (no transcript) are never cached so a transient
+/// FFmpeg/Whisper failure doesn't get pinned in the cache.
+fn cache_if_worthwhile(result: &AudioIntroResult) {
+    let has_transcript = result
+        .transcript
+        .as_deref()
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false);
+    if has_transcript {
+        cache_transcript(result);
+    }
+}
+
 fn sanitize_filename(s: &str) -> String {
     s.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
 // ---- Temp file cleanup ----
 
-/// Clean up any whisper-related temp files that may have leaked
+/// Remove exactly the temp files this process registered. Never globs the shared
+/// system temp dir, which could delete another process's (or the user's) files.
 fn cleanup_temp_files() {
-    let temp_dir = std::env::temp_dir();
-    if let Ok(entries) = std::fs::read_dir(&temp_dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                // NamedTempFile creates files like .tmpXXXXXX.mp3 or .wav
-                if (name.ends_with(".mp3") || name.ends_with(".wav") || name.ends_with(".m4b"))
-                    && name.starts_with(".tmp")
-                {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
+    if let Ok(mut set) = TEMP_REGISTRY.lock() {
+        for path in set.drain() {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
@@ -593,7 +646,6 @@ fn cleanup_temp_files() {
 /// Send transcript to LLM (GPT or Ollama) for structured extraction.
 async fn try_llm_parse(
     transcript: &str,
-    known_title: Option<&str>,
     request: &AudioIntroRequest,
 ) -> Result<ExtractedBookInfo, Box<dyn std::error::Error + Send + Sync>> {
     let system_prompt = "You extract audiobook metadata from transcripts. Return only valid JSON.";
@@ -624,7 +676,7 @@ RULES:
 - Person names only for author/narrator fields
 
 Transcript: "{}""#,
-        &transcript[..transcript.len().min(800)]
+        truncate_str(transcript, 800)
     );
 
     let client = reqwest::Client::builder()
@@ -831,8 +883,9 @@ fn parse_book_info_from_transcript(transcript: &str) -> ExtractedBookInfo {
 /// Strips trailing non-name words (book text that got captured),
 /// sentence boundaries, and common false matches.
 fn clean_person_name(raw: &str) -> String {
-    // Split on sentence boundary first
-    let name = raw.split(". ").next().unwrap_or(raw);
+    // Truncate at a real sentence boundary, but never split on the ". " inside
+    // initials (e.g. "J. R. R. Tolkien" or "Dr. Seuss").
+    let name = truncate_at_sentence_boundary(raw);
 
     // Words that are NOT part of a person's name - if we hit one, stop
     let stop_words: &[&str] = &[
@@ -878,6 +931,36 @@ fn clean_person_name(raw: &str) -> String {
     result.trim_end_matches(['.', ',', ';', ':']).trim().to_string()
 }
 
+/// Return the prefix of `raw` up to the first genuine sentence boundary.
+///
+/// A boundary is a ". " where: the word before the period is 2+ letters (so single
+/// letter initials like "J." never split), there are already 2+ words before it,
+/// and the following word is capitalized with 3+ letters (a real new sentence).
+/// If no such boundary exists the whole string is returned.
+fn truncate_at_sentence_boundary(raw: &str) -> &str {
+    for (idx, _) in raw.match_indices(". ") {
+        let before = &raw[..idx];
+        let last_word = before.split_whitespace().last().unwrap_or("");
+        // Strip a leading '.' chain so "R" in "J.R" is judged, not "J.R".
+        let last_token = last_word.rsplit('.').next().unwrap_or(last_word);
+        if last_token.chars().filter(|c| c.is_alphabetic()).count() < 2 {
+            continue; // preceding token is an initial
+        }
+        if before.split_whitespace().count() < 2 {
+            continue; // not enough of a name yet (e.g. "Dr. Seuss")
+        }
+        let after = raw[idx + 2..].trim_start();
+        let next_word = after.split_whitespace().next().unwrap_or("");
+        let is_sentence_start = next_word.chars().count() >= 3
+            && next_word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            && next_word.chars().skip(1).take(2).all(|c| c.is_lowercase());
+        if is_sentence_start {
+            return before;
+        }
+    }
+    raw
+}
+
 fn calculate_confidence(info: &ExtractedBookInfo) -> f32 {
     let mut score = 0.0f32;
     if info.narrator.is_some() { score += 0.3; }
@@ -893,5 +976,59 @@ fn empty_result(item_id: &str) -> AudioIntroResult {
         narrators: vec![], authors: vec![],
         publisher: None, audio_publisher: None, language: None,
         parse_method: "none".to_string(), confidence: 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Item 9: UTF-8-safe truncation ----
+
+    #[test]
+    fn truncate_str_respects_char_boundaries() {
+        // 'é' and 'ö' are two bytes each; a raw byte slice at these offsets panics.
+        let s = "héllo wörld";
+        for max in 0..=s.len() + 2 {
+            let t = truncate_str(s, max);
+            assert!(t.len() <= max || max >= s.len());
+            assert!(s.starts_with(t));
+        }
+    }
+
+    #[test]
+    fn truncate_str_shorter_than_max_is_identity() {
+        assert_eq!(truncate_str("abc", 800), "abc");
+    }
+
+    // ---- Item 13: initials-safe name cleaning ----
+
+    #[test]
+    fn clean_person_name_keeps_initials() {
+        assert_eq!(clean_person_name("J. R. R. Tolkien"), "J. R. R. Tolkien");
+        assert_eq!(clean_person_name("Dr. Seuss"), "Dr. Seuss");
+        assert_eq!(clean_person_name("J.K. Rowling"), "J.K. Rowling");
+    }
+
+    #[test]
+    fn clean_person_name_stops_at_sentence() {
+        assert_eq!(
+            clean_person_name("John Smith. This audiobook is narrated"),
+            "John Smith"
+        );
+    }
+
+    #[test]
+    fn truncate_at_sentence_boundary_cases() {
+        assert_eq!(
+            truncate_at_sentence_boundary("John Smith. This is the book"),
+            "John Smith"
+        );
+        assert_eq!(
+            truncate_at_sentence_boundary("J. R. R. Tolkien"),
+            "J. R. R. Tolkien"
+        );
+        // Single-word prefix should not split (needs 2+ words).
+        assert_eq!(truncate_at_sentence_boundary("Seuss. Green Eggs"), "Seuss. Green Eggs");
     }
 }
