@@ -442,16 +442,6 @@ pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String,
         let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-        // Guard against unbounded growth, but cut at the last newline so a
-        // partially-received JSON line stays intact for the next chunk to complete.
-        if buffer.len() > 1_000_000 {
-            if let Some(pos) = buffer.rfind('\n') {
-                buffer.drain(..=pos);
-            } else {
-                buffer.clear();
-            }
-        }
-
         // Process complete JSON lines
         while let Some(newline_pos) = buffer.find('\n') {
             let line = buffer[..newline_pos].trim().to_string();
@@ -469,6 +459,17 @@ pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String,
                     "status": status,
                     "model": model_name,
                 }));
+            }
+        }
+
+        // After draining complete lines, only a partial line remains. Guard against
+        // unbounded growth from a pathological newline-less line; trimming to the last
+        // newline (none, here) is safe because complete lines were already processed.
+        if buffer.len() > 1_000_000 {
+            if let Some(pos) = buffer.rfind('\n') {
+                buffer.drain(..=pos);
+            } else {
+                buffer.clear();
             }
         }
     }
