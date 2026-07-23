@@ -29,6 +29,14 @@ const SCAN_LEVELS = [
   },
 ];
 
+// L5: static per-color class map. Tailwind can't see runtime-built class names
+// like `border-${color}-500`, so those were silently purged from the CSS bundle.
+const SCAN_LEVEL_COLORS = {
+  blue: { border: 'border-blue-500 bg-blue-50', icon: 'text-blue-600', label: 'text-blue-900', desc: 'text-blue-700' },
+  purple: { border: 'border-purple-500 bg-purple-50', icon: 'text-purple-600', label: 'text-purple-900', desc: 'text-purple-700' },
+  orange: { border: 'border-orange-500 bg-orange-50', icon: 'text-orange-600', label: 'text-orange-900', desc: 'text-orange-700' },
+};
+
 // Metadata fields that can be selectively refreshed
 const METADATA_FIELDS = [
   { id: 'title', label: 'Title', icon: BookOpen, description: 'Book title' },
@@ -109,6 +117,7 @@ export function RescanModal({ isOpen, onClose, onRescan, selectedCount, scanning
               {SCAN_LEVELS.map((level) => {
                 const Icon = level.icon;
                 const isSelected = scanLevel === level.id && !useSelectiveFields;
+                const c = SCAN_LEVEL_COLORS[level.color] || SCAN_LEVEL_COLORS.blue;
                 return (
                   <button
                     key={level.id}
@@ -118,16 +127,16 @@ export function RescanModal({ isOpen, onClose, onRescan, selectedCount, scanning
                     }}
                     className={`w-full p-3 rounded-lg border-2 text-left transition-all flex items-start gap-3 ${
                       isSelected
-                        ? `border-${level.color}-500 bg-${level.color}-50`
+                        ? c.border
                         : 'border-neutral-800 hover:border-neutral-700 bg-neutral-900'
                     }`}
                   >
-                    <Icon className={`w-5 h-5 mt-0.5 ${isSelected ? `text-${level.color}-600` : 'text-gray-400'}`} />
+                    <Icon className={`w-5 h-5 mt-0.5 ${isSelected ? c.icon : 'text-gray-400'}`} />
                     <div>
-                      <div className={`font-medium ${isSelected ? `text-${level.color}-900` : 'text-gray-100'}`}>
+                      <div className={`font-medium ${isSelected ? c.label : 'text-gray-100'}`}>
                         {level.label}
                       </div>
-                      <div className={`text-xs ${isSelected ? `text-${level.color}-700` : 'text-gray-400'}`}>
+                      <div className={`text-xs ${isSelected ? c.desc : 'text-gray-400'}`}>
                         {level.description}
                       </div>
                     </div>

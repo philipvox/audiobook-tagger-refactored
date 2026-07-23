@@ -73,7 +73,9 @@ describe('performLookup — Lookup Failed toast detail includes URL + status + b
   });
 
   it('returns found on a clean OpenLibrary hit with ISBN-13 preference', async () => {
-    const body = JSON.stringify({ docs: [{ isbn: ['1', '9780441013593'] }] });
+    const body = JSON.stringify({
+      docs: [{ title: 'Dune', author_name: ['Frank Herbert'], isbn: ['1', '9780441013593'] }],
+    });
     const fetcher = vi.fn().mockResolvedValue(mockResponse({ status: 200, body }));
 
     const out = await performLookup({
@@ -82,6 +84,64 @@ describe('performLookup — Lookup Failed toast detail includes URL + status + b
 
     expect(out.kind).toBe('found');
     expect(out.value).toBe('9780441013593');
+  });
+
+  it('M5: rejects an OpenLibrary doc whose title does not match the book', async () => {
+    // A doc with an ISBN but a wildly different title must NOT yield that ISBN.
+    const body = JSON.stringify({
+      docs: [{ title: 'Pride and Prejudice', author_name: ['Jane Austen'], isbn: ['9780000000001'] }],
+    });
+    const fetcher = vi.fn().mockResolvedValue(mockResponse({ status: 200, body }));
+
+    const out = await performLookup({
+      field: 'isbn', title: 'Dune', author: 'Frank Herbert', fetcher,
+    });
+
+    expect(out.kind).toBe('not-found');
+  });
+
+  it('M5: rejects an OpenLibrary doc whose author does not overlap', async () => {
+    const body = JSON.stringify({
+      docs: [{ title: 'Dune', author_name: ['Somebody Else'], isbn: ['9780000000002'] }],
+    });
+    const fetcher = vi.fn().mockResolvedValue(mockResponse({ status: 200, body }));
+
+    const out = await performLookup({
+      field: 'isbn', title: 'Dune', author: 'Frank Herbert', fetcher,
+    });
+
+    expect(out.kind).toBe('not-found');
+  });
+
+  it('M5: takes a matching doc even if an earlier non-matching doc has an ISBN', async () => {
+    const body = JSON.stringify({
+      docs: [
+        { title: 'Some Other Book', author_name: ['Nobody'], isbn: ['9780000000003'] },
+        { title: 'Dune', author_name: ['Frank Herbert'], isbn: ['9780441013593'] },
+      ],
+    });
+    const fetcher = vi.fn().mockResolvedValue(mockResponse({ status: 200, body }));
+
+    const out = await performLookup({
+      field: 'isbn', title: 'Dune', author: 'Frank Herbert', fetcher,
+    });
+
+    expect(out.kind).toBe('found');
+    expect(out.value).toBe('9780441013593');
+  });
+
+  it('M5: rejects an Audible products[0] fallback whose title does not match', async () => {
+    // No exact title hit; the only product is unrelated -> must not return its asin.
+    const body = JSON.stringify({
+      products: [{ asin: 'B0WRONG', title: 'A Completely Different Book', authors: [{ name: 'Nobody' }] }],
+    });
+    const fetcher = vi.fn().mockResolvedValue(mockResponse({ status: 200, body }));
+
+    const out = await performLookup({
+      field: 'asin', title: 'Dune', author: 'Frank Herbert', fetcher,
+    });
+
+    expect(out.kind).toBe('not-found');
   });
 
   it('returns not-found when the API is reachable but empty', async () => {
