@@ -1,4 +1,4 @@
-// logEvent.js — one-line writes to the persistent operation log (#58).
+// logEvent.js: one-line writes to the persistent operation log (#58).
 //
 // The point of the log is post-mortem: after a crash or a forced close during
 // a long run, the user (or a bug report) needs to see which batch operations
