@@ -159,19 +159,40 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   // Discard is the only path that deletes a snapshot the user has not replaced,
   // so it is a deliberate click, never a dismissal or a timeout.
   const [sessionBusy, setSessionBusy] = useState(false);
+  // Staged restore awaiting confirmation, because the workspace already holds
+  // books. Same shape as pendingImport: replacing loaded books is destructive.
+  const [pendingRestore, setPendingRestore] = useState(null);
 
-  const handleRestoreSession = useCallback(() => {
-    const count = restoreSession();
+  const finishRestore = useCallback((result) => {
+    if (!result?.restored) return;
     setSelectedGroup(null);
     setSelectedGroupIds(new Set());
-    logEvent('session', 'restored previous session', { books: count });
-    if (count > 0) {
+    logEvent('session', 'restored previous session', { books: result.count });
+    if (result.count > 0) {
       toast.success(
         'Session Restored',
-        `Brought back ${count} book${count === 1 ? '' : 's'} from your last session.`
+        `Brought back ${result.count} book${result.count === 1 ? '' : 's'} from your last session.`
       );
     }
-  }, [restoreSession, toast]);
+  }, [toast]);
+
+  const handleRestoreSession = useCallback(() => {
+    const result = restoreSession();
+    // The prompt has no dismiss, so the user can scan or import while it is
+    // still open. Restoring on top of that would throw the new work away with
+    // no snapshot to recover from, so it goes through a confirmation first.
+    if (!result.restored && result.reason === 'workspace-not-empty') {
+      setPendingRestore(result);
+      return;
+    }
+    finishRestore(result);
+  }, [restoreSession, finishRestore]);
+
+  const confirmRestoreSession = useCallback(() => {
+    const result = restoreSession({ force: true });
+    setPendingRestore(null);
+    finishRestore(result);
+  }, [restoreSession, finishRestore]);
 
   const handleDiscardSession = useCallback(async () => {
     setSessionBusy(true);
@@ -3717,6 +3738,20 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           onDiscard={handleDiscardSession}
         />
       )}
+
+      {/* #58: restoring on top of books already loaded is destructive, and
+          autosave is suppressed while the prompt is open, so there is no
+          snapshot of the current workspace to fall back on. Confirm first. */}
+      <ConfirmModal
+        isOpen={!!pendingRestore}
+        onClose={() => setPendingRestore(null)}
+        onConfirm={confirmRestoreSession}
+        type="danger"
+        title="Replace the books you have loaded?"
+        message={`Restoring will replace the ${pendingRestore?.currentCount || 0} book${pendingRestore?.currentCount === 1 ? '' : 's'} currently loaded (and any unsaved edits) with the ${pendingRestore?.count || 0} book${pendingRestore?.count === 1 ? '' : 's'} from your previous session. The current books have not been saved anywhere, so this cannot be undone.`}
+        confirmText="Restore"
+        cancelText="Keep current books"
+      />
     </div>
   );
 }
