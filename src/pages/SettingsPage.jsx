@@ -1235,7 +1235,8 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                   suggestions alongside them, instead of replacing them. Existing genres are never
                   removed, so a book already at the {MAX_GENRES}-genre limit keeps exactly what it
                   has. "Force" re-classification still starts fresh. Genres are also pushed to
-                  AudiobookShelf as-is, bypassing the approved-list filter above.
+                  AudiobookShelf as-is, bypassing the approved-list filter above. Note:
+                  AudiobookShelf adds every genre it receives to your library-wide genre list.
                 </p>
 
                 <Toggle
@@ -1246,7 +1247,9 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                 <p className="text-sm text-gray-400">
                   Tags that are not in the approved tag list are normally dropped when pushing to
                   AudiobookShelf. Enable this to send them as-is, with the casing you typed.
-                  Recognized tags are still normalized to their standard form.
+                  Recognized tags are still normalized to their standard form. Note: AudiobookShelf
+                  adds every tag it receives to your library-wide tag list, so typos become
+                  permanent library tags until removed in ABS.
                 </p>
               </div>
             </div>
