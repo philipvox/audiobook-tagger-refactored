@@ -123,3 +123,26 @@ describe('SettingsPage preserve_existing_genres toggle (#54)', () => {
     expect(saveConfigMock.mock.calls[0][0]).toMatchObject({ preserve_existing_genres: true });
   });
 });
+
+// #54 push boundary: same shape for the tag flag.
+describe('SettingsPage preserve_existing_tags toggle (#54)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    saveConfigMock.mockResolvedValue({ success: true });
+  });
+
+  it('renders unchecked when the config has no preserve_existing_tags key', async () => {
+    renderPage();
+    const toggle = await screen.findByLabelText(/Keep unrecognized tags when pushing/i);
+    expect(toggle).not.toBeChecked();
+  });
+
+  it('persists the flag as true once toggled on and saved', async () => {
+    renderPage();
+    fireEvent.click(await screen.findByLabelText(/Keep unrecognized tags when pushing/i));
+    fireEvent.click(screen.getByRole('button', { name: /Save Settings/i }));
+
+    await waitFor(() => expect(saveConfigMock).toHaveBeenCalled());
+    expect(saveConfigMock.mock.calls[0][0]).toMatchObject({ preserve_existing_tags: true });
+  });
+});
