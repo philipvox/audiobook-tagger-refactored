@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeTagInput, addTagToList, replaceTagInList } from './tagInput';
+import { normalizeTagInput, addTagToList, replaceTagInList, isSameTagList } from './tagInput';
 
 describe('normalizeTagInput (#54 tag-casing preservation)', () => {
   it('keeps the casing the user typed', () => {
@@ -70,5 +70,31 @@ describe('replaceTagInList', () => {
     const list = ['Fantasy'];
     expect(replaceTagInList(list, 5, 'Horror')).toBe(list);
     expect(replaceTagInList(list, null, 'Horror')).toBe(list);
+  });
+});
+
+// The editor's no-op guard: committing an unchanged tag must not stage a
+// `tags` file change (onInlineEdit stamps file.changes unconditionally).
+describe('isSameTagList (commitTagEdit / addTag no-op guard)', () => {
+  it('is true for an unchanged commit', () => {
+    const current = ['Fantasy', 'favorite'];
+    expect(isSameTagList(replaceTagInList(current, 0, 'Fantasy'), current)).toBe(true);
+  });
+
+  it('is false when the commit changes casing, a value, or the length', () => {
+    const current = ['Fantasy', 'favorite'];
+    expect(isSameTagList(replaceTagInList(current, 0, 'fantasy'), current)).toBe(false);
+    expect(isSameTagList(replaceTagInList(current, 0, 'Horror'), current)).toBe(false);
+    expect(isSameTagList(replaceTagInList(current, 0, ''), current)).toBe(false);
+  });
+
+  it('is true when a duplicate add hands back the same list', () => {
+    const current = ['Fantasy'];
+    expect(isSameTagList(addTagToList(current, 'fantasy'), current)).toBe(true);
+  });
+
+  it('handles non-array operands', () => {
+    expect(isSameTagList(null, [])).toBe(true);
+    expect(isSameTagList(null, ['a'])).toBe(false);
   });
 });
