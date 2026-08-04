@@ -1,4 +1,5 @@
 mod scanner;
+mod session;
 mod writer;
 mod ollama;
 mod whisper;
@@ -16,6 +17,11 @@ pub fn run() {
             writer::clear_undo_state,
             writer::preview_rename,
             writer::rename_files,
+            session::save_session,
+            session::load_session,
+            session::clear_session,
+            session::append_log,
+            session::get_log_path,
             ollama::ollama_get_status,
             ollama::ollama_get_model_presets,
             ollama::ollama_get_disk_usage,
