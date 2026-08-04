@@ -5,6 +5,8 @@ import {
   SESSION_VERSION,
   SESSION_STORAGE_KEY,
   AUTOSAVE_DEBOUNCE_MS,
+  AUTOSAVE_MAX_WAIT_MS,
+  autosaveDelay,
   makeSessionSnapshot,
   shouldAutosave,
   parseSession,
@@ -132,6 +134,36 @@ describe('AUTOSAVE_DEBOUNCE_MS', () => {
   it('sits in the 2-3 second window the design calls for', () => {
     expect(AUTOSAVE_DEBOUNCE_MS).toBeGreaterThanOrEqual(2000);
     expect(AUTOSAVE_DEBOUNCE_MS).toBeLessThanOrEqual(3000);
+  });
+});
+
+describe('autosaveDelay', () => {
+  const now = 1_000_000_000_000;
+
+  it('uses the full debounce when nothing has been saved yet', () => {
+    expect(autosaveDelay(0, now)).toBe(AUTOSAVE_DEBOUNCE_MS);
+    expect(autosaveDelay(null, now)).toBe(AUTOSAVE_DEBOUNCE_MS);
+    expect(autosaveDelay(NaN, now)).toBe(AUTOSAVE_DEBOUNCE_MS);
+  });
+
+  it('uses the full debounce shortly after a save', () => {
+    expect(autosaveDelay(now - 1000, now)).toBe(AUTOSAVE_DEBOUNCE_MS);
+  });
+
+  it('shortens the wait as the max-wait deadline approaches', () => {
+    // 1s of headroom left, so do not wait the full debounce past it.
+    expect(autosaveDelay(now - (AUTOSAVE_MAX_WAIT_MS - 1000), now)).toBe(1000);
+  });
+
+  it('saves immediately once the max wait has elapsed', () => {
+    // The starvation case: a batch run committing chunks faster than the
+    // debounce window would otherwise reset the timer forever.
+    expect(autosaveDelay(now - AUTOSAVE_MAX_WAIT_MS, now)).toBe(0);
+    expect(autosaveDelay(now - 10 * AUTOSAVE_MAX_WAIT_MS, now)).toBe(0);
+  });
+
+  it('falls back to the debounce if the clock went backwards', () => {
+    expect(autosaveDelay(now + 5000, now)).toBe(AUTOSAVE_DEBOUNCE_MS);
   });
 });
 

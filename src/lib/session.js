@@ -22,7 +22,27 @@ export const SESSION_VERSION = 1;
 // about 8MB and serializes in ~15ms, so the write itself is not the cost.
 export const AUTOSAVE_DEBOUNCE_MS = 2500;
 
+// Upper bound on how long the working state can go unsaved while it is still
+// changing. A pure debounce can starve: a long batch run commits a chunk of
+// results every couple of seconds, which would reset the timer over and over
+// and never write, which is exactly the crash this feature exists to survive.
+export const AUTOSAVE_MAX_WAIT_MS = 30000;
+
 export const SESSION_STORAGE_KEY = 'audiobook-tagger.session';
+
+/**
+ * How long to wait before writing, given when the last write happened.
+ * Normally the debounce window; shortened (to zero at the limit) so that a
+ * continuously changing workspace is still written at least every
+ * AUTOSAVE_MAX_WAIT_MS.
+ */
+export function autosaveDelay(lastSavedAt, now = Date.now()) {
+  if (!Number.isFinite(lastSavedAt) || lastSavedAt <= 0) return AUTOSAVE_DEBOUNCE_MS;
+  const since = now - lastSavedAt;
+  if (since <= 0) return AUTOSAVE_DEBOUNCE_MS;
+  if (since >= AUTOSAVE_MAX_WAIT_MS) return 0;
+  return Math.min(AUTOSAVE_DEBOUNCE_MS, AUTOSAVE_MAX_WAIT_MS - since);
+}
 
 /**
  * Build the snapshot object that gets persisted. `groups` is the whole working
