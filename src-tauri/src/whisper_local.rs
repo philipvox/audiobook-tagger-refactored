@@ -290,12 +290,18 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
     let file = std::fs::File::open(archive).map_err(|e| format!("Zip open error: {}", e))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("Zip read error: {}", e))?;
 
+    // Known limitation: symlink entries are flattened to regular files (copied
+    // by content, not relinked); verified absent from the real ffmpeg/whisper
+    // archives this app downloads.
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(|e| format!("Zip entry error: {}", e))?;
 
+        let name = entry.name().to_string();
         let Some(rel_path) = entry.enclosed_name() else {
-            // Zip-slip guard: unsafe path (absolute or escapes via ".."). Skip it.
-            continue;
+            // Zip-slip guard: unsafe path (absolute or escapes via ".."). These
+            // are downloaded third-party archives, so an unsafe entry makes the
+            // whole archive untrustworthy: fail closed instead of skipping it.
+            return Err(format!("Zip entry has unsafe path, aborting extraction: {}", name));
         };
 
         let out_path = dest.join(&rel_path);
@@ -943,9 +949,15 @@ mod tests {
 
         let dest = tmp.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
-        extract_zip(&archive, &dest).unwrap();
+        let result = extract_zip(&archive, &dest);
 
-        assert_eq!(std::fs::read_to_string(dest.join("good.txt")).unwrap(), "safe");
+        // Fail closed: an archive containing an unsafe entry is untrustworthy,
+        // so the whole extraction aborts instead of silently skipping the bad
+        // entry and installing a partial result. (Entries ordered before the
+        // bad one, like good.txt here, may already be on disk when this
+        // returns; both call sites extract into a fresh temp dir, so a failed
+        // extraction there is simply discarded rather than promoted.)
+        assert!(result.is_err());
         assert!(!dest.join("evil.txt").exists());
         // The relative-escape entry would have landed at tmp/evil.txt if unsanitized.
         assert!(!tmp.path().join("evil.txt").exists());
