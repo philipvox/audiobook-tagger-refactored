@@ -1,4 +1,4 @@
-// session.js — crash-resilient working-state snapshots (#58).
+// session.js: crash-resilient working-state snapshots (#58).
 //
 // The scanner holds hours of enrichment work in memory. Before this, a crash
 // or an accidental window close threw all of it away. The pure helpers here
