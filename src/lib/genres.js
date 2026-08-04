@@ -482,7 +482,14 @@ export function mapTag(tag) {
 }
 
 /**
- * Enforce genre policy: map, deduplicate, sort (specific first, broad last), max 3.
+ * Maximum number of genres a book may carry. Also the cap mergeGenres respects
+ * when the "supplement genres" setting appends AI suggestions (#54).
+ */
+export const MAX_GENRES = 3;
+
+/**
+ * Enforce genre policy: map, deduplicate, sort (specific first, broad last),
+ * max MAX_GENRES.
  *
  * @param {string[]} genres
  * @returns {string[]}
@@ -528,8 +535,8 @@ export function enforceGenrePolicy(genres) {
     return 0;
   });
 
-  // Take top 3
-  return unique.slice(0, 3);
+  // Take top MAX_GENRES
+  return unique.slice(0, MAX_GENRES);
 }
 
 /**

@@ -26,6 +26,7 @@ import { useApp } from '../context/AppContext';
 import { severityForKind } from '../lib/errorDetail';
 import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
 import { mergeClassifyTags } from '../lib/mergeClassifyTags';
+import { mergeGenres } from '../lib/mergeGenres';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
 import { isPlaceholderAuthor, isPlaceholderTitle } from '../lib/normalize';
@@ -2448,8 +2449,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             updatedMeta.tropes = [];
           }
 
-          // Genres
-          if (r.genres?.length > 0) updatedMeta.genres = r.genres;
+          // Genres: #54 - by default the AI's genres replace the book's. With
+          // `preserve_existing_genres` on they SUPPLEMENT them instead (union,
+          // existing first, existing casing kept, capped at MAX_GENRES without
+          // ever dropping an existing genre). See mergeGenres for the rationale
+          // and unit tests. On a Force run updatedMeta.genres was just cleared
+          // above, so Force still wins over the preserve setting.
+          const { genres: mergedGenres, changed: genresChanged } = mergeGenres(
+            updatedMeta.genres,
+            r.genres,
+            { preserve: config?.preserve_existing_genres === true }
+          );
+          updatedMeta.genres = mergedGenres;
 
           // Tags: H1 - only fully replace tags when the AI returned top-level
           // classification tags; when only DNA/age tags come back, merge them
@@ -2474,7 +2485,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           // write path can embed; themes/tropes/age/dna are ABS-only and stay in
           // changedFields (below) for the UI + ABS push, but aren't file changes.
           const changedFileFields = [];
-          if (r.genres?.length > 0) changedFileFields.push('genre');
+          if (genresChanged) changedFileFields.push('genre');
           if (tagsChanged) changedFileFields.push('tags');
           if (r.description && r.description_changed) changedFileFields.push('description');
 

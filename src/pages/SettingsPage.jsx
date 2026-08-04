@@ -9,7 +9,7 @@ import {
   DEFAULT_TAG_INSTRUCTIONS,
   BOOK_DNA_SYSTEM_PROMPT as DEFAULT_DNA_PROMPT,
 } from '../lib/prompts';
-import { APPROVED_GENRES } from '../lib/genres';
+import { APPROVED_GENRES, MAX_GENRES } from '../lib/genres';
 import { ChevronDown, Check, X, Plus, Trash2, AlertCircle, Library, Settings, Sparkles, Cpu, Download, HardDrive, Mic } from 'lucide-react';
 import { useApp, shouldAutoEnableLocalAI } from '../context/AppContext';
 import { useToast } from '../components/Toast';
@@ -89,6 +89,8 @@ const Toggle = ({ checked, onChange, label }) => (
   <label className="flex items-center gap-3 cursor-pointer py-1.5">
     <button
       type="button"
+      role="switch"
+      aria-checked={!!checked}
       onClick={() => onChange(!checked)}
       className={`w-8 h-5 rounded-full transition-colors flex-shrink-0 ${checked ? 'bg-blue-600' : 'bg-neutral-700'}`}
     >
@@ -1222,6 +1224,18 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                   label="Enforce approved genres"
                 />
                 <p className="text-sm text-gray-400">When enabled, AI genre suggestions are filtered to the approved list only. Disable to allow free-form genres.</p>
+
+                <Toggle
+                  checked={localConfig.preserve_existing_genres === true}
+                  onChange={(v) => setLocalConfig({ ...localConfig, preserve_existing_genres: v })}
+                  label="Supplement genres instead of replacing"
+                />
+                <p className="text-sm text-gray-400">
+                  Keep the genres a book already has (e.g. matched from Audible) and add the AI's
+                  suggestions alongside them, instead of replacing them. Existing genres are never
+                  removed, so a book already at the {MAX_GENRES}-genre limit keeps exactly what it
+                  has. "Force" re-classification still starts fresh.
+                </p>
               </div>
             </div>
 
