@@ -30,6 +30,43 @@ export const AUTOSAVE_MAX_WAIT_MS = 30000;
 
 export const SESSION_STORAGE_KEY = 'audiobook-tagger.session';
 
+// Second slot, mirroring the Rust session.prev.json. Holds a snapshot the user
+// declined to restore, so autosave can resume into the primary slot without
+// destroying it. Never auto-loaded: it is a manual-recovery artifact.
+export const PREV_SESSION_STORAGE_KEY = 'audiobook-tagger.session.prev';
+
+// How many autosaves must fail in a row before the user is told. One failure
+// is usually transient (a locked file, a momentary permission issue) and not
+// worth interrupting for; three in a row means the workspace is genuinely not
+// being protected and the user needs to know before a crash proves it.
+export const AUTOSAVE_FAILURE_WARN_THRESHOLD = 3;
+
+/**
+ * Fold one autosave outcome into the failure-tracking state.
+ *
+ * `state` is { consecutiveFailures, warned }. Returns the next state plus
+ * `warn: true` exactly once per failure streak, so a browser build whose
+ * snapshot exceeds the localStorage quota (and therefore fails on every single
+ * save) warns once rather than on every debounce tick. A successful save
+ * resets both, which re-arms the warning for a later streak.
+ */
+export function nextAutosaveFailureState(state, result) {
+  const prev = { consecutiveFailures: 0, warned: false, ...(state || {}) };
+
+  if (result?.saved) {
+    return { consecutiveFailures: 0, warned: false, warn: false, reason: null };
+  }
+
+  const consecutiveFailures = prev.consecutiveFailures + 1;
+  const warn = consecutiveFailures >= AUTOSAVE_FAILURE_WARN_THRESHOLD && !prev.warned;
+  return {
+    consecutiveFailures,
+    warned: prev.warned || warn,
+    warn,
+    reason: result?.error || 'unknown error',
+  };
+}
+
 /**
  * How long to wait before writing, given when the last write happened.
  * Normally the debounce window; shortened (to zero at the limit) so that a
@@ -180,31 +217,78 @@ export async function saveSession(snapshot) {
 }
 
 /**
- * Read the saved snapshot back, or null when there is nothing restorable.
+ * Read the saved snapshot back.
+ *
+ * Returns { session, unreadable, error? }. `unreadable` distinguishes "a
+ * snapshot is there but we could not read it" from "there is nothing saved":
+ * the first must pause autosave (real work may be sitting in that file), the
+ * second must not.
  */
 export async function loadSession() {
   let json = null;
+
   if (isTauri()) {
     try {
       const callBackend = await backend();
       json = await callBackend('load_session');
     } catch (e) {
       console.warn('Could not read the saved session:', e);
-      return null;
+      return { session: null, unreadable: true, error: String(e?.message || e) };
     }
   } else {
     try {
-      if (typeof localStorage === 'undefined') return null;
+      if (typeof localStorage === 'undefined') return { session: null, unreadable: false };
       json = localStorage.getItem(SESSION_STORAGE_KEY);
     } catch (e) {
       console.warn('Could not read the saved session:', e);
-      return null;
+      return { session: null, unreadable: true, error: String(e?.message || e) };
     }
   }
+
   // callBackend returns a { _stub: true } object for commands that are not
   // wired in the browser build; parseSession rejects anything that is not a
   // string, so that path lands on null.
-  return parseSession(typeof json === 'string' ? json : null);
+  const session = parseSession(typeof json === 'string' ? json : null);
+
+  // Content that is present but unparseable is corrupt, not absent. Same rule:
+  // do not autosave over it until the user explicitly discards it.
+  const corrupt = !session && typeof json === 'string' && json.trim().length > 0;
+
+  return {
+    session,
+    unreadable: corrupt,
+    ...(corrupt ? { error: 'the saved session file could not be parsed' } : {}),
+  };
+}
+
+/**
+ * Move the saved snapshot to the second slot instead of deleting it, freeing
+ * the primary slot so autosave can resume. Used when the user answers the
+ * restore prompt with "keep current books": their new work needs protecting,
+ * and the declined session must not be destroyed to get it. Never throws.
+ */
+export async function preserveSession() {
+  if (isTauri()) {
+    try {
+      const callBackend = await backend();
+      await callBackend('preserve_session');
+      return true;
+    } catch (e) {
+      console.warn('Could not preserve the saved session:', e);
+      return false;
+    }
+  }
+  try {
+    if (typeof localStorage === 'undefined') return false;
+    const current = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (current === null) return true; // nothing to preserve
+    localStorage.setItem(PREV_SESSION_STORAGE_KEY, current);
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    return true;
+  } catch (e) {
+    console.warn('Could not preserve the saved session:', e);
+    return false;
+  }
 }
 
 /**

@@ -20,6 +20,7 @@ pub fn run() {
             session::save_session,
             session::load_session,
             session::clear_session,
+            session::preserve_session,
             session::append_log,
             session::get_log_path,
             ollama::ollama_get_status,

@@ -136,6 +136,7 @@ const TAURI_COMMANDS = new Set([
   'save_session',
   'load_session',
   'clear_session',
+  'preserve_session',
   'append_log',
   'get_log_path',
   'ollama_get_status',

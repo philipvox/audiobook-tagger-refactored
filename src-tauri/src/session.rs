@@ -48,6 +48,16 @@ pub fn default_session_path() -> PathBuf {
     app_data_dir().join("session.json")
 }
 
+/// Second slot. When the user answers the restore prompt with "keep current
+/// books", the snapshot they declined is moved here rather than deleted, so
+/// autosave can resume into the primary slot without the previous session
+/// being destroyed by the very next write. Never read automatically: it is a
+/// manual-recovery artifact, and a later preserve overwrites it (one
+/// generation, same policy as the log rotation).
+pub fn default_prev_session_path() -> PathBuf {
+    app_data_dir().join("session.prev.json")
+}
+
 pub fn default_log_path() -> PathBuf {
     app_data_dir().join("session.log")
 }
@@ -114,10 +124,33 @@ pub fn write_session_at(path: &Path, json: &str) -> Result<(), String> {
     }
 }
 
-/// Read a snapshot back. Returns None when there is no session file (or it is
-/// unreadable) - the caller treats that as "nothing to restore".
-pub fn read_session_at(path: &Path) -> Option<String> {
-    fs::read_to_string(path).ok()
+/// Read a snapshot back.
+///
+/// `Ok(None)` means there is genuinely no saved session. `Err` means a file is
+/// there but could not be read (permissions, a bad disk, a partial mount).
+/// Those two must not be collapsed: on `Err` the caller has to assume real
+/// work is sitting in that file and must NOT autosave over it, whereas on
+/// `Ok(None)` autosaving immediately is correct.
+pub fn read_session_at(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(data) => Ok(Some(data)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Move the current snapshot into the second slot, replacing whatever was
+/// there. Missing primary is success: there is simply nothing to preserve.
+/// After this the primary slot is free, so autosave can resume without
+/// destroying the snapshot the user declined to restore.
+pub fn preserve_session_at(path: &Path, prev_path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = prev_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::rename(path, prev_path).map_err(|e| e.to_string())
 }
 
 /// Remove the saved snapshot. Missing is success (nothing to clear).
@@ -215,14 +248,22 @@ pub fn save_session(json: String) -> Result<(), String> {
     write_session_at(&default_session_path(), &json)
 }
 
+/// `Ok(None)` = nothing saved. `Err` = a snapshot exists but is unreadable,
+/// which the frontend turns into a paused autosave rather than a silent
+/// overwrite.
 #[tauri::command]
-pub fn load_session() -> Option<String> {
+pub fn load_session() -> Result<Option<String>, String> {
     read_session_at(&default_session_path())
 }
 
 #[tauri::command]
 pub fn clear_session() -> Result<(), String> {
     clear_session_at(&default_session_path())
+}
+
+#[tauri::command]
+pub fn preserve_session() -> Result<(), String> {
+    preserve_session_at(&default_session_path(), &default_prev_session_path())
 }
 
 #[tauri::command]
@@ -251,14 +292,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("session.json");
 
-        assert!(read_session_at(&path).is_none(), "no session before first save");
+        assert_eq!(read_session_at(&path).unwrap(), None, "no session before first save");
 
         let payload = r#"{"version":1,"groups":[{"id":"g1"}]}"#;
         write_session_at(&path, payload).unwrap();
-        assert_eq!(read_session_at(&path).unwrap(), payload);
+        assert_eq!(read_session_at(&path).unwrap().unwrap(), payload);
 
         clear_session_at(&path).unwrap();
-        assert!(read_session_at(&path).is_none(), "cleared session is gone");
+        assert_eq!(read_session_at(&path).unwrap(), None, "cleared session is gone");
     }
 
     #[test]
@@ -273,7 +314,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("nested").join("deeper").join("session.json");
         write_session_at(&path, "{}").unwrap();
-        assert_eq!(read_session_at(&path).unwrap(), "{}");
+        assert_eq!(read_session_at(&path).unwrap().unwrap(), "{}");
     }
 
     #[test]
@@ -298,7 +339,7 @@ mod tests {
         let path = dir.path().join("session.json");
         write_session_at(&path, r#"{"n":1}"#).unwrap();
         write_session_at(&path, r#"{"n":2}"#).unwrap();
-        assert_eq!(read_session_at(&path).unwrap(), r#"{"n":2}"#);
+        assert_eq!(read_session_at(&path).unwrap().unwrap(), r#"{"n":2}"#);
         assert!(!tmp_path_for(&path).exists());
     }
 
@@ -314,11 +355,98 @@ mod tests {
         assert!(err.contains(&MAX_SESSION_BYTES.to_string()));
 
         assert_eq!(
-            read_session_at(&path).unwrap(),
+            read_session_at(&path).unwrap().unwrap(),
             r#"{"good":true}"#,
             "the refused write must not destroy the previous snapshot"
         );
         assert!(!tmp_path_for(&path).exists());
+    }
+
+    #[test]
+    fn a_present_but_unreadable_session_is_an_error_not_an_absence() {
+        // A directory where a file is expected is the portable way to make
+        // read_to_string fail with something other than NotFound. Collapsing
+        // this to None would tell the caller "nothing saved", and it would
+        // autosave straight over a file that may hold real work.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        fs::create_dir(&path).unwrap();
+
+        let err = read_session_at(&path).unwrap_err();
+        assert!(!err.is_empty(), "the IO reason is reported, got: {err}");
+    }
+
+    #[test]
+    fn a_missing_session_is_an_absence_not_an_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        assert_eq!(read_session_at(&path).unwrap(), None);
+    }
+
+    // ---- second slot ----
+
+    #[test]
+    fn preserve_moves_the_snapshot_into_the_second_slot() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let prev = dir.path().join("session.prev.json");
+
+        write_session_at(&path, r#"{"declined":true}"#).unwrap();
+        preserve_session_at(&path, &prev).unwrap();
+
+        assert_eq!(read_session_at(&path).unwrap(), None, "primary slot is free");
+        assert_eq!(
+            fs::read_to_string(&prev).unwrap(),
+            r#"{"declined":true}"#,
+            "the declined session is preserved, not destroyed"
+        );
+    }
+
+    #[test]
+    fn autosave_after_preserve_does_not_touch_the_second_slot() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let prev = dir.path().join("session.prev.json");
+
+        write_session_at(&path, r#"{"old":true}"#).unwrap();
+        preserve_session_at(&path, &prev).unwrap();
+        // Autosave resumes into the primary slot.
+        write_session_at(&path, r#"{"new":true}"#).unwrap();
+
+        assert_eq!(read_session_at(&path).unwrap().unwrap(), r#"{"new":true}"#);
+        assert_eq!(fs::read_to_string(&prev).unwrap(), r#"{"old":true}"#);
+    }
+
+    #[test]
+    fn preserve_keeps_one_generation() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let prev = dir.path().join("session.prev.json");
+
+        write_session_at(&path, r#"{"gen":1}"#).unwrap();
+        preserve_session_at(&path, &prev).unwrap();
+        write_session_at(&path, r#"{"gen":2}"#).unwrap();
+        preserve_session_at(&path, &prev).unwrap();
+
+        assert_eq!(fs::read_to_string(&prev).unwrap(), r#"{"gen":2}"#);
+    }
+
+    #[test]
+    fn preserving_a_missing_snapshot_is_success() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let prev = dir.path().join("session.prev.json");
+        assert!(preserve_session_at(&path, &prev).is_ok());
+        assert!(!prev.exists());
+    }
+
+    #[test]
+    fn the_second_slot_sits_beside_the_primary_one() {
+        assert_eq!(
+            default_prev_session_path().parent().unwrap(),
+            default_session_path().parent().unwrap()
+        );
+        assert!(default_prev_session_path().ends_with("session.prev.json"));
     }
 
     // ---- log ----
