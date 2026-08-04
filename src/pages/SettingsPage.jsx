@@ -199,6 +199,38 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   const [saving, setSaving] = useState(false);
   const libraryBookCount = groups?.length || 0;
   const [cacheCleared, setCacheCleared] = useState(false);
+
+  // #58: where the persistent operation log lives. No opener/shell plugin is
+  // configured for this app, so rather than adding one just for a convenience
+  // button, the path is shown in a copyable field. Tauri-only: the browser
+  // build has no log file, so the whole block is hidden there instead of
+  // showing a path that does not exist.
+  const [logPath, setLogPath] = useState('');
+  const [logPathCopied, setLogPathCopied] = useState(false);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const path = await callBackend('get_log_path');
+        if (!cancelled && typeof path === 'string' && path) setLogPath(path);
+      } catch (e) {
+        console.warn('Could not read the log path:', e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const copyLogPath = async () => {
+    try {
+      await navigator.clipboard.writeText(logPath);
+      setLogPathCopied(true);
+      setTimeout(() => setLogPathCopied(false), 2000);
+    } catch (e) {
+      toast.error('Copy Failed', 'Could not copy the path to the clipboard.');
+    }
+  };
   const [confirmRemoveId, setConfirmRemoveId] = useState(null);
   const [confirmClearKeys, setConfirmClearKeys] = useState(false);
 
@@ -1255,6 +1287,35 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
             </div>
 
             <div className="flex flex-col justify-start">
+              {/* #58: operation log location. Shown as a copyable path because
+                  no opener plugin is configured for this app. */}
+              {isTauri() && logPath && (
+                <div className="bg-neutral-900/50 rounded-xl p-6">
+                  <h3 className="text-lg font-semibold text-white mb-2">Logs</h3>
+                  <p className="text-sm text-gray-400 mb-3">
+                    Batch operations and per-book failures are written here as they happen, so
+                    the record survives a crash or a forced close. The file rotates at 5MB and
+                    one previous copy is kept as <span className="font-mono">session.log.1</span>.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      readOnly
+                      value={logPath}
+                      onFocus={(e) => e.target.select()}
+                      aria-label="Log file path"
+                      className="flex-1 min-w-0 px-3 py-2 bg-neutral-950 border border-neutral-700 rounded-lg text-xs text-gray-300 font-mono"
+                    />
+                    <button
+                      onClick={copyLogPath}
+                      className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 rounded-lg text-sm text-gray-200 transition-colors flex items-center gap-2 flex-shrink-0"
+                    >
+                      {logPathCopied ? <Check className="w-4 h-4 text-green-400" /> : null}
+                      {logPathCopied ? 'Copied' : 'Copy path'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Collapsible sections */}
               <div className="space-y-2 mt-4">
           {/* Prompt Customization */}
