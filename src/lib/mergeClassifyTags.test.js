@@ -58,6 +58,24 @@ describe('mergeClassifyTags (H1 curated-tag preservation)', () => {
     expect(mergeClassifyTags(undefined, {}).tags).toEqual([]);
   });
 
+  it('preserves the ORIGINAL casing of the curated tags it keeps (#54)', () => {
+    // wtanksleyjr, #54: curated tags must come back exactly as the user wrote
+    // them - the merge may never re-case "Sci-Fi" into "sci-fi".
+    const existing = ['Sci-Fi', 'Favorite Reads', 'DNA-Approved', 'dna:pov:first', 'age-adult'];
+    const { tags } = mergeClassifyTags(existing, {
+      dna_tags: ['dna:pov:third'],
+      age_tags: ['age-teens'],
+    });
+    expect(tags).toContain('Sci-Fi');
+    expect(tags).toContain('Favorite Reads');
+    // Only the stale dna:/age tags are swapped; a mixed-case non-dna tag that
+    // merely LOOKS dna-ish is untouched (the dna: check is case-sensitive).
+    expect(tags).toContain('DNA-Approved');
+    expect(tags).not.toContain('dna:pov:first');
+    expect(tags).not.toContain('age-adult');
+    expect(tags).toEqual(expect.arrayContaining(['dna:pov:third', 'age-teens']));
+  });
+
   it('isAgeTag matches the age vocabulary', () => {
     ['age-adult', 'age-teens', 'rated-pg13', 'for-kids', 'not-for-kids', 'for-ya'].forEach((t) =>
       expect(isAgeTag(t)).toBe(true)
