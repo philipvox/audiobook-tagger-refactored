@@ -26,6 +26,7 @@ import { useModals } from '../hooks/useModals';
 import { useApp } from '../context/AppContext';
 import { severityForKind } from '../lib/errorDetail';
 import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
+import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
 import { mergeClassifyTags } from '../lib/mergeClassifyTags';
 import { mergeGenres } from '../lib/mergeGenres';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
@@ -163,6 +164,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const count = restoreSession();
     setSelectedGroup(null);
     setSelectedGroupIds(new Set());
+    logEvent('session', 'restored previous session', { books: count });
     if (count > 0) {
       toast.success(
         'Session Restored',
@@ -174,12 +176,14 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const handleDiscardSession = useCallback(async () => {
     setSessionBusy(true);
     try {
+      const discarded = savedSession?.bookCount ?? 0;
       await discardSession();
+      logEvent('session', 'discarded saved session', { books: discarded });
       toast.info('Session Discarded', 'The saved session was deleted.');
     } finally {
       setSessionBusy(false);
     }
-  }, [discardSession, toast]);
+  }, [discardSession, savedSession, toast]);
 
   const {
     scanning,
@@ -1059,6 +1063,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
     batch.start('authors', { total: selectedGroups.length, fixed: 0, skipped: 0 });
+    logBatchStart('authors', selectedGroups.length);
 
 
     let fixedCount = 0;
@@ -1161,6 +1166,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       }
     }
 
+    // Logged unconditionally, unlike the toast: an all-success run is exactly
+    // what you want to see in the log when reconstructing what a crashed
+    // session had already finished.
+    logBatchEnd(
+      'authors',
+      { books: selectedGroups.length, fixed: fixedCount, skipped: skippedCount, failed: failedCount },
+      authorErrorResults
+    );
+
     // Clear progress after a short delay
     batch.end('authors', 1500);
   };
@@ -1174,6 +1188,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const currentGroups = groupsRef.current;
     const selectedGroups = allSelected ? currentGroups : currentGroups.filter(g => selectedGroupIds.has(g.id));
     batch.start('years', { total: selectedGroups.length, fixed: 0, skipped: 0 });
+    logBatchStart('years', selectedGroups.length);
 
 
     let fixedCount = 0;
@@ -1299,6 +1314,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         toast[summary.type](summary.title, summary.message, opts);
       }
     }
+
+    logBatchEnd(
+      'years',
+      { books: selectedGroups.length, fixed: fixedCount, skipped: skippedCount, failed: failedCount },
+      yearErrorResults
+    );
 
     // M2: this flow read gather hints from gatheredDataRef; clear them when
     // running standalone so a later unrelated flow doesn't reuse stale data.
@@ -1796,6 +1817,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     batch.start('metadata', { total: booksToProcess.length, currentBook: 'Resolving metadata via ABS + GPT...' });
+    logBatchStart('resolve', booksToProcess.length);
 
     // If there's no pre-fetched gather data (i.e. user hit Fix Metadata standalone,
     // not Run All), pull external data inline for books with missing/Unknown author.
@@ -1923,9 +1945,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           : undefined;
         toast[summary.type](summary.title, summary.message, opts);
       }
+      logBatchEnd(
+        'resolve',
+        { books: booksToProcess.length, processed, skipped, warnings, failed },
+        result.results || []
+      );
     } catch (e) {
       unlisten();
       console.error('Metadata resolution error:', e);
+      logEvent('batch', 'resolve aborted', { error: String(e?.message || e) });
       toast.error('Metadata Resolution Failed', e.toString());
     }
     // M2: fix-metadata standalone may have populated gatheredDataRef via the
@@ -1966,6 +1994,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     batch.start('descriptionProcessing', { total: booksToProcess.length, currentBook: 'Processing descriptions...' });
+    logBatchStart('description', booksToProcess.length);
 
     const books = booksToProcess.map(g => ({
       id: g.id,
@@ -2025,9 +2054,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           : undefined;
         toast[descSummary.type](descSummary.title, descSummary.message, opts);
       }
+      logBatchEnd(
+        'description',
+        { books: booksToProcess.length, processed, skipped: skippedDesc, warnings: descWarnings, failed },
+        result.results || []
+      );
     } catch (e) {
       unlisten();
       console.error('Description processing error:', e);
+      logEvent('batch', 'description aborted', { error: String(e?.message || e) });
       toast.error('Description Processing Failed', e.toString());
     }
     batch.end('descriptionProcessing', 2000);
@@ -2416,6 +2451,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const idsToForceReset = forceFresh ? new Set(booksToProcess.map(g => g.id)) : null;
 
     batch.start('classify', { total: booksToProcess.length, currentBook: 'Starting classification...' });
+    logBatchStart('classify', booksToProcess.length);
 
 
     const books = booksToProcess.map(g => ({
@@ -2559,9 +2595,21 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         toast[classifySummary.type](classifySummary.title, classifySummary.message, opts);
       }
 
+      logBatchEnd(
+        'classify',
+        {
+          books: booksToProcess.length,
+          processed: successCount,
+          skipped: skippedClassify,
+          warnings: classifyWarnings,
+          failed: failedCount,
+        },
+        result.results || []
+      );
     } catch (error) {
       unlisten();
       console.error('Classification failed:', error);
+      logEvent('batch', 'classify aborted', { error: String(error?.message || error) });
       toast.error('Classification Failed', error.toString());
     }
 
