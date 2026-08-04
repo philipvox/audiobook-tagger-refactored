@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { callBackend, subscribe } from '../api';
 import { BookList } from '../components/scanner/BookList';
 import { MetadataPanel } from '../components/scanner/MetadataPanel';
@@ -41,7 +42,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     validationResults, validationStats, validating, runValidation, runAuthorAnalysis, authorAnalysis,
     applyBatchFixes, applyAuthorFixes, clearValidation,
     seriesAnalysis, analyzingSeries, runSeriesAnalysis, applySeriesFixes,
-    savedSession, sessionRestorePending, restoreSession, discardSession
+    savedSession, sessionRestorePending, sessionUnreadable, restoreSession, discardSession,
+    keepCurrentWorkspace, autosaveWarning, acknowledgeAutosaveWarning
   } = useApp();
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState(new Set());
@@ -193,6 +195,35 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     setPendingRestore(null);
     finishRestore(result);
   }, [restoreSession, finishRestore]);
+
+  // "Keep current books": the declined snapshot moves to the second slot and
+  // autosave resumes, so the user is neither stranded unprotected nor loses
+  // the previous session.
+  const handleKeepCurrentBooks = useCallback(async () => {
+    setPendingRestore(null);
+    setSessionBusy(true);
+    try {
+      await keepCurrentWorkspace();
+      logEvent('session', 'kept current books, previous session moved to the second slot');
+      toast.info(
+        'Keeping Current Books',
+        'Autosave resumed. Your previous session was kept as a backup copy in the app data folder.'
+      );
+    } finally {
+      setSessionBusy(false);
+    }
+  }, [keepCurrentWorkspace, toast]);
+
+  // One-time warning when autosave has failed repeatedly. Consumed here so the
+  // context can re-arm it for a later failure streak.
+  useEffect(() => {
+    if (!autosaveWarning) return;
+    toast.warning(
+      'Autosave Is Failing',
+      `Session autosave is failing: ${autosaveWarning.reason}. Your work will not be restored after a crash.`
+    );
+    acknowledgeAutosaveWarning();
+  }, [autosaveWarning, acknowledgeAutosaveWarning, toast]);
 
   const handleDiscardSession = useCallback(async () => {
     setSessionBusy(true);
@@ -3817,31 +3848,51 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         />
       )}
 
-      {/* Restore previous session (#58). Non-blocking, and it stays until the
-          user answers: autosave is suppressed the whole time it is open, so
-          the saved snapshot cannot be overwritten before they decide. */}
-      {sessionRestorePending && savedSession && (
-        <RestoreSessionToast
-          session={savedSession}
-          busy={sessionBusy}
-          onRestore={handleRestoreSession}
-          onDiscard={handleDiscardSession}
-        />
-      )}
+      {/* #58: the restore prompt and its confirmation are portaled to
+          document.body. ScannerPage lives inside a wrapper that App.jsx sets
+          to `hidden` on the Settings tab, and a hidden restore prompt would be
+          invisible while still silently suppressing autosave. */}
+      {createPortal(
+        <>
+          {/* Non-blocking, and it stays until the user answers: autosave is
+              suppressed the whole time it is open, so the saved snapshot
+              cannot be overwritten before they decide. */}
+          {sessionRestorePending && savedSession && (
+            <RestoreSessionToast
+              session={savedSession}
+              busy={sessionBusy}
+              onRestore={handleRestoreSession}
+              onDiscard={handleDiscardSession}
+            />
+          )}
 
-      {/* #58: restoring on top of books already loaded is destructive, and
-          autosave is suppressed while the prompt is open, so there is no
-          snapshot of the current workspace to fall back on. Confirm first. */}
-      <ConfirmModal
-        isOpen={!!pendingRestore}
-        onClose={() => setPendingRestore(null)}
-        onConfirm={confirmRestoreSession}
-        type="danger"
-        title="Replace the books you have loaded?"
-        message={`Restoring will replace the ${pendingRestore?.currentCount || 0} book${pendingRestore?.currentCount === 1 ? '' : 's'} currently loaded (and any unsaved edits) with the ${pendingRestore?.count || 0} book${pendingRestore?.count === 1 ? '' : 's'} from your previous session. The current books have not been saved anywhere, so this cannot be undone.`}
-        confirmText="Restore"
-        cancelText="Keep current books"
-      />
+          {/* A snapshot that is on disk but unreadable or corrupt. There is
+              nothing to restore, but autosave stays paused until the user
+              discards it, so they need a way to say so. */}
+          {!sessionRestorePending && sessionUnreadable && (
+            <RestoreSessionToast
+              unreadableReason={sessionUnreadable.reason}
+              busy={sessionBusy}
+              onDiscard={handleDiscardSession}
+            />
+          )}
+
+          {/* Restoring on top of books already loaded is destructive, and
+              autosave is suppressed while the prompt is open, so there is no
+              snapshot of the current workspace to fall back on. */}
+          <ConfirmModal
+            isOpen={!!pendingRestore}
+            onClose={handleKeepCurrentBooks}
+            onConfirm={confirmRestoreSession}
+            type="danger"
+            title="Replace the books you have loaded?"
+            message={`Restoring will replace the ${pendingRestore?.currentCount || 0} book${pendingRestore?.currentCount === 1 ? '' : 's'} currently loaded (and any unsaved edits) with the ${pendingRestore?.count || 0} book${pendingRestore?.count === 1 ? '' : 's'} from your previous session. The current books have not been saved anywhere, so this cannot be undone.\n\nKeeping the current books resumes autosave and keeps the previous session as a backup copy.`}
+            confirmText="Restore"
+            cancelText="Keep current books"
+          />
+        </>,
+        document.body
+      )}
     </div>
   );
 }

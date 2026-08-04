@@ -8,6 +8,8 @@ import {
   clearSession,
   loadSession,
   makeSessionSnapshot,
+  nextAutosaveFailureState,
+  preserveSession,
   saveSession,
   shouldAutosave,
 } from '../lib/session.js';
@@ -88,19 +90,34 @@ export function AppProvider({ children }) {
   // having its debounce reset forever by an in-flight batch run.
   const lastSaveAtRef = useRef(0);
 
+  // A snapshot that exists but could not be read or parsed. Autosave stays
+  // paused while this is set: the file may hold real work, and overwriting it
+  // would destroy the user's only copy on the strength of a read error. The
+  // user's escape is the Discard action on the prompt.
+  const [sessionUnreadable, setSessionUnreadable] = useState(null);
+
+  // One-time warning that autosave is failing repeatedly. Silently dropping
+  // { saved: false } means a browser build over the localStorage quota never
+  // saves and never says so.
+  const [autosaveWarning, setAutosaveWarning] = useState(null);
+  const autosaveFailureRef = useRef({ consecutiveFailures: 0, warned: false });
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      let session = null;
+      let outcome = { session: null, unreadable: false };
       try {
-        session = await loadSession();
+        outcome = await loadSession();
       } catch (e) {
         console.warn('Could not read the saved session:', e);
+        outcome = { session: null, unreadable: true, error: String(e?.message || e) };
       }
       if (cancelled) return;
-      if (session) {
-        setSavedSession(session);
+      if (outcome.session) {
+        setSavedSession(outcome.session);
         setSessionRestorePending(true);
+      } else if (outcome.unreadable) {
+        setSessionUnreadable({ reason: outcome.error || 'unknown error' });
       }
       setSessionChecked(true);
     })();
@@ -110,6 +127,9 @@ export function AppProvider({ children }) {
   useEffect(() => {
     if (!sessionChecked) return;
     if (sessionRestorePending) return;
+    // A present-but-unreadable snapshot is treated like an unanswered prompt:
+    // do not write over it until a successful read or an explicit discard.
+    if (sessionUnreadable) return;
 
     const hasWork = shouldAutosave(groups);
     // Nothing in memory and nothing of ours on disk: leave any older snapshot
@@ -124,7 +144,13 @@ export function AppProvider({ children }) {
         // Stamped when the write is fired, not when it lands, so a persistently
         // failing store cannot turn the max-wait into a hot retry loop.
         lastSaveAtRef.current = Date.now();
-        saveSession(makeSessionSnapshot({ groups, libraryId })).catch(() => {});
+        saveSession(makeSessionSnapshot({ groups, libraryId }))
+          .then((result) => {
+            const next = nextAutosaveFailureState(autosaveFailureRef.current, result);
+            autosaveFailureRef.current = { consecutiveFailures: next.consecutiveFailures, warned: next.warned };
+            if (next.warn) setAutosaveWarning({ reason: next.reason, at: Date.now() });
+          })
+          .catch(() => {});
       } else {
         // The workspace was explicitly emptied. Clearing happens here, after
         // the new state settled, rather than in the click handler, so the
@@ -137,7 +163,11 @@ export function AppProvider({ children }) {
     }, delay);
 
     return () => clearTimeout(timer);
-  }, [groups, config?.abs_library_id, sessionChecked, sessionRestorePending]);
+  }, [groups, config?.abs_library_id, sessionChecked, sessionRestorePending, sessionUnreadable]);
+
+  // Consumed once by the UI so the warning toast shows a single time per
+  // failure streak rather than on every render.
+  const acknowledgeAutosaveWarning = useCallback(() => setAutosaveWarning(null), []);
 
   // Explicit user decision: bring the saved work back into the workspace.
   //
@@ -175,9 +205,27 @@ export function AppProvider({ children }) {
   const discardSession = useCallback(async () => {
     setSavedSession(null);
     setSessionRestorePending(false);
+    // Also the escape hatch for a snapshot that could not be read: discarding
+    // it is what re-arms autosave.
+    setSessionUnreadable(null);
     hadGroupsRef.current = false;
     lastSaveAtRef.current = 0;
     await clearSession();
+  }, []);
+
+  // Explicit user decision: keep what is loaded now and stop being asked.
+  // The declined snapshot is moved to the second slot rather than deleted, so
+  // autosave can resume into the primary slot without destroying it. The move
+  // is awaited BEFORE the prompt is dismissed: dismissing first would let an
+  // autosave land in the primary slot and then be moved to the second slot by
+  // this very call, losing the newly protected work.
+  const keepCurrentWorkspace = useCallback(async () => {
+    await preserveSession();
+    setSavedSession(null);
+    setSessionRestorePending(false);
+    setSessionUnreadable(null);
+    hadGroupsRef.current = false;
+    lastSaveAtRef.current = 0;
   }, []);
 
   // Load config on mount
@@ -629,8 +677,12 @@ export function AppProvider({ children }) {
     // Session persistence (#58)
     savedSession,
     sessionRestorePending,
+    sessionUnreadable,
     restoreSession,
     discardSession,
+    keepCurrentWorkspace,
+    autosaveWarning,
+    acknowledgeAutosaveWarning,
     // Global progress
     globalProgress,
     startGlobalProgress,

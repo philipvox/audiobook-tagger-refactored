@@ -1291,11 +1291,17 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                   no opener plugin is configured for this app. */}
               {isTauri() && logPath && (
                 <div className="bg-neutral-900/50 rounded-xl p-6">
-                  <h3 className="text-lg font-semibold text-white mb-2">Logs</h3>
+                  <h3 className="text-lg font-semibold text-white mb-2">Logs and Session Backups</h3>
                   <p className="text-sm text-gray-400 mb-3">
                     Batch operations and per-book failures are written here as they happen, so
                     the record survives a crash or a forced close. The file rotates at 5MB and
                     one previous copy is kept as <span className="font-mono">session.log.1</span>.
+                  </p>
+                  <p className="text-sm text-gray-400 mb-3">
+                    The same folder holds your session snapshots.
+                    <span className="font-mono"> session.json</span> is the autosaved workspace, and
+                    <span className="font-mono"> session.prev.json</span> is a session you chose to
+                    keep instead of restoring. Neither is ever deleted on its own.
                   </p>
                   <div className="flex items-center gap-2">
                     <input

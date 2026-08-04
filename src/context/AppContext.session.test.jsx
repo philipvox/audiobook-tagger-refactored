@@ -9,6 +9,7 @@ import { renderHook, act } from '@testing-library/react';
 import { AppProvider, useApp } from './AppContext';
 import {
   SESSION_STORAGE_KEY,
+  PREV_SESSION_STORAGE_KEY,
   AUTOSAVE_DEBOUNCE_MS,
   makeSessionSnapshot,
 } from '../lib/session.js';
@@ -295,5 +296,81 @@ describe('AppContext session persistence (#58)', () => {
 
     expect(result.current.sessionRestorePending).toBe(false);
     expect(result.current.savedSession).toBeNull();
+  });
+
+  it('pauses autosave over a snapshot that is present but unreadable', async () => {
+    const corrupt = '{ not json at all';
+    localStorage.setItem(SESSION_STORAGE_KEY, corrupt);
+
+    const { result } = renderHook(() => useApp(), { wrapper });
+    await settle();
+
+    expect(result.current.sessionUnreadable).not.toBeNull();
+
+    // The file may hold real work that a future version can read, so the app
+    // must not write over it on the strength of a parse failure.
+    act(() => { result.current.setGroups(freshGroups); });
+    await advancePastDebounce();
+    expect(localStorage.getItem(SESSION_STORAGE_KEY)).toBe(corrupt);
+  });
+
+  it('resumes autosave once the unreadable snapshot is explicitly discarded', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, '{ not json at all');
+    const { result } = renderHook(() => useApp(), { wrapper });
+    await settle();
+
+    act(() => { result.current.setGroups(freshGroups); });
+    await act(async () => { await result.current.discardSession(); });
+    expect(result.current.sessionUnreadable).toBeNull();
+
+    await advancePastDebounce();
+    expect(storedSession().groups.map(g => g.id)).toEqual(['n1']);
+  });
+
+  it('keeps the declined session in a second slot and resumes autosave', async () => {
+    seedSavedSession();
+    const { result } = renderHook(() => useApp(), { wrapper });
+    await settle();
+
+    // The user scans before answering, then chooses to keep the new books.
+    act(() => { result.current.setGroups(freshGroups); });
+    await settle();
+    await act(async () => { await result.current.keepCurrentWorkspace(); });
+
+    // Nothing was destroyed: the declined session moved to the second slot.
+    const prev = JSON.parse(localStorage.getItem(PREV_SESSION_STORAGE_KEY));
+    expect(prev.groups.map(g => g.id)).toEqual(['s1', 's2']);
+
+    // And the user is no longer stranded unprotected.
+    expect(result.current.sessionRestorePending).toBe(false);
+    await advancePastDebounce();
+    expect(storedSession().groups.map(g => g.id)).toEqual(['n1']);
+    // The resumed autosave did not clobber the second slot.
+    expect(JSON.parse(localStorage.getItem(PREV_SESSION_STORAGE_KEY)).groups).toHaveLength(2);
+  });
+
+  it('warns once after three consecutive autosave failures', async () => {
+    const { result } = renderHook(() => useApp(), { wrapper });
+    await settle();
+
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('QuotaExceededError');
+    });
+
+    const warnings = [];
+    for (let i = 1; i <= 6; i++) {
+      act(() => {
+        result.current.setGroups(Array.from({ length: i }, (_, k) => ({ id: `q${k}`, files: [] })));
+      });
+      await advancePastDebounce();
+      if (result.current.autosaveWarning) {
+        warnings.push(result.current.autosaveWarning.reason);
+        act(() => { result.current.acknowledgeAutosaveWarning(); });
+      }
+    }
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('QuotaExceededError');
   });
 });
