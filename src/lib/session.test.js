@@ -4,6 +4,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   SESSION_VERSION,
   SESSION_STORAGE_KEY,
+  PREV_SESSION_STORAGE_KEY,
+  AUTOSAVE_FAILURE_WARN_THRESHOLD,
+  nextAutosaveFailureState,
+  preserveSession,
   AUTOSAVE_DEBOUNCE_MS,
   AUTOSAVE_MAX_WAIT_MS,
   autosaveDelay,
@@ -167,6 +171,63 @@ describe('autosaveDelay', () => {
   });
 });
 
+describe('nextAutosaveFailureState', () => {
+  const fail = (error = 'quota exceeded') => ({ saved: false, error });
+  const ok = { saved: true };
+
+  // Drive a sequence of outcomes through the fold and collect every warning.
+  function run(outcomes) {
+    let state = { consecutiveFailures: 0, warned: false };
+    const warnings = [];
+    for (const outcome of outcomes) {
+      const next = nextAutosaveFailureState(state, outcome);
+      if (next.warn) warnings.push(next.reason);
+      state = { consecutiveFailures: next.consecutiveFailures, warned: next.warned };
+    }
+    return { warnings, state };
+  }
+
+  it('stays quiet for transient failures below the threshold', () => {
+    const { warnings } = run([fail(), fail()]);
+    expect(warnings).toEqual([]);
+    expect(AUTOSAVE_FAILURE_WARN_THRESHOLD).toBe(3);
+  });
+
+  it('warns once the failures become consecutive', () => {
+    const { warnings } = run([fail(), fail(), fail('disk full')]);
+    expect(warnings).toEqual(['disk full']);
+  });
+
+  it('warns exactly once per streak, however long the streak runs', () => {
+    // The browser-quota case: a snapshot over 5MB fails on every single
+    // debounce tick, so an unguarded warning would spam the user forever.
+    const { warnings } = run(Array.from({ length: 50 }, () => fail()));
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('a success resets the streak so a near miss does not carry over', () => {
+    const { warnings, state } = run([fail(), fail(), ok, fail(), fail()]);
+    expect(warnings).toEqual([]);
+    expect(state.consecutiveFailures).toBe(2);
+  });
+
+  it('re-arms after a success so a later streak warns again', () => {
+    const { warnings } = run([fail(), fail(), fail('first'), ok, fail(), fail(), fail('second')]);
+    expect(warnings).toEqual(['first', 'second']);
+  });
+
+  it('clears the counter and the warned flag on success', () => {
+    const next = nextAutosaveFailureState({ consecutiveFailures: 9, warned: true }, ok);
+    expect(next).toEqual({ consecutiveFailures: 0, warned: false, warn: false, reason: null });
+  });
+
+  it('tolerates a missing state and a missing error message', () => {
+    const next = nextAutosaveFailureState(undefined, { saved: false });
+    expect(next.consecutiveFailures).toBe(1);
+    expect(next.reason).toBe('unknown error');
+  });
+});
+
 describe('browser persistence (no Tauri)', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -182,27 +243,46 @@ describe('browser persistence (no Tauri)', () => {
     const snap = makeSessionSnapshot({ groups: groupsFixture, libraryId: 'lib-1', now: 42 });
     expect(await saveSession(snap)).toEqual({ saved: true });
 
-    const loaded = await loadSession();
-    expect(loaded.groups).toEqual(groupsFixture);
-    expect(loaded.savedAt).toBe(42);
-    expect(loaded.libraryId).toBe('lib-1');
+    const { session, unreadable } = await loadSession();
+    expect(unreadable).toBe(false);
+    expect(session.groups).toEqual(groupsFixture);
+    expect(session.savedAt).toBe(42);
+    expect(session.libraryId).toBe('lib-1');
   });
 
-  it('returns null when nothing is stored', async () => {
-    expect(await loadSession()).toBeNull();
+  it('reports an absence, not an error, when nothing is stored', async () => {
+    expect(await loadSession()).toEqual({ session: null, unreadable: false });
   });
 
-  it('returns null for a corrupt stored value instead of throwing', async () => {
+  it('reports a corrupt stored value as unreadable, not as an absence', async () => {
+    // Present-but-unparseable must NOT look like "nothing saved": the caller
+    // pauses autosave on unreadable so it cannot overwrite real work.
     localStorage.setItem(SESSION_STORAGE_KEY, '{ this is not json');
-    expect(await loadSession()).toBeNull();
+    const outcome = await loadSession();
+    expect(outcome.session).toBeNull();
+    expect(outcome.unreadable).toBe(true);
+    expect(outcome.error).toMatch(/parse/i);
+  });
+
+  it('treats a stored empty string as an absence', async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, '   ');
+    expect(await loadSession()).toEqual({ session: null, unreadable: false });
+  });
+
+  it('reports a storage read failure as unreadable', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('SecurityError'); });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const outcome = await loadSession();
+    expect(outcome).toMatchObject({ session: null, unreadable: true });
+    expect(outcome.error).toContain('SecurityError');
   });
 
   it('clears only on an explicit call', async () => {
     await saveSession(makeSessionSnapshot({ groups: groupsFixture, now: 1 }));
-    expect(await loadSession()).not.toBeNull();
+    expect((await loadSession()).session).not.toBeNull();
 
     await clearSession();
-    expect(await loadSession()).toBeNull();
+    expect((await loadSession()).session).toBeNull();
   });
 
   it('reports a quota error instead of throwing it at the UI', async () => {
@@ -213,6 +293,39 @@ describe('browser persistence (no Tauri)', () => {
     const result = await saveSession(makeSessionSnapshot({ groups: groupsFixture, now: 1 }));
     expect(result.saved).toBe(false);
     expect(result.error).toContain('QuotaExceededError');
+  });
+
+  it('preserves a declined snapshot into the second slot instead of deleting it', async () => {
+    await saveSession(makeSessionSnapshot({ groups: groupsFixture, now: 1 }));
+
+    expect(await preserveSession()).toBe(true);
+
+    // Primary slot is free, so autosave can resume without destroying anything.
+    expect((await loadSession()).session).toBeNull();
+    const prev = JSON.parse(localStorage.getItem(PREV_SESSION_STORAGE_KEY));
+    expect(prev.groups).toEqual(groupsFixture);
+  });
+
+  it('leaves the second slot alone when autosave resumes', async () => {
+    await saveSession(makeSessionSnapshot({ groups: groupsFixture, now: 1 }));
+    await preserveSession();
+    await saveSession(makeSessionSnapshot({ groups: [groupsFixture[0]], now: 2 }));
+
+    expect((await loadSession()).session.groups).toHaveLength(1);
+    expect(JSON.parse(localStorage.getItem(PREV_SESSION_STORAGE_KEY)).groups).toHaveLength(2);
+  });
+
+  it('never auto-loads the second slot', async () => {
+    localStorage.setItem(
+      PREV_SESSION_STORAGE_KEY,
+      JSON.stringify(makeSessionSnapshot({ groups: groupsFixture, now: 1 }))
+    );
+    expect(await loadSession()).toEqual({ session: null, unreadable: false });
+  });
+
+  it('preserving with nothing saved is a no-op success', async () => {
+    expect(await preserveSession()).toBe(true);
+    expect(localStorage.getItem(PREV_SESSION_STORAGE_KEY)).toBeNull();
   });
 
   it('reports a serialization failure instead of throwing it at the UI', async () => {
