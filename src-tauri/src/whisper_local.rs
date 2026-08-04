@@ -280,9 +280,11 @@ fn passes_executable_check(path: &std::path::Path) -> bool {
 ///
 /// Zip-slip guard: each entry's path is resolved via `enclosed_name()`, which
 /// returns `None` for absolute paths or paths whose `..` components would
-/// resolve outside the archive root. Entries that fail this check are skipped
-/// rather than aborting the whole extraction, so one unexpected entry can't
-/// prevent installing the rest of an otherwise-trusted download.
+/// resolve outside the archive root. An entry that fails this check aborts the
+/// whole extraction with an error naming the entry: a downloaded archive
+/// containing such an entry is untrustworthy, and a partial install would be
+/// worse than a clear failure. Both call sites extract into fresh temp dirs,
+/// so an aborted extraction leaves nothing behind.
 ///
 /// On Unix, the executable bit (and other permission bits) stored in the
 /// zip's unix mode is restored on the extracted file.
