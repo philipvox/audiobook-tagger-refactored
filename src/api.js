@@ -129,6 +129,15 @@ const TAURI_COMMANDS = new Set([
   'clear_undo_state',
   'preview_rename',
   'rename_files',
+  // #58: session snapshot + persistent operation log. Tauri-only by design.
+  // The browser build has no writable app data dir, so src/lib/session.js
+  // branches on isTauri() and falls back to localStorage rather than relying
+  // on a HANDLERS stub, and logEvent no-ops entirely.
+  'save_session',
+  'load_session',
+  'clear_session',
+  'append_log',
+  'get_log_path',
   'ollama_get_status',
   'ollama_get_model_presets',
   'ollama_get_disk_usage',

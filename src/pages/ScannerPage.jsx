@@ -12,6 +12,7 @@ import { ExportImportModal } from '../components/ExportImportModal';
 import { RescanModal } from '../components/RescanModal';
 import { ABSPushModal } from '../components/ABSPushModal';
 import { UndoToast } from '../components/UndoToast';
+import { RestoreSessionToast } from '../components/RestoreSessionToast';
 import { SeriesIssueModal } from '../components/SeriesIssueModal';
 import { ValidationIssueModal } from '../components/ValidationIssueModal';
 import { AuthorAnalysisModal } from '../components/AuthorAnalysisModal';
@@ -38,7 +39,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     config, groups, setGroups, fileStatuses, updateFileStatuses, clearFileStatuses, writeProgress,
     validationResults, validationStats, validating, runValidation, runAuthorAnalysis, authorAnalysis,
     applyBatchFixes, applyAuthorFixes, clearValidation,
-    seriesAnalysis, analyzingSeries, runSeriesAnalysis, applySeriesFixes
+    seriesAnalysis, analyzingSeries, runSeriesAnalysis, applySeriesFixes,
+    savedSession, sessionRestorePending, restoreSession, discardSession
   } = useApp();
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedGroupIds, setSelectedGroupIds] = useState(new Set());
@@ -151,6 +153,33 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       console.error('Failed to clear undo state:', error);
     }
   }, []);
+
+  // #58 restore prompt. Restore drops the saved work back into the workspace;
+  // Discard is the only path that deletes a snapshot the user has not replaced,
+  // so it is a deliberate click, never a dismissal or a timeout.
+  const [sessionBusy, setSessionBusy] = useState(false);
+
+  const handleRestoreSession = useCallback(() => {
+    const count = restoreSession();
+    setSelectedGroup(null);
+    setSelectedGroupIds(new Set());
+    if (count > 0) {
+      toast.success(
+        'Session Restored',
+        `Brought back ${count} book${count === 1 ? '' : 's'} from your last session.`
+      );
+    }
+  }, [restoreSession, toast]);
+
+  const handleDiscardSession = useCallback(async () => {
+    setSessionBusy(true);
+    try {
+      await discardSession();
+      toast.info('Session Discarded', 'The saved session was deleted.');
+    } finally {
+      setSessionBusy(false);
+    }
+  }, [discardSession, toast]);
 
   const {
     scanning,
@@ -3626,6 +3655,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           onUndo={handleUndo}
           onDismiss={dismissUndo}
           undoing={undoing}
+        />
+      )}
+
+      {/* Restore previous session (#58). Non-blocking, and it stays until the
+          user answers: autosave is suppressed the whole time it is open, so
+          the saved snapshot cannot be overwritten before they decide. */}
+      {sessionRestorePending && savedSession && (
+        <RestoreSessionToast
+          session={savedSession}
+          busy={sessionBusy}
+          onRestore={handleRestoreSession}
+          onDiscard={handleDiscardSession}
         />
       )}
     </div>
