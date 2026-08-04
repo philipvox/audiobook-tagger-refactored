@@ -32,6 +32,16 @@ export function addTagToList(tags, raw) {
   return [...list, tag];
 }
 
+// True when two tag lists are identical (same order, same exact strings).
+// The editor uses this to skip a no-op commit: onInlineEdit stamps
+// file.changes unconditionally, so re-committing an unchanged tag would
+// otherwise stage a `tags` change with old === new.
+export function isSameTagList(a, b) {
+  const x = Array.isArray(a) ? a : [];
+  const y = Array.isArray(b) ? b : [];
+  return x.length === y.length && x.every((t, i) => t === y[i]);
+}
+
 // Replace the tag at `idx`. A cleared value removes the tag. The duplicate
 // check skips the slot being edited, so re-committing an unchanged tag (or
 // only changing its casing) is not mistaken for a duplicate; renaming a tag

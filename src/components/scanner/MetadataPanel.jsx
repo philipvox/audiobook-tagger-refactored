@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { callBackend } from '../../api';
 import { proxyFetch } from '../../lib/proxy';
 import { performLookup } from './performLookup';
-import { addTagToList, replaceTagInList } from '../../lib/tagInput';
+import { addTagToList, replaceTagInList, isSameTagList } from '../../lib/tagInput';
 import { Book, Edit, X, Database, Folder, Bot, FileAudio, Globe, Music, Library, FolderOpen, Search } from 'lucide-react';
 import { useToast } from '../Toast';
 
@@ -291,9 +291,13 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
   const commitTagEdit = () => {
     if (editingTagIdx === null || !onInlineEdit || !group) return;
     // #54: editing a tag no longer lowercases it; clearing it still removes it.
-    const tags = replaceTagInList(group.metadata?.tags || [], editingTagIdx, editingTagValue);
-    onInlineEdit(group.id, 'tags', tags.filter(t => t));
+    const current = group.metadata?.tags || [];
+    const tags = replaceTagInList(current, editingTagIdx, editingTagValue).filter(t => t);
     setEditingTagIdx(null);
+    // Same guard as addTag: committing an unchanged tag must not stage a no-op
+    // `tags` file change (onInlineEdit stamps file.changes unconditionally).
+    if (isSameTagList(tags, current)) return;
+    onInlineEdit(group.id, 'tags', tags);
     setDirty(true);
   };
 
