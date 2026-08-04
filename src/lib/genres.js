@@ -542,25 +542,41 @@ export function enforceGenrePolicy(genres) {
 /**
  * Enforce tag policy: map, deduplicate, max 15.
  *
+ * #54: with `preserveUnrecognized` on (the `preserve_existing_tags` setting),
+ * a tag that does NOT map to the approved vocabulary is kept as the user wrote
+ * it - original casing, no hyphenation - instead of being dropped. Tags that DO
+ * map still normalize to their approved form. Preserved tags are appended after
+ * the approved ones and, like dna: tags, sit outside the 15-tag cap so enabling
+ * the setting can never silently delete a curated tag.
+ *
  * @param {string[]} tags
+ * @param {{ preserveUnrecognized?: boolean }} [options]
  * @returns {string[]}
  */
-export function enforceTagPolicy(tags) {
-  const mapped = tags
-    .map((t) => mapTag(t))
-    .filter((t) => t !== null);
+export function enforceTagPolicy(tags, { preserveUnrecognized = false } = {}) {
+  const seen = new Set(); // case-insensitive, shared across both buckets
+  const approved = [];
+  const preserved = [];
 
-  // Deduplicate preserving order
-  const seen = new Set();
-  const unique = [];
-  for (const t of mapped) {
-    if (!seen.has(t)) {
-      seen.add(t);
-      unique.push(t);
+  for (const t of tags) {
+    const mapped = mapTag(t);
+    if (mapped !== null) {
+      const key = mapped.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      approved.push(mapped);
+      continue;
     }
+    if (!preserveUnrecognized) continue;
+    const raw = String(t).trim();
+    if (!raw) continue;
+    const key = raw.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    preserved.push(raw);
   }
 
-  return unique.slice(0, 15);
+  return [...approved.slice(0, 15), ...preserved];
 }
 
 /**
@@ -580,9 +596,10 @@ export function isDnaTag(tag) {
  * - DNA tags: pass through unchanged, no limit
  *
  * @param {string[]} tags
+ * @param {{ preserveUnrecognized?: boolean }} [options] see enforceTagPolicy (#54)
  * @returns {string[]}
  */
-export function enforceTagPolicyWithDna(tags) {
+export function enforceTagPolicyWithDna(tags, options = {}) {
   const standard = [];
   const dna = [];
 
@@ -594,7 +611,7 @@ export function enforceTagPolicyWithDna(tags) {
     }
   }
 
-  const result = enforceTagPolicy(standard);
+  const result = enforceTagPolicy(standard, options);
   result.push(...dna);
   return result;
 }

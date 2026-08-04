@@ -7,6 +7,7 @@ import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
 import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor } from './lib/normalize';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit, enforceTagPolicyWithDna } from './lib/genres';
+import { mergeGenres } from './lib/mergeGenres';
 import { isTauri } from './lib/platform.js';
 import { makeErrorDetail, errorDetailFromException } from './lib/errorDetail.js';
 
@@ -47,6 +48,10 @@ const DEFAULT_CONFIG = {
   // genres instead of replacing them. Off by default (and an absent key reads
   // as false) so existing users see no change.
   preserve_existing_genres: false,
+  // #54: when true, tags outside the approved vocabulary survive the ABS push
+  // with their original casing instead of being dropped by mapTag. Off by
+  // default (and an absent key reads as false).
+  preserve_existing_tags: false,
   performance_preset: 'balanced',
   ai_model: 'gpt-5-nano',
   ai_base_url: 'https://api.openai.com',
@@ -260,11 +265,15 @@ function stripEmbeddedSequence(name) {
  * - Authors: split on , and & → [{id: "new-N", name}]
  * - Narrators: wrapped as array
  * - Series: [{name, sequence}] with NO id field (ABS matches by name)
- * - Genres: enforced (max 3, validated)
+ * - Genres: enforced (max 3, validated) unless preserve_existing_genres is on
  * - Tags: at TOP LEVEL, DNA-aware enforcement
  */
 function buildAbsPayload(meta) {
   const metadata = {};
+  // #54: both preservation settings are read here because this is the boundary
+  // that used to undo them - mapGenre/mapTag dropped anything outside the
+  // approved vocabulary and re-cased the survivors on the way to ABS.
+  const cfg = getLocalConfig();
 
   if (meta.title) metadata.title = meta.title;
   if (meta.subtitle) metadata.subtitle = meta.subtitle;
@@ -288,12 +297,20 @@ function buildAbsPayload(meta) {
     metadata.narrators = meta.narrator.split(',').map(n => n.trim()).filter(Boolean);
   }
 
-  // Genres: enforce policy (max 3, validated against approved list) if enabled
+  // Genres: enforce policy (max 3, validated against approved list) if enabled.
+  // #54: with preserve_existing_genres on, the genres go out exactly as the
+  // book carries them - case-insensitively deduped, first-seen casing kept, no
+  // policy mapping, no cap. The AI's genres were already policy-enforced when
+  // they were classified, so the only thing this bypass protects is the
+  // curated/matched genres the setting promises to keep.
   if (meta.genres && meta.genres.length > 0) {
-    const config = getLocalConfig();
-    metadata.genres = config.genre_enforcement !== false
-      ? enforceGenrePolicyWithSplit(meta.genres)
-      : meta.genres.slice(0, 3);
+    if (cfg.preserve_existing_genres === true) {
+      metadata.genres = mergeGenres(meta.genres, [], { preserve: true, max: Infinity }).genres;
+    } else {
+      metadata.genres = cfg.genre_enforcement !== false
+        ? enforceGenrePolicyWithSplit(meta.genres)
+        : meta.genres.slice(0, 3);
+    }
   }
 
   // Series: use all_series if available, fall back to series/sequence.
@@ -327,8 +344,12 @@ function buildAbsPayload(meta) {
   }
   if (metadata.series) console.log(`[series-fix] Final series payload:`, JSON.stringify(metadata.series));
 
-  // Tags: TOP LEVEL (not inside metadata), DNA-aware enforcement
-  const finalTags = enforceTagPolicyWithDna(meta.tags || []);
+  // Tags: TOP LEVEL (not inside metadata), DNA-aware enforcement.
+  // #54: preserve_existing_tags keeps tags outside the approved vocabulary
+  // (with their casing) instead of dropping them; approved tags still normalize.
+  const finalTags = enforceTagPolicyWithDna(meta.tags || [], {
+    preserveUnrecognized: cfg.preserve_existing_tags === true,
+  });
   const payload = { metadata };
   if (finalTags.length > 0) payload.tags = finalTags;
 
