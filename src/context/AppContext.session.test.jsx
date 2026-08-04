@@ -108,13 +108,62 @@ describe('AppContext session persistence (#58)', () => {
     const { result } = renderHook(() => useApp(), { wrapper });
     await settle();
 
-    let count;
-    act(() => { count = result.current.restoreSession(); });
+    let outcome;
+    act(() => { outcome = result.current.restoreSession(); });
 
-    expect(count).toBe(2);
+    expect(outcome).toEqual({ restored: true, count: 2 });
     expect(result.current.groups.map(g => g.id)).toEqual(['s1', 's2']);
     expect(result.current.sessionRestorePending).toBe(false);
     expect(result.current.savedSession).toBeNull();
+  });
+
+  it('refuses to restore over books already loaded, instead of destroying them', async () => {
+    seedSavedSession();
+    const { result } = renderHook(() => useApp(), { wrapper });
+    await settle();
+
+    // The prompt has no dismiss, so the user can scan while it is open. That
+    // fresh scan is not on disk (autosave is suppressed), so an unguarded
+    // restore would destroy it unrecoverably.
+    act(() => { result.current.setGroups(freshGroups); });
+    await settle();
+
+    let outcome;
+    act(() => { outcome = result.current.restoreSession(); });
+
+    expect(outcome.restored).toBe(false);
+    expect(outcome.reason).toBe('workspace-not-empty');
+    expect(outcome.currentCount).toBe(1);
+    expect(outcome.count).toBe(2);
+    // The scan survives, and the prompt is still open so the caller can confirm.
+    expect(result.current.groups.map(g => g.id)).toEqual(['n1']);
+    expect(result.current.sessionRestorePending).toBe(true);
+    expect(result.current.savedSession).not.toBeNull();
+  });
+
+  it('replaces the loaded books once the restore is explicitly forced', async () => {
+    seedSavedSession();
+    const { result } = renderHook(() => useApp(), { wrapper });
+    await settle();
+
+    act(() => { result.current.setGroups(freshGroups); });
+    await settle();
+
+    let outcome;
+    act(() => { outcome = result.current.restoreSession({ force: true }); });
+
+    expect(outcome).toEqual({ restored: true, count: 2 });
+    expect(result.current.groups.map(g => g.id)).toEqual(['s1', 's2']);
+    expect(result.current.sessionRestorePending).toBe(false);
+  });
+
+  it('reports no-session rather than throwing when there is nothing to restore', async () => {
+    const { result } = renderHook(() => useApp(), { wrapper });
+    await settle();
+
+    let outcome;
+    act(() => { outcome = result.current.restoreSession(); });
+    expect(outcome).toEqual({ restored: false, count: 0, reason: 'no-session' });
   });
 
   it('deletes the snapshot only on an explicit Discard', async () => {

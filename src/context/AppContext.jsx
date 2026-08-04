@@ -140,8 +140,24 @@ export function AppProvider({ children }) {
   }, [groups, config?.abs_library_id, sessionChecked, sessionRestorePending]);
 
   // Explicit user decision: bring the saved work back into the workspace.
-  const restoreSession = useCallback(() => {
-    if (!savedSession) return 0;
+  //
+  // Refuses to clobber a non-empty workspace unless the caller forces it. The
+  // prompt has no dismiss, so it can still be open while the user scans or
+  // imports; restoring over that fresh work would destroy it, and because
+  // autosave is suppressed while the prompt is open there would be no snapshot
+  // of it to recover from. The refusal is the caller's cue to confirm first.
+  //
+  // Returns { restored, count, reason?, currentCount? }.
+  const restoreSession = useCallback(({ force = false } = {}) => {
+    if (!savedSession) return { restored: false, count: 0, reason: 'no-session' };
+    if (!force && groups.length > 0) {
+      return {
+        restored: false,
+        count: savedSession.bookCount ?? savedSession.groups.length,
+        currentCount: groups.length,
+        reason: 'workspace-not-empty',
+      };
+    }
     const restored = savedSession.groups;
     setGroups(restored);
     // The restored state is already the snapshot on disk, so an empty-workspace
@@ -151,8 +167,8 @@ export function AppProvider({ children }) {
     lastSaveAtRef.current = Date.now();
     setSavedSession(null);
     setSessionRestorePending(false);
-    return restored.length;
-  }, [savedSession]);
+    return { restored: true, count: restored.length };
+  }, [savedSession, groups]);
 
   // Explicit user decision: throw the saved work away. The only path in the app
   // that deletes a snapshot the user has not replaced.
