@@ -778,6 +778,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
     batch.start('genres', { total: selectedGroups.length, cleaned: 0, unchanged: 0 });
+    logBatchStart('genres', selectedGroups.length);
 
 
     let cleanedCount = 0;
@@ -848,6 +849,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     unlisten();
+    logBatchEnd('genres', {
+      books: selectedGroups.length,
+      cleaned: cleanedCount,
+      unchanged: unchangedCount,
+      failed: failedCount,
+    });
 
     // Clear progress after a short delay
     batch.end('genres', 1500);
@@ -885,6 +892,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
     batch.start('titles', { total: selectedGroups.length });
+    logBatchStart('titles', selectedGroups.length);
 
 
     let successCount = 0;
@@ -994,6 +1002,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       });
     }
 
+    logBatchEnd('titles', {
+      books: selectedGroups.length,
+      succeeded: successCount,
+      failed: failedCount,
+    });
     batch.end('titles');
   };
 
@@ -1004,6 +1017,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
     batch.start('subtitles', { total: selectedGroups.length, fixed: 0, skipped: 0 });
+    logBatchStart('subtitles', selectedGroups.length);
 
 
     let fixedCount = 0;
@@ -1072,6 +1086,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     unlistenSubtitles();
+    logBatchEnd('subtitles', {
+      books: selectedGroups.length,
+      fixed: fixedCount,
+      skipped: skippedCount,
+      failed: failedCount,
+    });
 
     // Clear progress after a short delay
     batch.end('subtitles', 1500);
@@ -1383,6 +1403,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     batch.start('audio_check', { total: needsProcessing.length });
+    logBatchStart('audio_check', needsProcessing.length);
 
     const items = needsProcessing.map(g => ({
       item_id: g.id || g.group_name,
@@ -1476,8 +1497,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         };
       }));
 
+      logBatchEnd('audio_check', { books: needsProcessing.length, field, updated: updatedCount });
       toast.success(`Check ${label}`, `Updated ${updatedCount} of ${needsProcessing.length} books from audio`);
     } catch (error) {
+      logEvent('batch', 'audio_check aborted', { error: String(error?.message || error) });
       toast.error(`Check ${label}`, String(error));
     } finally {
       if (tauriUnlisten) tauriUnlisten();
@@ -1492,6 +1515,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
     batch.start('series', { total: selectedGroups.length });
+    logBatchStart('series', selectedGroups.length);
 
 
     let successCount = 0;
@@ -1576,6 +1600,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       });
     }
 
+    logBatchEnd('series', {
+      books: selectedGroups.length,
+      succeeded: successCount,
+      failed: failedCount,
+    });
     batch.end('series');
   };
 
@@ -1586,6 +1615,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
     batch.start('age', { total: selectedGroups.length });
+    logBatchStart('age', selectedGroups.length);
 
 
     let successCount = 0;
@@ -1677,6 +1707,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       });
     }
 
+    logBatchEnd('age', {
+      books: selectedGroups.length,
+      succeeded: successCount,
+      failed: failedCount,
+    });
     batch.end('age');
   };
 
@@ -1708,6 +1743,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     batch.update('isbn', { total: booksToProcess.length });
+    logBatchStart('isbn', booksToProcess.length);
 
 
     let successCount = 0;
@@ -1792,6 +1828,13 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       if (failedCount > 0) parts.push(`${failedCount} not found`);
       toast.success('ISBN Lookup Complete', parts.join(', '));
     }
+
+    logBatchEnd('isbn', {
+      books: booksToProcess.length,
+      found: successCount,
+      skipped: skippedIsbn,
+      notFound: failedCount,
+    });
 
     // M2: ISBN lookup reads gather hints from gatheredDataRef; clear them when
     // standalone. Guarded so a Run All step never nulls the shared ref.
@@ -1966,10 +2009,21 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           : undefined;
         toast[summary.type](summary.title, summary.message, opts);
       }
+      // Log against the same errorDetail precedence the UI uses above
+      // (resolve-stage error wins over the earlier gather-stage one). Built
+      // from booksToProcess rather than result.results so a book that failed
+      // during gather and never came back from resolve is still logged.
+      // gatheredDataRef is cleared further down, so this must run before it.
+      const resolveResultById = new Map((result.results || []).map(r => [r.id, r]));
+      const loggedResolveResults = booksToProcess.map(g => {
+        const r = resolveResultById.get(g.id);
+        const errorDetail = r?.errorDetail || gatheredDataRef.current?.get(g.id)?.errorDetail;
+        return errorDetail ? { id: g.id, errorDetail } : { id: g.id };
+      });
       logBatchEnd(
         'resolve',
         { books: booksToProcess.length, processed, skipped, warnings, failed },
-        result.results || []
+        loggedResolveResults
       );
     } catch (e) {
       unlisten();
@@ -2109,8 +2163,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       currentBook: 'Step 1/6: Gathering external data (ABS, Goodreads, Open Library, Google Books)...',
     });
 
+    // Hoisted out of the try so the finally can log the outcome of a Run All
+    // that threw partway through, which is the case most worth having in the
+    // log after a crash.
+    let stepSucceeded = 1; // gather phase counted as 1
+    let stepFailed = 0;
+    let enrichmentBooks = 0;
+
     try {
       const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+      enrichmentBooks = selectedGroups.length;
+      logBatchStart('enrichment', selectedGroups.length);
 
       try {
         const gatherBooks = selectedGroups.map(g => ({
@@ -2131,6 +2194,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         gatheredDataRef.current = dataMap;
       } catch (error) {
         console.error('❌ Phase 1 (gather) failed:', error);
+        logEvent('batch', 'enrichment gather failed', { error: String(error?.message || error) });
         gatheredDataRef.current = null;
         // Continue anyway, individual steps will fall back to their own API calls
       }
@@ -2152,9 +2216,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         { name: 'Description Processing (validate, clean, generate)', fn: handleDescriptionProcessing },
       ];
 
-      let successCount = 1; // gather phase counted as 1
-      let failedCount = 0;
-
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
         const stepNum = i + 2; // offset by 1 for gather phase
@@ -2165,16 +2226,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
         try {
           await step.fn();
-          successCount++;
+          stepSucceeded++;
+          logEvent('enrichment', 'step complete', { step: step.name });
         } catch (error) {
           console.error(`❌ ${step.name} failed:`, error);
-          failedCount++;
+          stepFailed++;
+          logEvent('enrichment', 'step failed', { step: step.name, error: String(error?.message || error) });
         }
 
         batch.update('enrichment', {
           current: stepNum,
-          success: successCount,
-          failed: failedCount,
+          success: stepSucceeded,
+          failed: stepFailed,
           currentBook: stepNum < totalSteps ? `Finished ${step.name}` : 'Complete!',
         });
 
@@ -2187,6 +2250,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       // future standalone flow starts clean and its M2 clear works again.
       gatheredDataRef.current = null;
       runAllActiveRef.current = false;
+      logBatchEnd('enrichment', {
+        books: enrichmentBooks,
+        steps: totalSteps,
+        succeeded: stepSucceeded,
+        failed: stepFailed,
+      });
       batch.end('enrichment', 2000);
     }
   };
@@ -2198,6 +2267,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
     batch.start('tags', { total: selectedGroups.length });
+    logBatchStart('tags', selectedGroups.length);
 
 
     let successCount = 0;
@@ -2339,6 +2409,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
 
+    logBatchEnd('tags', {
+      books: selectedGroups.length,
+      succeeded: successCount,
+      failed: failedCount,
+    });
+
     // Clear progress after a short delay
     batch.end('tags', 1500);
   };
@@ -2350,6 +2426,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
     batch.start('dna', { total: selectedGroups.length });
+    logBatchStart('dna', selectedGroups.length);
 
 
     // Build batch request
@@ -2422,8 +2499,14 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         toast.success('BookDNA Generated', `Generated DNA fingerprints for ${successCount} book${successCount > 1 ? 's' : ''}`);
       }
 
+      logBatchEnd(
+        'dna',
+        { books: selectedGroups.length, succeeded: successCount, failed: failedCount },
+        results
+      );
     } catch (error) {
       console.error('BookDNA generation failed:', error);
+      logEvent('batch', 'dna aborted', { error: String(error?.message || error) });
       toast.error('DNA Generation Failed', error.toString());
     }
 
@@ -2644,6 +2727,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
     batch.start('descriptions', { total: selectedGroups.length, fixed: 0, skipped: 0 });
+    logBatchStart('descriptions', selectedGroups.length);
 
 
     let fixedCount = 0;
@@ -2737,6 +2821,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     unlistenDescs();
+    logBatchEnd('descriptions', {
+      books: selectedGroups.length,
+      fixed: fixedCount,
+      skipped: skippedCount,
+      failed: failedCount,
+    });
 
     // Clear progress after a short delay
     batch.end('descriptions', 1500);
