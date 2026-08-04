@@ -335,7 +335,10 @@ describe('AppContext session persistence (#58)', () => {
     // The user scans before answering, then chooses to keep the new books.
     act(() => { result.current.setGroups(freshGroups); });
     await settle();
-    await act(async () => { await result.current.keepCurrentWorkspace(); });
+
+    let preserved;
+    await act(async () => { preserved = await result.current.keepCurrentWorkspace(); });
+    expect(preserved).toBe(true);
 
     // Nothing was destroyed: the declined session moved to the second slot.
     const prev = JSON.parse(localStorage.getItem(PREV_SESSION_STORAGE_KEY));
@@ -347,6 +350,38 @@ describe('AppContext session persistence (#58)', () => {
     expect(storedSession().groups.map(g => g.id)).toEqual(['n1']);
     // The resumed autosave did not clobber the second slot.
     expect(JSON.parse(localStorage.getItem(PREV_SESSION_STORAGE_KEY)).groups).toHaveLength(2);
+  });
+
+  it('reports a failed backup but still resumes autosave', async () => {
+    seedSavedSession();
+    const { result } = renderHook(() => useApp(), { wrapper });
+    await settle();
+
+    act(() => { result.current.setGroups(freshGroups); });
+    await settle();
+
+    // Quota pressure: writing the second copy throws, so the declined snapshot
+    // is left in the primary slot where resumed autosave will overwrite it.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const realSetItem = Storage.prototype.setItem;
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (key, value) {
+      if (key === PREV_SESSION_STORAGE_KEY) throw new Error('QuotaExceededError');
+      return realSetItem.call(this, key, value);
+    });
+
+    let preserved;
+    await act(async () => { preserved = await result.current.keepCurrentWorkspace(); });
+
+    // The caller must be told, so it can warn instead of claiming a backup.
+    expect(preserved).toBe(false);
+    expect(localStorage.getItem(PREV_SESSION_STORAGE_KEY)).toBeNull();
+
+    // But the user is NOT stranded unprotected: they chose their current work,
+    // and leaving autosave suppressed would repeat the bug this path fixes.
+    expect(result.current.sessionRestorePending).toBe(false);
+    setItemSpy.mockRestore();
+    await advancePastDebounce();
+    expect(storedSession().groups.map(g => g.id)).toEqual(['n1']);
   });
 
   it('warns once after three consecutive autosave failures', async () => {

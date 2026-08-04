@@ -27,6 +27,7 @@ import { useModals } from '../hooks/useModals';
 import { useApp } from '../context/AppContext';
 import { severityForKind } from '../lib/errorDetail';
 import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
+import { keepCurrentBooksToast } from '../lib/session.js';
 import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
 import { mergeClassifyTags } from '../lib/mergeClassifyTags';
 import { mergeGenres } from '../lib/mergeGenres';
@@ -203,12 +204,19 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     setPendingRestore(null);
     setSessionBusy(true);
     try {
-      await keepCurrentWorkspace();
-      logEvent('session', 'kept current books, previous session moved to the second slot');
-      toast.info(
-        'Keeping Current Books',
-        'Autosave resumed. Your previous session was kept as a backup copy in the app data folder.'
+      // Autosave resumes either way: the user chose their current work, and
+      // stranding them unprotected again would repeat the bug this path exists
+      // to fix. Only the wording changes, because on the failure path the old
+      // snapshot is still in the primary slot where autosave will overwrite it.
+      const preserved = await keepCurrentWorkspace();
+      logEvent(
+        'session',
+        preserved
+          ? 'kept current books, previous session moved to the second slot'
+          : 'kept current books, but the backup copy could not be written'
       );
+      const notice = keepCurrentBooksToast(preserved);
+      toast[notice.type](notice.title, notice.message);
     } finally {
       setSessionBusy(false);
     }

@@ -156,6 +156,33 @@ export function formatRelativeTime(savedAt, now = Date.now()) {
 }
 
 /**
+ * Toast payload for the "keep current books" decision, given whether the
+ * backup copy actually landed. Same shape as summarizeBatch so the caller does
+ * toast[type](title, message).
+ *
+ * Split out as a pure helper because the failure path is the one that matters
+ * and is awkward to reach through the UI: preserving can fail (a browser build
+ * under quota pressure), which leaves the declined snapshot in the primary
+ * slot where resumed autosave overwrites it seconds later. Telling the user it
+ * was "kept as a backup copy" would be false exactly when they most need to
+ * know otherwise.
+ */
+export function keepCurrentBooksToast(preserved) {
+  if (preserved) {
+    return {
+      type: 'info',
+      title: 'Keeping Current Books',
+      message: 'Autosave resumed. Your previous session was kept as a backup copy in the app data folder.',
+    };
+  }
+  return {
+    type: 'warning',
+    title: 'Keeping Current Books',
+    message: 'Could not write the backup copy; your previous session may be overwritten by autosave.',
+  };
+}
+
+/**
  * The one-line summary the restore prompt shows.
  */
 export function describeSession(session, now = Date.now()) {
