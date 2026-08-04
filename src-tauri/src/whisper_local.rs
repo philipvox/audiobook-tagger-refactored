@@ -3,7 +3,7 @@
 // Follows the same pattern as ollama.rs
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
@@ -274,6 +274,65 @@ fn passes_executable_check(path: &std::path::Path) -> bool {
     &buf[..2] == b"MZ" // Windows PE
 }
 
+/// Extract a zip archive to `dest`, entirely in-process. Replaces shelling out
+/// to `unzip`, which isn't reliably present on Windows and caused local
+/// Whisper/FFmpeg installs to fail there (#56).
+///
+/// Zip-slip guard: each entry's path is resolved via `enclosed_name()`, which
+/// returns `None` for absolute paths or paths whose `..` components would
+/// resolve outside the archive root. Entries that fail this check are skipped
+/// rather than aborting the whole extraction, so one unexpected entry can't
+/// prevent installing the rest of an otherwise-trusted download.
+///
+/// On Unix, the executable bit (and other permission bits) stored in the
+/// zip's unix mode is restored on the extracted file.
+fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(archive).map_err(|e| format!("Zip open error: {}", e))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("Zip read error: {}", e))?;
+
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| format!("Zip entry error: {}", e))?;
+
+        let Some(rel_path) = entry.enclosed_name() else {
+            // Zip-slip guard: unsafe path (absolute or escapes via ".."). Skip it.
+            continue;
+        };
+
+        let out_path = dest.join(&rel_path);
+
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path).map_err(|e| format!("Mkdir error: {}", e))?;
+            continue;
+        }
+
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("Mkdir error: {}", e))?;
+        }
+
+        let mut out_file =
+            std::fs::File::create(&out_path).map_err(|e| format!("Extract write error: {}", e))?;
+        std::io::copy(&mut entry, &mut out_file)
+            .map_err(|e| format!("Extract copy error: {}", e))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Some(mode) = entry.unix_mode() {
+                if mode & 0o777 != 0 {
+                    // Mask to the rwx bits only; never propagate setuid/setgid/sticky
+                    // bits from a downloaded archive.
+                    let _ = std::fs::set_permissions(
+                        &out_path,
+                        std::fs::Permissions::from_mode(mode & 0o777),
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ---- Tauri commands ----
 
 #[tauri::command]
@@ -396,17 +455,7 @@ async fn install_ffmpeg(window: &tauri::Window) -> Result<String, String> {
         let archive_path = temp_dir.path().join("ffmpeg.zip");
         std::fs::write(&archive_path, &bytes).map_err(|e| format!("Write error: {}", e))?;
 
-        let output = std::process::Command::new("unzip")
-            .args(["-q", "-o"])
-            .arg(archive_path.to_str().unwrap_or_default())
-            .arg("-d")
-            .arg(temp_dir.path().to_str().unwrap_or_default())
-            .output()
-            .map_err(|e| format!("Unzip error: {}. On Windows, ensure 'unzip' is available or use 7-Zip.", e))?;
-
-        if !output.status.success() {
-            return Err(format!("Unzip failed: {}", String::from_utf8_lossy(&output.stderr)));
-        }
+        extract_zip(&archive_path, temp_dir.path())?;
     }
 
     #[cfg(target_os = "linux")]
@@ -481,17 +530,7 @@ async fn download_and_install_binary(url: &str, window: &tauri::Window) -> Resul
     let zip_path = temp_dir.path().join("whisper.zip");
     std::fs::write(&zip_path, &bytes).map_err(|e| format!("Write error: {}", e))?;
 
-    let output = std::process::Command::new("unzip")
-        .args(["-q", "-o"])
-        .arg(zip_path.to_str().unwrap_or_default())
-        .arg("-d")
-        .arg(temp_dir.path().to_str().unwrap_or_default())
-        .output()
-        .map_err(|e| format!("Unzip error: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!("Unzip failed: {}", String::from_utf8_lossy(&output.stderr)));
-    }
+    extract_zip(&zip_path, temp_dir.path())?;
 
     // Find the whisper-cli or whisper-cpp binary in the extracted files. Only accept
     // real executables (magic-byte check) so we never copy a header or static lib.
@@ -847,5 +886,95 @@ mod tests {
         let tiny = tmp.path().join("tiny");
         std::fs::File::create(&tiny).unwrap().write_all(b"MZ").unwrap();
         assert!(!passes_executable_check(&tiny));
+    }
+
+    // ---- #56: in-process zip extraction (no more shelling out to `unzip`) ----
+
+    /// Build a small test zip at `path` with plain entries (no zip-slip, no
+    /// custom unix mode). Uses the deflate feature enabled for the `zip` dep.
+    fn build_test_zip(path: &std::path::Path, entries: &[(&str, &[u8])]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, contents) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(contents).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn extract_zip_writes_files_and_preserves_structure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("test.zip");
+        build_test_zip(&archive, &[
+            ("a.txt", b"hello"),
+            ("sub/b.txt", b"nested"),
+        ]);
+
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        extract_zip(&archive, &dest).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dest.join("a.txt")).unwrap(), "hello");
+        assert_eq!(std::fs::read_to_string(dest.join("sub/b.txt")).unwrap(), "nested");
+    }
+
+    #[test]
+    fn extract_zip_rejects_zip_slip_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("evil.zip");
+
+        // Build a zip with one legitimate entry and two that try to escape the
+        // destination directory: a relative `..` traversal and an absolute
+        // path. `start_file` (unlike `start_file_from_path`) does not sanitize
+        // the name, so this is the only way to construct zip-slip entries for
+        // the test.
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        writer.start_file("good.txt", options).unwrap();
+        writer.write_all(b"safe").unwrap();
+        writer.start_file("../evil.txt", options).unwrap();
+        writer.write_all(b"malicious").unwrap();
+        writer.start_file("/tmp/evil-abs.txt", options).unwrap();
+        writer.write_all(b"malicious-abs").unwrap();
+        writer.finish().unwrap();
+
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        extract_zip(&archive, &dest).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dest.join("good.txt")).unwrap(), "safe");
+        assert!(!dest.join("evil.txt").exists());
+        // The relative-escape entry would have landed at tmp/evil.txt if unsanitized.
+        assert!(!tmp.path().join("evil.txt").exists());
+        // The absolute-path entry must never be written to its literal path.
+        assert!(!std::path::Path::new("/tmp/evil-abs.txt").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn extract_zip_preserves_unix_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("bin.zip");
+
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+        writer.start_file("mybinary", options).unwrap();
+        writer.write_all(b"#!/bin/sh\necho hi\n").unwrap();
+        writer.finish().unwrap();
+
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        extract_zip(&archive, &dest).unwrap();
+
+        let out = dest.join("mybinary");
+        assert!(out.exists());
+        let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+        assert!(mode & 0o111 != 0, "expected executable bit set, got mode {:o}", mode);
     }
 }
