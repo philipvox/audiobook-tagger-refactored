@@ -6,6 +6,7 @@ import {
   SESSION_STORAGE_KEY,
   PREV_SESSION_STORAGE_KEY,
   AUTOSAVE_FAILURE_WARN_THRESHOLD,
+  keepCurrentBooksToast,
   nextAutosaveFailureState,
   preserveSession,
   AUTOSAVE_DEBOUNCE_MS,
@@ -168,6 +169,36 @@ describe('autosaveDelay', () => {
 
   it('falls back to the debounce if the clock went backwards', () => {
     expect(autosaveDelay(now + 5000, now)).toBe(AUTOSAVE_DEBOUNCE_MS);
+  });
+});
+
+describe('keepCurrentBooksToast', () => {
+  it('confirms the backup on the success path', () => {
+    const notice = keepCurrentBooksToast(true);
+    expect(notice.type).toBe('info');
+    expect(notice.title).toBe('Keeping Current Books');
+    expect(notice.message).toContain('kept as a backup copy');
+    expect(notice.message).toContain('Autosave resumed');
+  });
+
+  it('warns instead of claiming a backup that was never written', () => {
+    // Reachable in the browser build under quota pressure: the second setItem
+    // throws, the declined snapshot stays in the primary slot, and resumed
+    // autosave overwrites it a few seconds later. Saying it was "kept" here
+    // would be false exactly when the user most needs to know otherwise.
+    const notice = keepCurrentBooksToast(false);
+    expect(notice.type).toBe('warning');
+    expect(notice.message).toBe(
+      'Could not write the backup copy; your previous session may be overwritten by autosave.'
+    );
+    expect(notice.message).not.toMatch(/kept as a backup/i);
+    expect(notice.message).not.toMatch(/was kept/i);
+  });
+
+  it('treats a missing or falsy outcome as a failure, never as a silent success', () => {
+    for (const outcome of [false, undefined, null, 0]) {
+      expect(keepCurrentBooksToast(outcome).type).toBe('warning');
+    }
   });
 });
 

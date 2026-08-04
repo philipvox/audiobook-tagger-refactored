@@ -219,13 +219,22 @@ export function AppProvider({ children }) {
   // is awaited BEFORE the prompt is dismissed: dismissing first would let an
   // autosave land in the primary slot and then be moved to the second slot by
   // this very call, losing the newly protected work.
+  //
+  // Returns whether the backup copy actually landed. It can fail (a browser
+  // build under quota pressure throws on the second setItem and leaves the
+  // primary slot in place, where resumed autosave overwrites it a few seconds
+  // later), and the caller must not claim the previous session was kept when
+  // it was not. Either way the prompt is dismissed and autosave resumes: the
+  // user chose their current work, and stranding them unprotected again would
+  // repeat the bug this whole path exists to fix.
   const keepCurrentWorkspace = useCallback(async () => {
-    await preserveSession();
+    const preserved = await preserveSession();
     setSavedSession(null);
     setSessionRestorePending(false);
     setSessionUnreadable(null);
     hadGroupsRef.current = false;
     lastSaveAtRef.current = 0;
+    return preserved;
   }, []);
 
   // Load config on mount
