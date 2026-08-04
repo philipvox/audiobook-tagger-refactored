@@ -197,6 +197,14 @@ export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, max
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
       'content-type': 'application/json',
+      // Required whenever the request carries an Origin header, which is every
+      // request we make: tauri-plugin-http unconditionally appends
+      // Origin: tauri://localhost (http://tauri.localhost on Windows), and the
+      // browser adds one on the /api/anthropic proxy path. Without this header
+      // Anthropic rejects the call with 401 "CORS requests must set
+      // 'anthropic-dangerous-direct-browser-access' header", which we used to
+      // report to the user as an invalid API key.
+      'anthropic-dangerous-direct-browser-access': 'true',
     },
     body: JSON.stringify({
       model,
@@ -208,7 +216,18 @@ export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, max
 
   if (!res.ok) {
     const errText = await res.text();
-    if (res.status === 401) throw new Error('Invalid API key. Check your Anthropic key in Settings.');
+    if (res.status === 401) {
+      // Surface Anthropic's own message: a 401 here is not always a bad key
+      // (CORS/header rejections use the same status), and assuming it was cost
+      // users a lot of time chasing keys that were fine.
+      let apiMessage = '';
+      try { apiMessage = JSON.parse(errText)?.error?.message || ''; } catch { /* non-JSON body */ }
+      throw new Error(
+        apiMessage
+          ? `Anthropic rejected the request (401): ${apiMessage}`
+          : 'Invalid API key. Check your Anthropic key in Settings.'
+      );
+    }
     if (res.status === 404) throw new Error(`Model "${model}" not found. Try a different Claude model in Settings.`);
     if (res.status === 429) throw new Error('Anthropic rate limit exceeded. Wait a moment and try again.');
     throw new Error(`Anthropic error ${res.status}: ${errText.substring(0, 300)}`);
