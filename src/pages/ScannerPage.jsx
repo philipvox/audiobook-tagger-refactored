@@ -28,7 +28,7 @@ import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
 import { mergeClassifyTags } from '../lib/mergeClassifyTags';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
-import { isPlaceholderAuthor } from '../lib/normalize';
+import { isPlaceholderAuthor, isPlaceholderTitle } from '../lib/normalize';
 import { WritePreviewModal } from '../components/WritePreviewModal';
 import { ConfirmModal } from '../components/ConfirmModal';
 
@@ -1298,7 +1298,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       // was silently skipping books that actually needed audio extraction.
       if (field === 'narrator') return isPlaceholderAuthor(m.narrator) && (!m.narrators || m.narrators.length === 0 || m.narrators.every(isPlaceholderAuthor));
       if (field === 'author') return isPlaceholderAuthor(m.author);
-      if (field === 'title') return !m.title;
+      if (field === 'title') return isPlaceholderTitle(m.title);
       if (field === 'publisher') return !m.publisher;
       if (field === 'language') return !m.language;
       // 'all': process if missing any of these

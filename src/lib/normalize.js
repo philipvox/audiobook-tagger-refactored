@@ -571,11 +571,21 @@ export function cleanTitle(title) {
   return result.trim();
 }
 
-// Exact (not substring) placeholder values seen in author/narrator fields,
-// e.g. ABS sets "Unknown" on unmatched books. Matched case-insensitively
-// after trimming - a real name that merely contains one of these words
-// (e.g. author "Unknown Soldier") must NOT match, hence exact Set.has()
-// rather than a regex/startsWith test.
+// Shared placeholder-matching mechanics for the field-specific helpers below:
+// null/undefined/empty/whitespace-only always count as placeholder, otherwise
+// an exact (not substring) case-insensitive match against the given set.
+// Exact matching is required so a real value that merely contains a
+// placeholder word (author "Unknown Soldier", title "Unknown Pleasures")
+// is never misdetected - hence Set.has() rather than a regex/startsWith test.
+function _isPlaceholderValue(value, placeholderSet) {
+  if (value == null) return true;
+  const s = String(value).trim();
+  if (!s) return true;
+  return placeholderSet.has(s.toLowerCase());
+}
+
+// Placeholder values seen in author/narrator fields, e.g. ABS sets "Unknown"
+// on unmatched books.
 const PLACEHOLDER_NAMES = new Set([
   "unknown",
   "author unknown",
@@ -606,10 +616,34 @@ const PLACEHOLDER_NAMES = new Set([
  * isPlaceholderAuthor(null)               // true
  */
 export function isPlaceholderAuthor(value) {
-  if (value == null) return true;
-  const s = String(value).trim();
-  if (!s) return true;
-  return PLACEHOLDER_NAMES.has(s.toLowerCase());
+  return _isPlaceholderValue(value, PLACEHOLDER_NAMES);
+}
+
+// Placeholder values seen in title fields - a distinct vocabulary from
+// author/narrator placeholders (e.g. "N/A"/"None" are not title placeholders).
+const PLACEHOLDER_TITLES = new Set([
+  "unknown",
+  "unknown title",
+  "untitled",
+]);
+
+/**
+ * Detect a placeholder title value (e.g. ABS's "Unknown" fallback for
+ * unmatched books), the title-branch counterpart of `isPlaceholderAuthor`
+ * (issue #57: a literal "Unknown" title should count as missing in the
+ * audio-check smart-skip gate, same as a literal "Unknown" author).
+ *
+ * @param {*} value
+ * @returns {boolean}
+ *
+ * @example
+ * isPlaceholderTitle("Unknown")             // true
+ * isPlaceholderTitle("Untitled")            // true
+ * isPlaceholderTitle("Unknown Pleasures")   // false (real title, not a placeholder)
+ * isPlaceholderTitle(null)                  // true
+ */
+export function isPlaceholderTitle(value) {
+  return _isPlaceholderValue(value, PLACEHOLDER_TITLES);
 }
 
 /**
