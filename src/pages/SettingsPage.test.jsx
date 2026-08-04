@@ -97,3 +97,29 @@ describe('SettingsPage handleSave (H6)', () => {
     expect(screen.queryByText('Save Failed')).not.toBeInTheDocument();
   });
 });
+
+// #54: "supplement genres instead of replacing". The flag must default to OFF
+// (an absent key reads as false) and persist through the normal save path.
+describe('SettingsPage preserve_existing_genres toggle (#54)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    saveConfigMock.mockResolvedValue({ success: true });
+  });
+
+  it('renders unchecked when the config has no preserve_existing_genres key', async () => {
+    renderPage();
+    const toggle = await screen.findByLabelText(/Supplement genres instead of replacing/i);
+    expect(toggle).not.toBeChecked();
+  });
+
+  it('persists the flag as true once toggled on and saved', async () => {
+    renderPage();
+    const toggle = await screen.findByLabelText(/Supplement genres instead of replacing/i);
+    fireEvent.click(toggle);
+
+    fireEvent.click(screen.getByRole('button', { name: /Save Settings/i }));
+
+    await waitFor(() => expect(saveConfigMock).toHaveBeenCalled());
+    expect(saveConfigMock.mock.calls[0][0]).toMatchObject({ preserve_existing_genres: true });
+  });
+});

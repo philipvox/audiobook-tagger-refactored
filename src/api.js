@@ -43,6 +43,10 @@ const DEFAULT_CONFIG = {
   anthropic_api_key: null,
   backup_tags: true,
   genre_enforcement: true,
+  // #54: when true, AI classification genres SUPPLEMENT the book's existing
+  // genres instead of replacing them. Off by default (and an absent key reads
+  // as false) so existing users see no change.
+  preserve_existing_genres: false,
   performance_preset: 'balanced',
   ai_model: 'gpt-5-nano',
   ai_base_url: 'https://api.openai.com',
