@@ -28,6 +28,7 @@ import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
 import { mergeClassifyTags } from '../lib/mergeClassifyTags';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
+import { isPlaceholderAuthor } from '../lib/normalize';
 import { WritePreviewModal } from '../components/WritePreviewModal';
 import { ConfirmModal } from '../components/ConfirmModal';
 
@@ -1292,13 +1293,16 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // Smart skip: only process books missing the requested field (unless forceFresh)
     const needsProcessing = forceFresh ? selectedGroups : selectedGroups.filter(g => {
       const m = g.metadata || {};
-      if (field === 'narrator') return !m.narrator && (!m.narrators || m.narrators.length === 0);
-      if (field === 'author') return !m.author;
+      // Placeholder values (e.g. ABS's "Unknown" fallback for unmatched books)
+      // count as missing, not present - issue #57: a literal "Unknown" author
+      // was silently skipping books that actually needed audio extraction.
+      if (field === 'narrator') return isPlaceholderAuthor(m.narrator) && (!m.narrators || m.narrators.length === 0 || m.narrators.every(isPlaceholderAuthor));
+      if (field === 'author') return isPlaceholderAuthor(m.author);
       if (field === 'title') return !m.title;
       if (field === 'publisher') return !m.publisher;
       if (field === 'language') return !m.language;
       // 'all': process if missing any of these
-      return !m.narrator || !m.author || !m.publisher || !m.language;
+      return isPlaceholderAuthor(m.narrator) || isPlaceholderAuthor(m.author) || !m.publisher || !m.language;
     });
 
     if (needsProcessing.length === 0) {
@@ -1745,7 +1749,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       // Title looks like a filename (has extension or underscores)
       if (/\.\w{2,4}$/.test(m.title) || m.title.includes('_')) return true;
       // Author looks like a path or placeholder
-      if (m.author.includes('/') || m.author.includes('\\') || m.author.toLowerCase() === 'unknown') return true;
+      if (m.author.includes('/') || m.author.includes('\\') || isPlaceholderAuthor(m.author)) return true;
       // Missing series when folder name suggests one (has number pattern)
       if (!m.series && /book\s*\d|vol/i.test(g.group_name || '')) return true;
       // No subtitle
@@ -1767,10 +1771,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // not Run All), pull external data inline for books with missing/Unknown author.
     // This is what lets a book like "The Sentence" get Louise Erdrich back even
     // when ABS itself has no author stored.
-    const needsLookup = booksToProcess.filter(g => {
-      const a = g.metadata?.author;
-      return !a || !String(a).trim() || /^unknown$/i.test(a);
-    });
+    const needsLookup = booksToProcess.filter(g => isPlaceholderAuthor(g.metadata?.author));
     if (!gatheredDataRef.current && needsLookup.length > 0) {
       try {
         const lookupBooks = needsLookup.map(g => ({
