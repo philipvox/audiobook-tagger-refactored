@@ -4,6 +4,7 @@ import { callBackend, ollamaCall, subscribe } from '../api';
 import { isTauri } from '../lib/platform.js';
 import {
   AUTOSAVE_DEBOUNCE_MS,
+  autosaveDelay,
   clearSession,
   loadSession,
   makeSessionSnapshot,
@@ -82,6 +83,10 @@ export function AppProvider({ children }) {
   // emptied. Without it, an empty workspace at startup would look identical to
   // a reset and wipe a session the user never chose to discard.
   const hadGroupsRef = useRef(false);
+  // When the last snapshot was written, so a workspace that never stops
+  // changing still gets saved at least every AUTOSAVE_MAX_WAIT_MS instead of
+  // having its debounce reset forever by an in-flight batch run.
+  const lastSaveAtRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -112,9 +117,13 @@ export function AppProvider({ children }) {
     if (!hasWork && !hadGroupsRef.current) return;
 
     const libraryId = config?.abs_library_id || null;
+    const delay = hasWork ? autosaveDelay(lastSaveAtRef.current) : AUTOSAVE_DEBOUNCE_MS;
     const timer = setTimeout(() => {
       if (hasWork) {
         hadGroupsRef.current = true;
+        // Stamped when the write is fired, not when it lands, so a persistently
+        // failing store cannot turn the max-wait into a hot retry loop.
+        lastSaveAtRef.current = Date.now();
         saveSession(makeSessionSnapshot({ groups, libraryId })).catch(() => {});
       } else {
         // The workspace was explicitly emptied. Clearing happens here, after
@@ -122,9 +131,10 @@ export function AppProvider({ children }) {
         // "clear only once the replacement is durable" ordering holds by
         // construction: a replacement with books saves instead of clearing.
         hadGroupsRef.current = false;
+        lastSaveAtRef.current = 0;
         clearSession().catch(() => {});
       }
-    }, AUTOSAVE_DEBOUNCE_MS);
+    }, delay);
 
     return () => clearTimeout(timer);
   }, [groups, config?.abs_library_id, sessionChecked, sessionRestorePending]);
@@ -135,8 +145,10 @@ export function AppProvider({ children }) {
     const restored = savedSession.groups;
     setGroups(restored);
     // The restored state is already the snapshot on disk, so an empty-workspace
-    // clear must not fire against it later.
+    // clear must not fire against it later, and the max-wait clock starts now
+    // rather than treating the restore as 30s overdue.
     hadGroupsRef.current = true;
+    lastSaveAtRef.current = Date.now();
     setSavedSession(null);
     setSessionRestorePending(false);
     return restored.length;
@@ -148,6 +160,7 @@ export function AppProvider({ children }) {
     setSavedSession(null);
     setSessionRestorePending(false);
     hadGroupsRef.current = false;
+    lastSaveAtRef.current = 0;
     await clearSession();
   }, []);
 

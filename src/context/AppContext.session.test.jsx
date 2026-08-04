@@ -214,6 +214,31 @@ describe('AppContext session persistence (#58)', () => {
     expect(storedSession().groups.map(g => g.id)).toEqual(['n1']);
   });
 
+  it('still writes during a run that keeps changing the workspace', async () => {
+    const { result } = renderHook(() => useApp(), { wrapper });
+    await settle();
+
+    // First write establishes the max-wait clock.
+    act(() => { result.current.setGroups([{ id: 'b0', files: [] }]); });
+    await advancePastDebounce();
+    expect(storedSession().groups).toHaveLength(1);
+
+    // Now simulate a long batch run committing a chunk of results every second,
+    // which is faster than the debounce window. A pure debounce would never
+    // fire; the max wait guarantees a write anyway.
+    for (let i = 1; i <= 40; i++) {
+      const next = Array.from({ length: i + 1 }, (_, k) => ({ id: `b${k}`, files: [] }));
+      act(() => { result.current.setGroups(next); });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+      });
+    }
+    await settle();
+
+    expect(storedSession().groups.length).toBeGreaterThan(1);
+  });
+
   it('survives a corrupt snapshot without offering a restore', async () => {
     localStorage.setItem(SESSION_STORAGE_KEY, '{ not json at all');
     const { result } = renderHook(() => useApp(), { wrapper });
