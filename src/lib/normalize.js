@@ -571,6 +571,47 @@ export function cleanTitle(title) {
   return result.trim();
 }
 
+// Exact (not substring) placeholder values seen in author/narrator fields,
+// e.g. ABS sets "Unknown" on unmatched books. Matched case-insensitively
+// after trimming - a real name that merely contains one of these words
+// (e.g. author "Unknown Soldier") must NOT match, hence exact Set.has()
+// rather than a regex/startsWith test.
+const PLACEHOLDER_NAMES = new Set([
+  "unknown",
+  "author unknown",
+  "unknown author",
+  "unknown narrator",
+  "n/a",
+  "none",
+]);
+
+/**
+ * Detect a placeholder author/narrator value (e.g. ABS's "Unknown" fallback
+ * for unmatched books), as distinct from a genuinely missing/empty value or a
+ * real name. Single source of truth for placeholder detection - reused by
+ * `api.js`'s `fix_authors_batch` bad-author check and by ScannerPage's
+ * audio-check smart-skip gate (issue #57: a literal "Unknown" author was
+ * counted as "present" and blocked audio extraction).
+ *
+ * Narrower than `isValidAuthor` below: this only flags known placeholder
+ * strings (exact match), not other invalid-name heuristics.
+ *
+ * @param {*} value
+ * @returns {boolean}
+ *
+ * @example
+ * isPlaceholderAuthor("Unknown")          // true
+ * isPlaceholderAuthor("  N/A ")           // true
+ * isPlaceholderAuthor("Unknown Soldier")  // false (real name, not a placeholder)
+ * isPlaceholderAuthor(null)               // true
+ */
+export function isPlaceholderAuthor(value) {
+  if (value == null) return true;
+  const s = String(value).trim();
+  if (!s) return true;
+  return PLACEHOLDER_NAMES.has(s.toLowerCase());
+}
+
 /**
  * Validate an author name. Returns false for obviously invalid names.
  *

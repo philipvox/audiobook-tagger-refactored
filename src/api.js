@@ -5,7 +5,7 @@
 
 import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
 import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
-import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName } from './lib/normalize';
+import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor } from './lib/normalize';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit, enforceTagPolicyWithDna } from './lib/genres';
 import { isTauri } from './lib/platform.js';
 import { makeErrorDetail, errorDetailFromException } from './lib/errorDetail.js';
@@ -1378,11 +1378,13 @@ If the book has a well-known subtitle (e.g., "Dune: The Desert Planet"), include
     let completed = 0;
     let total_fixed = 0, total_skipped = 0, total_failed = 0;
 
+    // Placeholder detection ("Unknown", "N/A", etc.) is shared with
+    // ScannerPage's audio-check smart-skip gate via isPlaceholderAuthor
+    // (issue #57) - single source of truth. Path-fragment detection is
+    // specific to this AI-fix flow, so it stays here on top of the shared check.
     const isBadAuthor = (a) => {
-      if (!a) return true;
+      if (isPlaceholderAuthor(a)) return true;
       const s = String(a).trim();
-      if (!s) return true;
-      if (/^unknown$/i.test(s)) return true;
       if (s.includes('/') || s.includes('\\')) return true;
       return false;
     };
