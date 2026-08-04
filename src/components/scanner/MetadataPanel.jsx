@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { callBackend } from '../../api';
 import { proxyFetch } from '../../lib/proxy';
 import { performLookup } from './performLookup';
+import { addTagToList, replaceTagInList } from '../../lib/tagInput';
 import { Book, Edit, X, Database, Folder, Bot, FileAudio, Globe, Music, Library, FolderOpen, Search } from 'lucide-react';
 import { useToast } from '../Toast';
 
@@ -265,10 +266,16 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
 
   const addTag = () => {
     if (!newTagValue.trim() || !onInlineEdit || !group) return;
-    const tags = [...(group.metadata?.tags || []), newTagValue.trim().toLowerCase().replace(/\s+/g, '-')];
-    onInlineEdit(group.id, 'tags', tags);
+    // #54: user-typed casing is preserved (only dna:/age vocabulary tags are
+    // normalized) and duplicates are rejected case-insensitively.
+    const current = group.metadata?.tags || [];
+    const tags = addTagToList(current, newTagValue);
     setNewTagValue('');
     setAddingTag(false);
+    // Rejected duplicate: same array back. onInlineEdit stamps file.changes
+    // unconditionally, so calling it here would stage a no-op `tags` change.
+    if (tags === current) return;
+    onInlineEdit(group.id, 'tags', tags);
     setDirty(true);
   };
 
@@ -283,8 +290,8 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
 
   const commitTagEdit = () => {
     if (editingTagIdx === null || !onInlineEdit || !group) return;
-    const tags = [...(group.metadata?.tags || [])];
-    tags[editingTagIdx] = editingTagValue.trim().toLowerCase().replace(/\s+/g, '-');
+    // #54: editing a tag no longer lowercases it; clearing it still removes it.
+    const tags = replaceTagInList(group.metadata?.tags || [], editingTagIdx, editingTagValue);
     onInlineEdit(group.id, 'tags', tags.filter(t => t));
     setEditingTagIdx(null);
     setDirty(true);
