@@ -2,6 +2,14 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { callBackend, ollamaCall, subscribe } from '../api';
 import { isTauri } from '../lib/platform.js';
+import {
+  AUTOSAVE_DEBOUNCE_MS,
+  clearSession,
+  loadSession,
+  makeSessionSnapshot,
+  saveSession,
+  shouldAutosave,
+} from '../lib/session.js';
 
 const AppContext = createContext(null);
 
@@ -48,6 +56,100 @@ export function AppProvider({ children }) {
   });
 
   const cancelRef = useRef(null);
+
+  // ==========================================================================
+  // Session persistence (#58)
+  //
+  // A crash or a forced window close used to throw away every edit that had
+  // not been pushed to AudiobookShelf. The working state is now autosaved on a
+  // debounce and offered back on the next launch. Two invariants keep this from
+  // becoming its own source of data loss:
+  //
+  //   * nothing is written before startup has finished reading the saved
+  //     session, and
+  //   * nothing is written while the user still owes us a Restore/Discard
+  //     answer, because until they answer, the file on disk is the only copy of
+  //     that work.
+  // ==========================================================================
+
+  // The snapshot read at startup, held until the user answers the prompt.
+  const [savedSession, setSavedSession] = useState(null);
+  const [sessionRestorePending, setSessionRestorePending] = useState(false);
+  // False until the startup read finishes, gating the first autosave.
+  const [sessionChecked, setSessionChecked] = useState(false);
+  // Whether a snapshot of THIS session's work is on disk. Drives the one case
+  // where autosave clears instead of writes: a workspace that was explicitly
+  // emptied. Without it, an empty workspace at startup would look identical to
+  // a reset and wipe a session the user never chose to discard.
+  const hadGroupsRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let session = null;
+      try {
+        session = await loadSession();
+      } catch (e) {
+        console.warn('Could not read the saved session:', e);
+      }
+      if (cancelled) return;
+      if (session) {
+        setSavedSession(session);
+        setSessionRestorePending(true);
+      }
+      setSessionChecked(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!sessionChecked) return;
+    if (sessionRestorePending) return;
+
+    const hasWork = shouldAutosave(groups);
+    // Nothing in memory and nothing of ours on disk: leave any older snapshot
+    // alone. This is the fresh-launch and post-discard case.
+    if (!hasWork && !hadGroupsRef.current) return;
+
+    const libraryId = config?.abs_library_id || null;
+    const timer = setTimeout(() => {
+      if (hasWork) {
+        hadGroupsRef.current = true;
+        saveSession(makeSessionSnapshot({ groups, libraryId })).catch(() => {});
+      } else {
+        // The workspace was explicitly emptied. Clearing happens here, after
+        // the new state settled, rather than in the click handler, so the
+        // "clear only once the replacement is durable" ordering holds by
+        // construction: a replacement with books saves instead of clearing.
+        hadGroupsRef.current = false;
+        clearSession().catch(() => {});
+      }
+    }, AUTOSAVE_DEBOUNCE_MS);
+
+    return () => clearTimeout(timer);
+  }, [groups, config?.abs_library_id, sessionChecked, sessionRestorePending]);
+
+  // Explicit user decision: bring the saved work back into the workspace.
+  const restoreSession = useCallback(() => {
+    if (!savedSession) return 0;
+    const restored = savedSession.groups;
+    setGroups(restored);
+    // The restored state is already the snapshot on disk, so an empty-workspace
+    // clear must not fire against it later.
+    hadGroupsRef.current = true;
+    setSavedSession(null);
+    setSessionRestorePending(false);
+    return restored.length;
+  }, [savedSession]);
+
+  // Explicit user decision: throw the saved work away. The only path in the app
+  // that deletes a snapshot the user has not replaced.
+  const discardSession = useCallback(async () => {
+    setSavedSession(null);
+    setSessionRestorePending(false);
+    hadGroupsRef.current = false;
+    await clearSession();
+  }, []);
 
   // Load config on mount
   useEffect(() => {
@@ -495,6 +597,11 @@ export function AppProvider({ children }) {
     clearFileStatuses,
     writeProgress,
     setWriteProgress,
+    // Session persistence (#58)
+    savedSession,
+    sessionRestorePending,
+    restoreSession,
+    discardSession,
     // Global progress
     globalProgress,
     startGlobalProgress,
