@@ -29,6 +29,7 @@ import { severityForKind } from '../lib/errorDetail';
 import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
 import { keepCurrentBooksToast } from '../lib/session.js';
 import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
+import { runPush } from '../lib/absPush';
 import { mergeClassifyTags } from '../lib/mergeClassifyTags';
 import { mergeGenres } from '../lib/mergeGenres';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
@@ -3314,40 +3315,29 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const pushGroups = modals.data.push?.groups || [];
     if (pushGroups.length === 0) return;
 
-    // Check if these are ABS imports (no local files)
-    const absImports = pushGroups.filter(g => (g.files?.length || 0) === 0);
-    const localFiles = pushGroups.filter(g => (g.files?.length || 0) > 0);
-
+    // #60: route by ABS item id, not by files.length - ABS-imported books
+    // carry their audio files too, and the path-based branch cannot push them.
+    // Outcomes are surfaced via toast and the session log instead of console.
     try {
-      // Handle ABS imports - use direct ID-based push
-      if (absImports.length > 0) {
-        const result = await handlePushAbsImports(absImports);
-      }
-
-      // Handle local files - use path-based push
-      if (localFiles.length > 0) {
-        // M15: build the file-id set from the snapshot taken at modal open
-        // (localFiles), mirroring the ABS branch, rather than reading the live
-        // selection which may have changed while the confirm modal was open.
-        const snapshotFileIds = new Set();
-        localFiles.forEach(g =>
-          (g.files || []).forEach(f => { if (f.id != null) snapshotFileIds.add(f.id); })
-        );
-
-        const result = await pushToAudiobookShelf(
-          snapshotFileIds,
-          (progress) => {
-          }
-        );
-
-
-        if (result.unmatched?.length > 0) {
-        }
-        if (result.failed?.length > 0) {
-        }
-      }
+      logEvent('push', 'ABS push start', { books: pushGroups.length });
+      const outcome = await runPush(pushGroups, {
+        pushById: handlePushAbsImports,
+        pushByFileIds: pushToAudiobookShelf,
+      });
+      const { summary } = outcome;
+      (toast[summary.type] || toast.info)(summary.title, summary.message);
+      logEvent('push', 'ABS push complete', {
+        books: outcome.attempted,
+        byId: outcome.absCount,
+        byPath: outcome.localCount,
+        updated: outcome.updated,
+        failed: outcome.failed,
+        errors: outcome.errors.slice(0, 5),
+      });
     } catch (error) {
       console.error('Push failed:', error);
+      toast.error('Push Failed', String(error?.message || error));
+      logEvent('push', 'ABS push threw', { error: String(error?.message || error) });
     } finally {
       modals.close('push');
     }

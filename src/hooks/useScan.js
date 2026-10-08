@@ -2,6 +2,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { callBackend, subscribe, pickPath } from '../api';
 import { useApp } from '../context/AppContext';
+import { getAbsId, normalizePushResult } from '../lib/absPush';
+import { logEvent } from '../lib/logEvent';
 
 // ============================================================================
 // Pure helpers, extracted so they can be unit-tested without rendering the
@@ -564,31 +566,48 @@ export function useScan() {
         }));
       });
 
+      // #60: send the ABS item id explicitly (abs_id), falling back to the
+      // group id for legacy imports where they are the same value.
       const request = {
         items: groupsToPush.map(g => ({
           id: g.id,
+          abs_id: getAbsId(g) || g.id,
           metadata: g.metadata,
         }))
       };
 
-      const result = await callBackend('push_abs_imports', { request });
+      const raw = await callBackend('push_abs_imports', { request });
+      const result = normalizePushResult(raw);
 
-      if (result.errors && result.errors.length > 0) {
+      if (result.errors.length > 0) {
         // Group errors by type
         const errorTypes = {};
         result.errors.forEach(err => {
-          const match = err.match(/HTTP (\d+)|timeout|connection|dns/i);
+          const match = String(err).match(/HTTP (\d+)|timeout|connection|dns/i);
           const type = match ? match[0] : 'other';
           errorTypes[type] = (errorTypes[type] || 0) + 1;
         });
         console.warn('Push error breakdown:', errorTypes);
         console.warn('Sample errors:', result.errors.slice(0, 10));
+        logEvent('push', 'ABS push errors', { breakdown: errorTypes, sample: result.errors.slice(0, 5) });
       }
+      logEvent('push', 'ABS push (by id) complete', {
+        books: groupsToPush.length,
+        updated: result.updated,
+        failed: result.failed,
+      });
 
-      return { success: true, updated: result.updated, failed: result.failed };
+      return {
+        success: result.failed === 0,
+        attempted: groupsToPush.length,
+        updated: result.updated,
+        failed: result.failed,
+        errors: result.errors,
+      };
 
     } catch (error) {
       console.error('ABS push failed:', error);
+      logEvent('push', 'ABS push (by id) threw', { books: groupsToPush.length, error: String(error?.message || error) });
       throw error;
     } finally {
       if (unlisten) unlisten();

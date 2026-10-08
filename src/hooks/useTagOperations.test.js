@@ -161,4 +161,39 @@ describe('useTagOperations.pushToAudiobookShelf (minor fix: line 114 guard)', ()
       request: { items: [{ path: '/a/1.m4b', metadata: { title: 'Book' }, group_id: 'g1' }] },
     });
   });
+
+  it('#60: includes abs_id for an ABS-imported group so the PATCH has an id', async () => {
+    mockGroups = [{
+      id: 'li-9', abs_id: 'li-9', source: 'abs',
+      metadata: { title: 'Imported' },
+      files: [{ id: 'li-9-f0', path: '/audiobooks/x.m4b' }],
+    }];
+    mockCallBackend.mockResolvedValue({ success: 1, failed: 0, errors: [] });
+
+    const { result } = renderHook(() => useTagOperations());
+    let out;
+    await act(async () => {
+      out = await result.current.pushToAudiobookShelf(new Set(['li-9-f0']));
+    });
+
+    expect(mockCallBackend).toHaveBeenCalledWith('push_abs_updates', {
+      request: { items: [{ path: '/audiobooks/x.m4b', metadata: { title: 'Imported' }, group_id: 'li-9', abs_id: 'li-9' }] },
+    });
+    expect(out).toMatchObject({ updated: 1, failed: 0, errors: [] });
+  });
+
+  it('#60: numeric failed counts from push_abs_updates do not throw and are reported', async () => {
+    mockGroups = [{
+      id: 'g1', metadata: { title: 'Book' }, files: [{ id: 'f1', path: '/a/1.m4b' }],
+    }];
+    mockCallBackend.mockResolvedValue({ success: 0, failed: 1, errors: [{ id: 'unknown', error: 'Missing item ID' }] });
+
+    const { result } = renderHook(() => useTagOperations());
+    let out;
+    await act(async () => {
+      out = await result.current.pushToAudiobookShelf(new Set(['f1']));
+    });
+
+    expect(out).toMatchObject({ updated: 0, failed: 1, errors: ['Missing item ID'] });
+  });
 });

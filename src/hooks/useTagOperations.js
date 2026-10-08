@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { callBackend } from '../api';
 import { useApp } from '../context/AppContext';
 import { buildWritePayload } from '../lib/writePayload';
+import { getAbsId, normalizePushResult } from '../lib/absPush';
 
 export function useTagOperations() {
   const { config, groups, updateFileStatuses, setWriteProgress } = useApp();
@@ -131,14 +132,19 @@ const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
       const hasSelectedFile = group.files.some(f => f.id != null && selectedFiles.has(f.id));
       
       if (hasSelectedFile) {
-        // Only add this book once (use first file as representative)
+        // Only add this book once (use first file as representative).
+        // #60: include the ABS item id when the group has one - push_abs_updates
+        // PATCHes /api/items/:id/media and fails "Missing item ID" without it.
         const firstFile = group.files[0];
         if (!bookMap.has(group.id)) {
-          bookMap.set(group.id, {
+          const item = {
             path: firstFile.path,
             metadata: group.metadata,
             group_id: group.id
-          });
+          };
+          const absId = getAbsId(group);
+          if (absId) item.abs_id = absId;
+          bookMap.set(group.id, item);
         }
       }
     });
@@ -149,40 +155,46 @@ const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
     // CHUNK INTO BATCHES OF 50
     const CHUNK_SIZE = 50;
     let totalUpdated = 0;
-    let totalUnmatched = [];
-    let totalFailed = [];
+    let totalFailed = 0;
+    const totalUnmatched = [];
+    const totalErrors = [];
     
     for (let i = 0; i < allItems.length; i += CHUNK_SIZE) {
       const chunk = allItems.slice(i, i + CHUNK_SIZE);
       const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
-      const totalChunks = Math.ceil(allItems.length / CHUNK_SIZE);
-      
       
       try {
         const result = await callBackend('push_abs_updates', { 
           request: { items: chunk } 
         });
         
-        totalUpdated += result.updated || 0;
-        totalUnmatched.push(...(result.unmatched || []));
-        totalFailed.push(...(result.failed || []));
-        
+        // #60: push_abs_updates returns counts ({success, failed, errors});
+        // normalise instead of spreading a number (which threw a TypeError).
+        const n = normalizePushResult(result);
+        totalUpdated += n.updated;
+        totalFailed += n.failed;
+        totalErrors.push(...n.errors);
+        if (Array.isArray(result?.unmatched)) totalUnmatched.push(...result.unmatched);
         
         // Small delay between chunks
         if (i + CHUNK_SIZE < allItems.length) {
           await new Promise(resolve => setTimeout(resolve, 100));
         }
       } catch (error) {
-        console.error(`❌ Chunk ${chunkNum} failed:`, error);
+        console.error(`Push chunk ${chunkNum} failed:`, error);
+        totalFailed += chunk.length;
+        totalErrors.push(String(error?.message || error));
       }
     }
     
     
     setPushing(false);
     return {
+      attempted: allItems.length,
       updated: totalUpdated,
-      unmatched: totalUnmatched,
-      failed: totalFailed
+      failed: totalFailed,
+      errors: totalErrors,
+      unmatched: totalUnmatched
     };
   } catch (error) {
     console.error('Push failed:', error);

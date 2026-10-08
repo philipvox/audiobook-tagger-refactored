@@ -5,7 +5,7 @@
 
 import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
 import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
-import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor } from './lib/normalize';
+import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor, splitAuthors } from './lib/normalize';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit, enforceTagPolicyWithDna } from './lib/genres';
 import { mergeGenres } from './lib/mergeGenres';
 import { isTauri } from './lib/platform.js';
