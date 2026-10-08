@@ -16,12 +16,32 @@ export function getAbsId(group) {
   return null;
 }
 
+/**
+ * Single definition of "this book lives in AudiobookShelf". Use this instead
+ * of `files.length === 0`: imported books carry their audio files (#60).
+ */
+export function isAbsBacked(group) {
+  return getAbsId(group) != null;
+}
+
+/**
+ * Restrict a set of selected file ids to the files of the given groups, so a
+ * mixed selection does not send ABS-backed books down a local-file path.
+ */
+export function fileIdsInGroups(fileIds, groups) {
+  const allowed = new Set();
+  for (const g of groups || []) {
+    for (const f of g.files || []) if (f.id != null) allowed.add(f.id);
+  }
+  return new Set([...(fileIds || [])].filter(id => allowed.has(id)));
+}
+
 /** Split push groups into ABS-backed (push by id) and genuinely local ones. */
 export function partitionPushGroups(groups) {
   const absGroups = [];
   const localGroups = [];
   for (const g of groups || []) {
-    if (getAbsId(g)) absGroups.push(g);
+    if (isAbsBacked(g)) absGroups.push(g);
     else localGroups.push(g);
   }
   return { absGroups, localGroups };

@@ -11,7 +11,7 @@ vi.mock('./proxy', async (importOriginal) => {
 const { callBackend } = await import('../api.js');
 const { absApi } = await import('./proxy');
 const {
-  getAbsId, partitionPushGroups, normalizePushResult, mergePushResults,
+  getAbsId, isAbsBacked, fileIdsInGroups, partitionPushGroups, normalizePushResult, mergePushResults,
   summarizePush, runPush,
 } = await import('./absPush.js');
 
@@ -113,5 +113,23 @@ describe('result accounting and reporting (#60)', () => {
   it('summarises a partial push and an empty push', () => {
     expect(summarizePush({ updated: 2, failed: 1, errors: ['x'] }, 3).message).toBe('Updated 2, failed 1. First error: x');
     expect(summarizePush({ updated: 0, failed: 0, errors: [] }, 2).type).toBe('warning');
+  });
+});
+
+describe('isAbsBacked / fileIdsInGroups (#60 follow-up: rescan + genre cleanup routing)', () => {
+  it('is the single "lives in ABS" test, independent of files', () => {
+    expect(isAbsBacked(absGroupWithFiles)).toBe(true);
+    expect(isAbsBacked({ ...absGroupWithFiles, files: [] })).toBe(true);
+    expect(isAbsBacked(localGroup)).toBe(false);
+    // The old heuristic's false positive: a local group with no files is not ABS.
+    expect(isAbsBacked({ id: 'u', metadata: {}, files: [] })).toBe(false);
+    expect(isAbsBacked(null)).toBe(false);
+  });
+
+  it('keeps only file ids belonging to the given groups', () => {
+    const selected = new Set(['li-123-f0', 'f-local', 'stale']);
+    expect(fileIdsInGroups(selected, [localGroup])).toEqual(new Set(['f-local']));
+    expect(fileIdsInGroups(selected, [])).toEqual(new Set());
+    expect(fileIdsInGroups(undefined, [localGroup])).toEqual(new Set());
   });
 });

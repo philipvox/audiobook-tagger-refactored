@@ -29,7 +29,7 @@ import { severityForKind } from '../lib/errorDetail';
 import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
 import { keepCurrentBooksToast } from '../lib/session.js';
 import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
-import { runPush } from '../lib/absPush';
+import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePush } from '../lib/absPush';
 import { mergeClassifyTags } from '../lib/mergeClassifyTags';
 import { mergeGenres } from '../lib/mergeGenres';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
@@ -747,6 +747,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     modals.open('rename');
   };
 
+  // #60: toast the outcome of an auto-push that ran after an ABS rescan.
+  // No-op when the rescan did not push (result.push is null).
+  const reportAutoPush = (result) => {
+    if (!result?.push) return;
+    const n = normalizePushResult(result.push);
+    const summary = summarizePush(n, n.updated + n.failed);
+    (toast[summary.type] || toast.info)(summary.title, summary.message);
+  };
+
   // ✅ Rescan with configurable mode and optional selective fields
   // @param {string} scanMode - 'normal', 'refresh_metadata', 'force_fresh', 'selective_refresh', 'super_scanner'
   // @param {Array} selectiveFields - Optional array of field names for selective refresh
@@ -755,9 +764,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
     if (selectedGroups.length === 0) return;
 
-    // Check if these are ABS imports (no local files)
-    const absImports = selectedGroups.filter(g => (g.files?.length || 0) === 0);
-    const localFiles = selectedGroups.filter(g => (g.files?.length || 0) > 0);
+    // ABS-backed books (imported, with or without files) vs genuinely local ones (#60)
+    const absImports = selectedGroups.filter(isAbsBacked);
+    const localFiles = selectedGroups.filter(g => !isAbsBacked(g));
 
     try {
       const modeLabel = selectiveFields
@@ -774,12 +783,14 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         // which ignored smart/selective/deep choices from the Rescan modal).
         // Pass selectiveFields to only update specific fields if custom rescan.
         const result = await handleRescanAbsImports(absImports, scanMode, false, selectiveFields);
+        reportAutoPush(result);
       }
 
       // Handle local files (if any mixed in)
       if (localFiles.length > 0) {
         const transcriptionLabel = options.enableTranscription ? ' + audio verification' : '';
-        const actualSelectedFiles = getSelectedFileIds(groups);
+        // Only the local groups' files: ABS-backed books were handled above.
+        const actualSelectedFiles = fileIdsInGroups(getSelectedFileIds(groups), localFiles);
         const result = await handleRescan(actualSelectedFiles, groups, scanMode, selectiveFields, options);
         // CR-1: handleRescan now returns { success: false, error } instead of
         // throwing when the scan itself failed, surface that to the user.
@@ -3244,8 +3255,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   // ✅ Pipeline rescan for ABS imports (new architecture)
   const handlePipelineClick = async () => {
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-    // Only process ABS imports (groups with no local files)
-    const absImports = selectedGroups.filter(g => (g.files?.length || 0) === 0);
+    // Only process ABS-backed books (imported books may carry files, #60)
+    const absImports = selectedGroups.filter(isAbsBacked);
 
     if (absImports.length === 0) {
       return;
@@ -3253,16 +3264,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     try {
       const result = await handlePipelineRescan(absImports);
+      reportAutoPush(result);
       handleClearSelection();
     } catch (error) {
       console.error('Pipeline rescan failed:', error);
     }
   };
 
-  // ✅ Check if selected books are ABS-imported (no local files)
+  // ✅ Selected books that live in ABS (imported books may carry files, #60)
   const getSelectedAbsImports = () => {
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-    return selectedGroups.filter(g => (g.files?.length || 0) === 0);
+    return selectedGroups.filter(isAbsBacked);
   };
 
   // ✅ Clean ALL genres for all loaded books (no selection needed)
@@ -3270,15 +3282,16 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (groups.length === 0) return;
 
     try {
-      // Check if these are ABS imports (no files)
-      const absImports = groups.filter(g => (g.files?.length || 0) === 0);
+      // ABS-backed books go through the ABS genre cleanup, local ones through
+      // the regular cleanup (#60: was all-or-nothing on "no files").
+      const absImports = groups.filter(isAbsBacked);
+      const localGroups = groups.filter(g => !isAbsBacked(g));
 
       if (absImports.length > 0) {
-        // Use ABS rescan for genre cleanup
-        const result = await handleRescanAbsImports(absImports, 'genres_only');
-      } else {
-        // Use regular genre cleanup
-        const result = await handleCleanupGenres(groups);
+        await handleRescanAbsImports(absImports, 'genres_only');
+      }
+      if (localGroups.length > 0) {
+        await handleCleanupGenres(localGroups);
       }
     } catch (error) {
       console.error('Genre cleanup failed:', error);
@@ -3295,6 +3308,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       const modeLabel = mode === 'genres_only' ? 'genre cleanup' : 'fresh scan';
       const enrichLabel = options.enrichWithCustomProviders ? ' + Goodreads/Hardcover' : '';
       const result = await handleRescanAbsImports(absImports, mode, false, null, options.enrichWithCustomProviders || false);
+      reportAutoPush(result);
       handleClearSelection();
     } catch (error) {
       console.error('ABS rescan failed:', error);

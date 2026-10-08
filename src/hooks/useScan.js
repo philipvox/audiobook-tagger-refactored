@@ -626,6 +626,7 @@ export function useScan() {
     }
 
     let unlisten = null;
+    let pushOutcome = null; // #60: auto-push result, returned to the caller
     try {
       setScanning(true);
       const startTime = Date.now();
@@ -689,14 +690,16 @@ export function useScan() {
           }));
 
           try {
-            const pushResult = await handlePushAbsImports(result.groups);
+            pushOutcome = await handlePushAbsImports(result.groups);
           } catch (pushError) {
             console.error('Auto-push failed:', pushError);
+            pushOutcome = { updated: 0, failed: result.groups.length, errors: [String(pushError?.message || pushError)] };
           }
         }
       }
 
-      return { success: true, count: result.total_rescanned, groups: result.groups };
+      // #60: hand the auto-push outcome back so the page can toast it.
+      return { success: true, count: result.total_rescanned, groups: result.groups, push: pushOutcome };
 
     } catch (error) {
       console.error('ABS rescan failed:', error);
@@ -723,6 +726,7 @@ export function useScan() {
     }
 
     let unlisten = null;
+    let pushOutcome = null; // #60: auto-push result, returned to the caller
     try {
       setScanning(true);
       const startTime = Date.now();
@@ -750,7 +754,7 @@ export function useScan() {
       // Build pipeline request
       const request = {
         books: selectedGroups.map(g => ({
-          abs_id: g.id,
+          abs_id: getAbsId(g) || g.id,
           title: g.metadata.title || null,
           author: g.metadata.author || null,
           narrator: g.metadata.narrator || null,
@@ -803,16 +807,17 @@ export function useScan() {
             currentFile: 'Pushing to ABS...',
           }));
 
+          const groupsToPush = selectedGroups.filter(g => updatedMap.has(g.id));
           try {
-            const groupsToPush = selectedGroups.filter(g => updatedMap.has(g.id));
-            const pushResult = await handlePushAbsImports(groupsToPush);
+            pushOutcome = await handlePushAbsImports(groupsToPush);
           } catch (pushError) {
             console.error('Auto-push failed:', pushError);
+            pushOutcome = { updated: 0, failed: groupsToPush.length, errors: [String(pushError?.message || pushError)] };
           }
         }
       }
 
-      return { success: true, count: result.processed, failed: result.failed };
+      return { success: true, count: result.processed, failed: result.failed, push: pushOutcome };
 
     } catch (error) {
       console.error('Pipeline rescan failed:', error);
