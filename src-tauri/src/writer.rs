@@ -811,13 +811,36 @@ pub fn compute_new_path(old_path: &str, stem: &str) -> (String, bool) {
     (new_path, changed)
 }
 
+/// `part`/`total_parts` (1-based) identify a file within a multi-file book.
+/// Without them every file of a group renders to the same name and all but the
+/// first rename collide. When total_parts > 1 the zero-padded part number fills
+/// a `{part}` token if the template has one, else " - Part NN" is appended.
 #[tauri::command]
-pub fn preview_rename(file_path: String, metadata: Value, template: Option<String>) -> Value {
+pub fn preview_rename(
+    file_path: String,
+    metadata: Value,
+    template: Option<String>,
+    part: Option<u32>,
+    total_parts: Option<u32>,
+) -> Value {
     let template = template.unwrap_or_default();
     if template.trim().is_empty() {
         return json!({ "old_path": file_path, "new_path": file_path, "changed": false });
     }
-    let stem = render_template(&template, &metadata);
+    let multi = match (part, total_parts) {
+        (Some(p), Some(t)) if t > 1 => {
+            let width = t.to_string().len().max(2);
+            Some(format!("{p:0width$}"))
+        }
+        _ => None,
+    };
+    let stem = match &multi {
+        Some(num) if template.contains("{part}") => {
+            render_template(&template.replace("{part}", num), &metadata)
+        }
+        Some(num) => format!("{} - Part {num}", render_template(&template, &metadata).trim_end()),
+        None => render_template(&template.replace("{part}", ""), &metadata),
+    };
     let (new_path, changed) = compute_new_path(&file_path, &stem);
     json!({ "old_path": file_path, "new_path": new_path, "changed": changed })
 }
@@ -1460,6 +1483,21 @@ mod tests {
         assert_eq!(restored, vec![renamed.to_string_lossy().to_string()]);
         assert!(!mp3.exists(), "undo resurrected the old name (duplicate)");
         assert_eq!(fs::read(&renamed).unwrap(), original);
+    }
+
+    #[test]
+    fn multi_file_group_previews_get_distinct_part_numbers() {
+        let meta = json!({ "author": "A", "title": "T" });
+        let p1 = preview_rename("/x/01.mp3".into(), meta.clone(), Some("{author} - {title}".into()), Some(1), Some(12));
+        let p2 = preview_rename("/x/02.mp3".into(), meta.clone(), Some("{author} - {title}".into()), Some(2), Some(12));
+        assert_eq!(p1["new_path"], json!("/x/A - T - Part 01.mp3"));
+        assert_eq!(p2["new_path"], json!("/x/A - T - Part 02.mp3"));
+        // A single-file book is unchanged.
+        let solo = preview_rename("/x/a.m4b".into(), meta.clone(), Some("{author} - {title}".into()), Some(1), Some(1));
+        assert_eq!(solo["new_path"], json!("/x/A - T.m4b"));
+        // An explicit {part} token is honoured instead of appending.
+        let tok = preview_rename("/x/03.mp3".into(), meta, Some("{part} {title}".into()), Some(3), Some(120));
+        assert_eq!(tok["new_path"], json!("/x/003 T.mp3"));
     }
 
     // ---- template formatting ----
