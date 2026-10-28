@@ -16,9 +16,40 @@ pub fn effective_base(base: &str) -> String {
 /// Whether an (already effective) base URL points at the local machine. Only a
 /// local Ollama can be started/stopped by this app; remote ones must be managed
 /// on their own host.
+///
+/// The URL's HOST is parsed and compared - a substring check accepted
+/// "http://localhost.evil.com" and "http://evil.com/?h=127.0.0.1".
 fn is_localhost(base: &str) -> bool {
-    let b = base.to_lowercase();
-    b.contains("127.0.0.1") || b.contains("localhost") || b.contains("[::1]") || b.contains("0.0.0.0")
+    use reqwest::Url;
+    let trimmed = base.trim();
+    let parsed = Url::parse(trimmed)
+        .ok()
+        .filter(|u| u.host().is_some())
+        .or_else(|| Url::parse(&format!("http://{trimmed}")).ok());
+    let host = match parsed.as_ref().and_then(|u| u.host_str()) {
+        Some(h) => h.trim_start_matches('[').trim_end_matches(']').to_string(),
+        None => return false,
+    };
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback() || ip.is_unspecified(),
+        Err(_) => host.eq_ignore_ascii_case("localhost"),
+    }
+}
+
+/// Browser origins allowed to call the Ollama server this app spawns: only the
+/// app's own webview (macOS/Linux `tauri://localhost`, Windows
+/// `http(s)://tauri.localhost`). Ollama adds its built-in localhost defaults.
+/// Was "*", which let ANY website the user visited drive the local Ollama.
+const OLLAMA_APP_ORIGINS: &str = "tauri://localhost,http://tauri.localhost,https://tauri.localhost";
+
+/// Forget the stored PID once that process has exited, so a later stop can never
+/// signal an unrelated process that reused the PID.
+fn clear_pid_if(pid: u32) {
+    if let Ok(mut guard) = OLLAMA_PID.lock() {
+        if *guard == Some(pid) {
+            *guard = None;
+        }
+    }
 }
 
 /// Validate an Ollama model name. Allows alphanumerics plus / . : - _ (registry
@@ -221,7 +252,7 @@ pub async fn ollama_start(base_url: Option<String>) -> Result<String, String> {
     cmd.arg("serve")
         .env("OLLAMA_MODELS", models_dir.to_str().unwrap_or(""))
         .env("OLLAMA_HOST", format!("127.0.0.1:{}", OLLAMA_PORT))
-        .env("OLLAMA_ORIGINS", "*")
+        .env("OLLAMA_ORIGINS", OLLAMA_APP_ORIGINS)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     #[cfg(windows)]
@@ -242,6 +273,7 @@ pub async fn ollama_start(base_url: Option<String>) -> Result<String, String> {
     // Spawn a background task to reap the child process and avoid zombies
     tokio::spawn(async move {
         let _ = child.wait().await;
+        clear_pid_if(pid);
     });
 
     for _ in 0..30 {
@@ -401,7 +433,7 @@ fn install_from_bytes(_bytes: &[u8], _binary_path: &PathBuf) -> Result<(), Strin
 
 #[tauri::command]
 pub async fn ollama_uninstall() -> Result<String, String> {
-    let _ = ollama_stop().await;
+    ollama_stop().await?;
     let dir = ollama_dir()?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to remove ollama directory: {}", e))?;
@@ -518,6 +550,34 @@ mod tests {
         assert!(!is_valid_model_name("bad$(whoami)"));
         assert!(!is_valid_model_name("../etc/passwd"));
         assert!(!is_valid_model_name("model|pipe"));
+    }
+
+    #[test]
+    fn localhost_detection_parses_the_host() {
+        assert!(is_localhost("http://[::1]:11434"));
+        assert!(is_localhost("http://127.0.0.2:11434"));
+        assert!(is_localhost("127.0.0.1:11434"), "scheme-less local base");
+        assert!(!is_localhost("http://localhost.evil.com:11434"));
+        assert!(!is_localhost("http://evil.com/?h=127.0.0.1"));
+        assert!(!is_localhost("http://127.0.0.1.nip.io"));
+        assert!(!is_localhost("http://user@evil.com#localhost"));
+    }
+
+    #[test]
+    fn spawned_ollama_only_allows_app_origins() {
+        assert!(!OLLAMA_APP_ORIGINS.contains('*'));
+        for o in OLLAMA_APP_ORIGINS.split(',') {
+            assert!(["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].contains(&o), "{o}");
+        }
+    }
+
+    #[test]
+    fn reaped_pid_is_cleared_only_if_still_ours() {
+        *OLLAMA_PID.lock().unwrap() = Some(4242);
+        clear_pid_if(1111);
+        assert_eq!(*OLLAMA_PID.lock().unwrap(), Some(4242));
+        clear_pid_if(4242);
+        assert_eq!(*OLLAMA_PID.lock().unwrap(), None);
     }
 
     #[test]
