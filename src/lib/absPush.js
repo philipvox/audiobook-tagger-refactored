@@ -176,3 +176,30 @@ export async function runPush(groups, { pushById, pushByFileIds }) {
     summary: summarizePush(merged, attempted),
   };
 }
+
+/**
+ * v2.2.3: request items for push_abs_imports. `original` is the snapshot taken
+ * at import (group.abs_original) that the push diffs against; null when the
+ * group predates snapshots (the push then falls back non-destructively).
+ */
+export function buildPushItems(groups) {
+  return (groups || []).map((g) => ({
+    id: g.id,
+    abs_id: getAbsId(g) || g.id,
+    metadata: g.metadata,
+    original: g.abs_original || null,
+  }));
+}
+
+/**
+ * Advance each pushed group's abs_original to what ABS now holds, so a later
+ * revert of a pushed change is still detected. `snapshots` is keyed by group id.
+ */
+export function applyPushSnapshots(groups, snapshots) {
+  if (!snapshots || typeof snapshots !== 'object') return groups;
+  return (groups || []).map((g) =>
+    Object.prototype.hasOwnProperty.call(snapshots, g.id) && snapshots[g.id]
+      ? { ...g, abs_original: snapshots[g.id] }
+      : g
+  );
+}

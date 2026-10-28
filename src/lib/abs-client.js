@@ -2,6 +2,7 @@
 // AudiobookShelf API client, runs in the browser, calls ABS through the CORS proxy.
 
 import { absApi } from './proxy';
+import { snapshotAbsMetadata } from './absPayload.js';
 
 /**
  * Test connection to an ABS instance.
@@ -174,7 +175,7 @@ function absItemToBookGroup(item, absBaseUrl) {
   // rescan payloads (which read metadata.year) get it too.
   const publishedYear = meta.publishedYear || parseYearFromTagDate(firstTags.tagDate) || firstTags.tagYear || null;
 
-  return {
+  const group = {
     id: item.id || crypto.randomUUID(),
     abs_id: item.id,
     source: 'abs',
@@ -210,4 +211,8 @@ function absItemToBookGroup(item, absBaseUrl) {
       changes: {},
     })),
   };
+  // v2.2.3: what ABS holds right now. Push diffs against this so it only
+  // sends what the user/AI changed, and so policy never touches existing values.
+  group.abs_original = snapshotAbsMetadata(group.metadata);
+  return group;
 }

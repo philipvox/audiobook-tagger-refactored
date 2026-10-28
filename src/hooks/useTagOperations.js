@@ -140,7 +140,9 @@ const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
           const item = {
             path: firstFile.path,
             metadata: group.metadata,
-            group_id: group.id
+            group_id: group.id,
+            // v2.2.3: diff against the import snapshot when there is one.
+            original: group.abs_original || null,
           };
           const absId = getAbsId(group);
           if (absId) item.abs_id = absId;

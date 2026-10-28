@@ -31,6 +31,7 @@ import { keepCurrentBooksToast } from '../lib/session.js';
 import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
 import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePush } from '../lib/absPush';
 import { mergeClassifyTags } from '../lib/mergeClassifyTags';
+import { syncAllSeries } from '../lib/absPayload';
 import { mergeGenres } from '../lib/mergeGenres';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
@@ -469,8 +470,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       prevGroups.map(group => {
         if (!allSelected && !selectedGroupIds.has(group.id)) return group;
 
-        // Merge updates into metadata
-        const newMetadata = {
+        // Merge updates into metadata. v2.2.3: syncAllSeries keeps the
+        // all_series primary in step with a bulk series/sequence edit (the
+        // ABS push sends all_series).
+        const newMetadata = syncAllSeries(group.metadata, {
           ...group.metadata,
           ...updates,
           // Mark source as manual for bulk edited fields. H1: use key presence
@@ -486,7 +489,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             ...('year' in updates && { year: 'manual' }),
             ...('series' in updates && { series: 'manual' }),
           },
-        };
+        });
 
         // Update file changes. H1: an update KEY being present drives the change
         // (a present null == intentional clear -> stamp an empty new value);
@@ -2688,7 +2691,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           // full rationale and unit tests. The old inline code always did
           // tags = [...new Set([...r.tags, ...dna, ...age])], which wiped every
           // curated tag on the common DNA-only sub-step.
-          const { tags: mergedTags, changed: tagsChanged } = mergeClassifyTags(updatedMeta.tags, r);
+          // v2.2.3: pass the import snapshot so curated ABS tags survive (a
+          // Force run clears updatedMeta.tags above, so it still wipes).
+          const { tags: mergedTags, changed: tagsChanged } = mergeClassifyTags(
+            updatedMeta.tags, r, isForceReset ? undefined : g.abs_original?.tags
+          );
           updatedMeta.tags = mergedTags;
 
           // Themes & tropes

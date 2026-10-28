@@ -133,3 +133,22 @@ describe('isAbsBacked / fileIdsInGroups (#60 follow-up: rescan + genre cleanup r
     expect(fileIdsInGroups(undefined, [localGroup])).toEqual(new Set());
   });
 });
+
+describe('v2.2.3 diff push plumbing', () => {
+  it('buildPushItems carries the import snapshot as `original`', async () => {
+    const { buildPushItems } = await import('./absPush.js');
+    const g = { id: 'g1', abs_id: 'a1', metadata: { title: 'T' }, abs_original: { title: 'T0' } };
+    expect(buildPushItems([g])).toEqual([{ id: 'g1', abs_id: 'a1', metadata: { title: 'T' }, original: { title: 'T0' } }]);
+    expect(buildPushItems([{ id: 'g2', source: 'abs', metadata: {} }])[0].original).toBeNull();
+  });
+
+  it('applyPushSnapshots advances abs_original only for pushed groups', async () => {
+    const { applyPushSnapshots } = await import('./absPush.js');
+    const a = { id: 'g1', abs_original: { title: 'old' } };
+    const b = { id: 'g2', abs_original: { title: 'keep' } };
+    const out = applyPushSnapshots([a, b], { g1: { title: 'new' } });
+    expect(out[0].abs_original).toEqual({ title: 'new' });
+    expect(out[1]).toBe(b);
+    expect(applyPushSnapshots([a], undefined)[0]).toBe(a);
+  });
+});

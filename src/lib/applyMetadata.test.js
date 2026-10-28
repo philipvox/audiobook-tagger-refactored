@@ -119,3 +119,16 @@ describe('readFileField', () => {
     expect(readFileField({}, 'title')).toBe('');
   });
 });
+
+describe('v2.2.3: series edits keep all_series in sync', () => {
+  it('an edit that changes only series/sequence rewrites the stale all_series primary', async () => {
+    const { applyMetadataToGroup } = await import('./applyMetadata.js');
+    const group = {
+      metadata: { series: 'Dune', sequence: '1', all_series: [{ name: 'Dune', sequence: '1' }] },
+      files: [],
+    };
+    // Edit modal passes the whole edited metadata, including the old all_series.
+    const out = applyMetadataToGroup(group, { ...group.metadata, sequence: '2' }, ['sequence']);
+    expect(out.metadata.all_series).toEqual([{ name: 'Dune', sequence: '2' }]);
+  });
+});

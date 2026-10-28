@@ -21,7 +21,12 @@ export function isAgeTag(t) {
 // existingTags: string[] (the book's current tags)
 // result: { tags?, dna_tags?, age_tags? } from the classifier
 // Returns { tags: string[], changed: boolean }.
-export function mergeClassifyTags(existingTags, result = {}) {
+// originalTags (optional, v2.2.3): the tags ABS held at import
+// (group.abs_original.tags). When given, a full classification keeps every
+// existing tag that is in that snapshot (curated/user/dna tags) and only
+// replaces tags produced earlier this session; stale dna:/age tags are still
+// replaced when the classifier returns new ones.
+export function mergeClassifyTags(existingTags, result = {}, originalTags = undefined) {
   const existing = Array.isArray(existingTags) ? existingTags : [];
   const clsTags = result.tags || [];
   const dnaTags = result.dna_tags || [];
@@ -29,8 +34,20 @@ export function mergeClassifyTags(existingTags, result = {}) {
   const changed = clsTags.length > 0 || dnaTags.length > 0 || ageTags.length > 0;
 
   if (clsTags.length > 0) {
-    // Full classification replace (still fold DNA + age in, dedup).
-    return { tags: [...new Set([...clsTags, ...dnaTags, ...ageTags])], changed };
+    // Full classification replace (still fold DNA + age in, dedup) - but
+    // never drop tags that already existed in ABS.
+    let curated = [];
+    if (Array.isArray(originalTags)) {
+      const orig = new Set(originalTags.map((t) => String(t).toLowerCase()));
+      curated = existing.filter((t) => {
+        const str = String(t);
+        if (!orig.has(str.toLowerCase())) return false;
+        if (dnaTags.length > 0 && str.startsWith('dna:')) return false;
+        if (ageTags.length > 0 && isAgeTag(str)) return false;
+        return true;
+      });
+    }
+    return { tags: [...new Set([...curated, ...clsTags, ...dnaTags, ...ageTags])], changed };
   }
 
   if (dnaTags.length > 0 || ageTags.length > 0) {

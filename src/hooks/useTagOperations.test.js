@@ -158,7 +158,7 @@ describe('useTagOperations.pushToAudiobookShelf (minor fix: line 114 guard)', ()
     });
 
     expect(mockCallBackend).toHaveBeenCalledWith('push_abs_updates', {
-      request: { items: [{ path: '/a/1.m4b', metadata: { title: 'Book' }, group_id: 'g1' }] },
+      request: { items: [{ path: '/a/1.m4b', metadata: { title: 'Book' }, group_id: 'g1', original: null }] },
     });
   });
 
@@ -177,7 +177,7 @@ describe('useTagOperations.pushToAudiobookShelf (minor fix: line 114 guard)', ()
     });
 
     expect(mockCallBackend).toHaveBeenCalledWith('push_abs_updates', {
-      request: { items: [{ path: '/audiobooks/x.m4b', metadata: { title: 'Imported' }, group_id: 'li-9', abs_id: 'li-9' }] },
+      request: { items: [{ path: '/audiobooks/x.m4b', metadata: { title: 'Imported' }, group_id: 'li-9', original: null, abs_id: 'li-9' }] },
     });
     expect(out).toMatchObject({ updated: 1, failed: 0, errors: [] });
   });

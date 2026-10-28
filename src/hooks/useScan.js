@@ -2,7 +2,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { callBackend, subscribe, pickPath } from '../api';
 import { useApp } from '../context/AppContext';
-import { getAbsId, normalizePushResult } from '../lib/absPush';
+import { getAbsId, normalizePushResult, buildPushItems, applyPushSnapshots } from '../lib/absPush';
 import { logEvent } from '../lib/logEvent';
 
 // ============================================================================
@@ -568,16 +568,13 @@ export function useScan() {
 
       // #60: send the ABS item id explicitly (abs_id), falling back to the
       // group id for legacy imports where they are the same value.
-      const request = {
-        items: groupsToPush.map(g => ({
-          id: g.id,
-          abs_id: getAbsId(g) || g.id,
-          metadata: g.metadata,
-        }))
-      };
+      // v2.2.3: each item carries its import snapshot so the push only sends
+      // what changed (see src/lib/absPayload.js).
+      const request = { items: buildPushItems(groupsToPush) };
 
       const raw = await callBackend('push_abs_imports', { request });
       const result = normalizePushResult(raw);
+      if (raw?.snapshots) setGroups(prev => applyPushSnapshots(prev, raw.snapshots));
 
       if (result.errors.length > 0) {
         // Group errors by type
@@ -613,7 +610,7 @@ export function useScan() {
       if (unlisten) unlisten();
       setScanning(false);
     }
-  }, []);
+  }, [setGroups]);
 
   // Rescan ABS-imported books (no local files needed)
   // mode: 'force_fresh' = full API search, 'genres_only' = just normalize genres

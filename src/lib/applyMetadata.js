@@ -20,6 +20,8 @@
 // are still safe to stamp - the backend simply ignores change keys it doesn't
 // read.
 
+import { syncAllSeries } from './absPayload.js';
+
 // file.changes field name -> group.changedFields (metadata) field name.
 const FILE_TO_META_FIELD = { genre: 'genres' };
 
@@ -80,7 +82,9 @@ export function readFileField(metadata, field) {
 // `updates`, then spread the extras onto the returned group after the call.
 export function applyMetadataToGroup(group, updates = {}, changedFileFields = []) {
   const prevMetadata = group.metadata || {};
-  const newMetadata = { ...prevMetadata, ...updates };
+  // v2.2.3: a series/sequence edit also rewrites the all_series primary,
+  // which is what the ABS push sends.
+  const newMetadata = syncAllSeries(prevMetadata, { ...prevMetadata, ...updates });
 
   // Precompute the old/new pair once per field (same for every file in group).
   const stamps = {};

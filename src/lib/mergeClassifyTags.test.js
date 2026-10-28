@@ -83,3 +83,19 @@ describe('mergeClassifyTags (H1 curated-tag preservation)', () => {
     ['fantasy', 'dna:pov:first', 'pub-2020'].forEach((t) => expect(isAgeTag(t)).toBe(false));
   });
 });
+
+describe('v2.2.3: curated ABS tags survive a full classification', () => {
+  it('keeps tags present in the import snapshot; replaces earlier AI tags', async () => {
+    const { mergeClassifyTags } = await import('./mergeClassifyTags.js');
+    const existing = ['Book Club 2024', 'dna:pov:first', 'old-ai-tag'];
+    const original = ['Book Club 2024', 'dna:pov:first'];
+    const { tags } = mergeClassifyTags(existing, { tags: ['epic-fantasy'] }, original);
+    expect(tags).toEqual(['Book Club 2024', 'dna:pov:first', 'epic-fantasy']);
+  });
+
+  it('new dna tags still replace the old dna set', async () => {
+    const { mergeClassifyTags } = await import('./mergeClassifyTags.js');
+    const { tags } = mergeClassifyTags(['mine', 'dna:pov:first'], { tags: ['x'], dna_tags: ['dna:pov:third'] }, ['mine', 'dna:pov:first']);
+    expect(tags).toEqual(['mine', 'x', 'dna:pov:third']);
+  });
+});

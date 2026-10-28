@@ -5,9 +5,9 @@
 
 import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
 import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
-import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor, splitAuthors } from './lib/normalize';
-import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit, enforceTagPolicyWithDna } from './lib/genres';
-import { mergeGenres } from './lib/mergeGenres';
+import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor } from './lib/normalize';
+import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit } from './lib/genres';
+import { buildAbsPayload as buildAbsPayloadPure, isEmptyPayload, applyPayloadToSnapshot, snapshotAbsMetadata } from './lib/absPayload.js';
 import { isTauri } from './lib/platform.js';
 import { makeErrorDetail, errorDetailFromException } from './lib/errorDetail.js';
 
@@ -246,124 +246,22 @@ function convertDnaToTags(dna) {
 // ABS PAYLOAD BUILDER, matches desktop build_update_payload() exactly
 // ============================================================================
 
-/**
- * Strip embedded sequence numbers from a series name.
- * e.g. "Harry Potter #3" -> { name: "Harry Potter", sequence: "3" }
- * Only strips when an explicit marker is present (#, Book, Vol, Part, No.) before a number at end.
- */
-function stripEmbeddedSequence(name) {
-  if (!name || typeof name !== 'string') return { name, sequence: null };
-  const trimmed = name.trim();
-  const re = /[,:]?\s*(?:#|book|bk\.?|vol\.?|volume|part|no\.?|number)\s*(\d+(?:\.\d+)?)\s*$/i;
-  const match = trimmed.match(re);
-  if (match) {
-    const cleaned = trimmed.slice(0, match.index).trim();
-    if (cleaned) return { name: cleaned, sequence: match[1] };
-  }
-  const hashRe = /\s+#(\d+(?:\.\d+)?)\s*$/;
-  const hashMatch = trimmed.match(hashRe);
-  if (hashMatch) {
-    const cleaned = trimmed.slice(0, hashMatch.index).trim();
-    if (cleaned) return { name: cleaned, sequence: hashMatch[1] };
-  }
-  return { name: trimmed, sequence: null };
+// buildAbsPayload lives in ./lib/absPayload.js (v2.2.3 diff-based push).
+// Thin wrapper: reads the config the policy flags come from.
+function buildAbsPayload(meta, original = null) {
+  return buildAbsPayloadPure(meta, original, getLocalConfig());
 }
 
-/**
- * Build ABS-formatted PATCH payload from internal metadata.
- * Matches src-tauri/src/commands/abs.rs build_update_payload():
- * - Authors: split on , and & → [{id: "new-N", name}]
- * - Narrators: wrapped as array
- * - Series: [{name, sequence}] with NO id field (ABS matches by name)
- * - Genres: enforced (max 3, validated) unless preserve_existing_genres is on
- * - Tags: at TOP LEVEL, DNA-aware enforcement
- */
-function buildAbsPayload(meta) {
-  const metadata = {};
-  // #54: both preservation settings are read here because this is the boundary
-  // that used to undo them - mapGenre/mapTag dropped anything outside the
-  // approved vocabulary and re-cased the survivors on the way to ABS.
-  const cfg = getLocalConfig();
-
-  if (meta.title) metadata.title = meta.title;
-  if (meta.subtitle) metadata.subtitle = meta.subtitle;
-  if (meta.description) metadata.description = meta.description;
-  if (meta.publisher) metadata.publisher = meta.publisher;
-  if (meta.published_year || meta.publishedYear) metadata.publishedYear = meta.published_year || meta.publishedYear;
-  if (meta.isbn) metadata.isbn = meta.isbn;
-  if (meta.asin) metadata.asin = meta.asin;
-  if (meta.language) metadata.language = meta.language;
-
-  // Authors: split on , and & (matching desktop), create {id, name} objects.
-  // splitAuthors() is suffix-aware so "Martin Luther King, Jr." stays one author.
-  if (meta.author) {
-    const authors = splitAuthors(meta.author)
-      .map((name, i) => ({ id: `new-${i + 1}`, name }));
-    if (authors.length > 0) metadata.authors = authors;
-  }
-
-  // Narrators: split on , into array (desktop wraps single as [n])
-  if (meta.narrator) {
-    metadata.narrators = meta.narrator.split(',').map(n => n.trim()).filter(Boolean);
-  }
-
-  // Genres: enforce policy (max 3, validated against approved list) if enabled.
-  // #54: with preserve_existing_genres on, the genres go out exactly as the
-  // book carries them - case-insensitively deduped, first-seen casing kept, no
-  // policy mapping, no cap. The AI's genres were already policy-enforced when
-  // they were classified, so the only thing this bypass protects is the
-  // curated/matched genres the setting promises to keep.
-  if (meta.genres && meta.genres.length > 0) {
-    if (cfg.preserve_existing_genres === true) {
-      metadata.genres = mergeGenres(meta.genres, [], { preserve: true, max: Infinity }).genres;
-    } else {
-      metadata.genres = cfg.genre_enforcement !== false
-        ? enforceGenrePolicyWithSplit(meta.genres)
-        : meta.genres.slice(0, 3);
-    }
-  }
-
-  // Series: use all_series if available, fall back to series/sequence.
-  // NO id field: let ABS match by name to avoid duplicates.
-  // Strip embedded sequence numbers from names (e.g. "Harry Potter #3" -> name + seq).
-  // CR-4a: when the input carries NO series info at all, OMIT the key entirely
-  // rather than sending [] - an empty array wipes curated ABS series on a
-  // partial push. There is no clear-series path here; clearing stays manual in ABS.
-  if (meta.all_series && meta.all_series.length > 0) {
-    metadata.series = meta.all_series.map(s => {
-      const stripped = stripEmbeddedSequence(s.name);
-      if (stripped.sequence) {
-        console.log(`[series-fix] Stripped embedded seq from all_series: "${s.name}" -> name="${stripped.name}" seq="${stripped.sequence}" (original seq=${s.sequence})`);
-      }
-      const obj = { name: stripped.name };
-      const hasSeq = s.sequence != null && s.sequence !== '';
-      const seq = hasSeq ? String(s.sequence) : stripped.sequence;
-      if (seq != null) obj.sequence = seq;
-      return obj;
-    });
-  } else if (meta.series) {
-    const stripped = stripEmbeddedSequence(meta.series);
-    if (stripped.sequence) {
-      console.log(`[series-fix] Stripped embedded seq from series: "${meta.series}" -> name="${stripped.name}" seq="${stripped.sequence}" (original seq=${meta.sequence})`);
-    }
-    const obj = { name: stripped.name };
-    const hasSeq = meta.sequence != null && meta.sequence !== '';
-    const seq = hasSeq ? String(meta.sequence) : stripped.sequence;
-    if (seq != null) obj.sequence = seq;
-    metadata.series = [obj];
-  }
-  if (metadata.series) console.log(`[series-fix] Final series payload:`, JSON.stringify(metadata.series));
-
-  // Tags: TOP LEVEL (not inside metadata), DNA-aware enforcement.
-  // #54: preserve_existing_tags keeps tags outside the approved vocabulary
-  // (with their casing) instead of dropping them; approved tags still normalize.
-  const finalTags = enforceTagPolicyWithDna(meta.tags || [], {
-    preserveUnrecognized: cfg.preserve_existing_tags === true,
+// Push one item: diff against its import snapshot, skip the request when
+// nothing changed, and report the advanced snapshot for the caller to store.
+async function pushOneAbsItem(baseUrl, token, absId, meta, original) {
+  const payload = buildAbsPayload(meta, original || null);
+  if (original && isEmptyPayload(payload)) return { skipped: true, snapshot: original };
+  await absApi(baseUrl, token, `/api/items/${absId}/media`, {
+    method: 'PATCH',
+    body: payload,
   });
-  const payload = { metadata };
-  if (finalTags.length > 0) payload.tags = finalTags;
-
-  return payload;
+  return { skipped: false, snapshot: applyPayloadToSnapshot(original || snapshotAbsMetadata(meta), meta, payload) };
 }
 
 // ============================================================================
@@ -429,6 +327,7 @@ const HANDLERS = {
     const items = args.request?.items || args.items || [];
     let success = 0, failed = 0;
     const errors = [];
+    const snapshots = {};
 
     // Q: fail fast with a single result instead of issuing N doomed requests
     // when ABS isn't configured.
@@ -445,18 +344,15 @@ const HANDLERS = {
         const absId = item.abs_id || item.id;
         if (!absId) { failed++; errors.push({ id: 'unknown', error: 'Missing item ID' }); continue; }
         const meta = item.metadata || item;
-        const payload = buildAbsPayload(meta);
-        await absApi(baseUrl, token, `/api/items/${absId}/media`, {
-          method: 'PATCH',
-          body: payload,
-        });
+        const out = await pushOneAbsItem(baseUrl, token, absId, meta, item.original);
+        snapshots[item.id || absId] = out.snapshot;
         success++;
       } catch (err) {
         failed++;
         errors.push({ id: item.abs_id || item.id, error: err.message });
       }
     }
-    return { success, failed, errors };
+    return { success, failed, errors, snapshots };
   },
 
   // === ABS Push Imports (same formatting, different return shape) ===
@@ -466,6 +362,7 @@ const HANDLERS = {
     const items = args.request?.items || args.items || [];
     let updated = 0, failed = 0;
     const errors = [];
+    const snapshots = {};
 
     // Q: fail fast with a single result instead of issuing N doomed requests
     // when ABS isn't configured.
@@ -482,18 +379,15 @@ const HANDLERS = {
         const absId = item.abs_id || item.id;
         if (!absId) { failed++; errors.push('Missing item ID'); continue; }
         const meta = item.metadata || {};
-        const payload = buildAbsPayload(meta);
-        await absApi(baseUrl, token, `/api/items/${absId}/media`, {
-          method: 'PATCH',
-          body: payload,
-        });
+        const out = await pushOneAbsItem(baseUrl, token, absId, meta, item.original);
+        snapshots[item.id || absId] = out.snapshot;
         updated++;
       } catch (err) {
         failed++;
         errors.push(err.message);
       }
     }
-    return { updated, failed, errors };
+    return { updated, failed, errors, snapshots };
   },
 
   // === ABS Chapters ===
@@ -2036,7 +1930,7 @@ function absItemToBookGroup(item, absBaseUrl) {
   // L: don't let `|| meta.seriesSequence` override a legitimate sequence of 0.
   const primarySequence = seriesArr[0]?.sequence;
 
-  return {
+  const group = {
     id: item.id || crypto.randomUUID(),
     abs_id: item.id,
     source: 'abs',
@@ -2072,6 +1966,10 @@ function absItemToBookGroup(item, absBaseUrl) {
       changes: {},
     })),
   };
+  // v2.2.3: what ABS holds right now. Push diffs against this so it only
+  // sends what the user/AI changed, and so policy never touches existing values.
+  group.abs_original = snapshotAbsMetadata(group.metadata);
+  return group;
 }
 
 // ============================================================================
