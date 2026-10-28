@@ -699,12 +699,26 @@ const AUTHOR_SUFFIXES = new Set([
 export function splitAuthors(str) {
   if (!str || typeof str !== "string") return [];
 
-  // Split on "&" and " and " first (word-boundary, case-insensitive).
-  const chunks = str.split(/\s*&\s*|\s+and\s+/i).map((c) => c.trim()).filter(Boolean);
+  // "&" always separates names. " and " only separates when EVERY side looks
+  // like a full name ("Stephen King and Owen King"); "Rodgers and Hammerstein"
+  // is a single credit and stays whole (v2.2.3).
+  const chunks = [];
+  for (const ampChunk of str.split(/\s*&\s*/)) {
+    const andParts = ampChunk.split(/\s+and\s+/i).map((c) => c.trim()).filter(Boolean);
+    if (andParts.length > 1 && andParts.every(looksLikeFullName)) chunks.push(...andParts);
+    else if (ampChunk.trim()) chunks.push(ampChunk.trim());
+  }
 
   const authors = [];
   for (const chunk of chunks) {
     const commaParts = chunk.split(",").map((p) => p.trim()).filter(Boolean);
+    // A single "Last, First" name ("King, Stephen", "Tolkien, J. R. R."): two
+    // parts with a one-word surname first. Not two authors.
+    if (commaParts.length === 2 && !/\s/.test(commaParts[0])
+        && !AUTHOR_SUFFIXES.has(commaParts[1].toLowerCase())) {
+      authors.push(`${commaParts[0]}, ${commaParts[1]}`);
+      continue;
+    }
     for (const part of commaParts) {
       const isSuffix = AUTHOR_SUFFIXES.has(part.toLowerCase());
       if (isSuffix && authors.length > 0) {
@@ -716,6 +730,13 @@ export function splitAuthors(str) {
   }
 
   return authors;
+}
+
+// A side of " and " is a full name when it has two or more words (or is a
+// "Last, First" form). Single words ("Rodgers") are not.
+function looksLikeFullName(s) {
+  const t = String(s).trim();
+  return t.includes(",") || t.split(/\s+/).filter(Boolean).length >= 2;
 }
 
 export function normalizeDescription(description, maxLength) {

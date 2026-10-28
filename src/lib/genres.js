@@ -401,10 +401,21 @@ function _inputTokenSet(s) {
 // no longer matches "war" because "war" alone is now insufficient in the
 // wrong direction, and "fantasy" no longer matches "fantasy-romance" because
 // "romance" isn't present in the input.
+//
+// v2.2.3 guard: a partial match must also be CLOSE. The input may carry at
+// most one token beyond the approved value ("epic fantasy novel" ->
+// "epic-fantasy", but not "world-war-ii" -> "war" or "a-dark-horse" ->
+// "dark"), must be at least 3 characters, and must not be negated
+// ("no-love-triangle" is not "love-triangle").
+const _NEGATION_TOKENS = new Set(["no", "not", "non", "without", "anti"]);
 function _approvedTokensSubsetOfInput(inputStr, approvedStr) {
-  const inputTokens = _inputTokenSet(inputStr);
+  if (inputStr.replace(/[\s-]+/g, "").length < 3) return false;
+  const rawInputTokens = _tokenize(inputStr);
+  if (rawInputTokens.some((t) => _NEGATION_TOKENS.has(t))) return false;
   const approvedTokens = _tokenize(approvedStr);
   if (approvedTokens.length === 0) return false;
+  if (rawInputTokens.length > approvedTokens.length + 1) return false;
+  const inputTokens = _inputTokenSet(inputStr);
   return approvedTokens.every((t) => inputTokens.has(t));
 }
 

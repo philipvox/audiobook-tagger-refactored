@@ -63,3 +63,26 @@ describe("splitAuthors: suffix-aware comma splitting", () => {
     expect(splitAuthors(undefined)).toEqual([]);
   });
 });
+
+describe("splitAuthors: single names that must not be split (v2.2.3)", () => {
+  it("keeps a single 'Last, First' name together", () => {
+    expect(splitAuthors("King, Stephen")).toEqual(["King, Stephen"]);
+    expect(splitAuthors("Tolkien, J. R. R.")).toEqual(["Tolkien, J. R. R."]);
+  });
+
+  it("does not split ' and ' when either side is not a full name", () => {
+    expect(splitAuthors("Rodgers and Hammerstein")).toEqual(["Rodgers and Hammerstein"]);
+    expect(splitAuthors("Stephen King and Owen")).toEqual(["Stephen King and Owen"]);
+  });
+
+  it("still splits ' and ' between two full names", () => {
+    expect(splitAuthors("Stephen King and Owen King")).toEqual(["Stephen King", "Owen King"]);
+  });
+
+  it("keeps a suffix name intact next to another author", () => {
+    expect(splitAuthors("Martin Luther King, Jr. and Coretta Scott King")).toEqual([
+      "Martin Luther King, Jr.",
+      "Coretta Scott King",
+    ]);
+  });
+});
