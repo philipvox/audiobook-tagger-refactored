@@ -256,46 +256,174 @@ fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
         });
     }
 
-    // Read, mutate, save.
-    let mut tagged = match Probe::open(&path).and_then(|p| p.read()) {
-        Ok(t) => t,
-        Err(e) => {
-            return FileWriteOutcome {
-                result: Err(format!("read failed: {e}")),
-                journal,
-                skipped: Vec::new(),
-            }
-        }
-    };
-    let tag_type = tagged.primary_tag_type();
-    if tagged.primary_tag().is_none() {
-        tagged.insert_tag(Tag::new(tag_type));
-    }
-    let tag = match tagged.primary_tag_mut() {
-        Some(t) => t,
-        None => {
-            return FileWriteOutcome {
-                result: Err("could not create a writable tag".to_string()),
-                journal,
-                skipped: Vec::new(),
-            }
-        }
-    };
-    // Embed everything this format can express; unembeddable/ABS-only fields are
-    // reported as `skipped` rather than failing the write.
-    let skipped = apply_changes_to_tag(tag, &file.changes);
-
-    match tagged.save_to_path(&path, WriteOptions::default()) {
-        Ok(()) => FileWriteOutcome {
+    // Mutate a temp copy, then atomically swap it in (see write_tags_atomically).
+    match write_tags_atomically(&path, &file.changes) {
+        Ok(skipped) => FileWriteOutcome {
             result: Ok(()),
             journal,
             skipped,
         },
         Err(e) => FileWriteOutcome {
-            result: Err(format!("save failed: {e}")),
+            result: Err(e),
             journal,
-            skipped,
+            skipped: Vec::new(),
         },
+    }
+}
+
+/// Write the change set into `path` without ever leaving a half-written file:
+/// the tags are written into a temp copy in the SAME directory (so the final
+/// rename is atomic on one filesystem), the copy is fsynced, then renamed over
+/// the original. Any failure removes the temp copy and leaves the original
+/// untouched. Returns the fields that could not be embedded (see
+/// apply_changes_to_tag).
+pub fn write_tags_atomically(path: &Path, changes: &HashMap<String, Value>) -> Result<Vec<String>, String> {
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    // Keep the real extension last so lofty's type detection still works.
+    let tmp = dir.join(format!(".{}.tagtmp-{}.{}", file_name, uuid::Uuid::new_v4().simple(),
+        path.extension().and_then(|e| e.to_str()).unwrap_or("tmp")));
+
+    let result = (|| -> Result<Vec<String>, String> {
+        fs::copy(path, &tmp).map_err(|e| format!("temp copy failed: {e}"))?;
+        let skipped = write_tags_in_place(&tmp, changes)?;
+        fs::File::open(&tmp)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| format!("fsync failed: {e}"))?;
+        fs::rename(&tmp, path).map_err(|e| format!("replace failed: {e}"))?;
+        // Best-effort: persist the directory entry change too (unix only).
+        #[cfg(unix)]
+        if let Ok(d) = fs::File::open(&dir) {
+            let _ = d.sync_all();
+        }
+        Ok(skipped)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// lofty re-encodes every BE-signed-integer atom as 4 bytes, but iTunes-style
+/// readers (ffmpeg, Apple Books, AudiobookShelf) read `stik`/`rtng`/... as ONE
+/// byte and `tmpo` as two - so a 4-byte `stik` of 2 reads back as 0 ("Movie").
+/// Re-encode the well-known fixed-width atoms at their spec width.
+fn restore_mp4_int_widths(ilst: &mut lofty::mp4::Ilst) {
+    use lofty::mp4::{Atom, AtomData, AtomIdent};
+    const WIDTHS: &[(&[u8; 4], usize)] = &[
+        (b"stik", 1), (b"rtng", 1), (b"pgap", 1), (b"cpil", 1), (b"hdvd", 1),
+        (b"shwm", 1), (b"akID", 1), (b"tmpo", 2),
+    ];
+    for (code, width) in WIDTHS {
+        let ident = AtomIdent::Fourcc(**code);
+        let value = match ilst.get(&ident).and_then(|a| a.data().next().cloned()) {
+            Some(AtomData::SignedInteger(v)) => v,
+            _ => continue,
+        };
+        let bytes = value.to_be_bytes();
+        ilst.replace_atom(Atom::new(
+            ident,
+            AtomData::Unknown { code: 21, data: bytes[4 - width..].to_vec() },
+        ));
+    }
+}
+
+/// Read, mutate, save `path` in place (only ever called on a temp copy).
+///
+/// MP4 and MPEG are written through lofty's FORMAT-SPECIFIC tags rather than
+/// the generic TaggedFile: converting an Ilst to a generic Tag and back drops
+/// every atom without an ItemKey - notably `stik` (media kind = Audiobook),
+/// `rtng`, `tmpo`, `gnre` - so one title edit used to turn an audiobook into
+/// "music". split_tag/merge_tag keeps those atoms in the remainder.
+fn write_tags_in_place(path: &Path, changes: &HashMap<String, Value>) -> Result<Vec<String>, String> {
+    use lofty::config::ParseOptions;
+    use lofty::file::FileType;
+    use lofty::tag::{MergeTag, SplitTag, TagExt};
+
+    let file_type = Probe::open(path)
+        .map_err(|e| format!("read failed: {e}"))?
+        .guess_file_type()
+        .map_err(|e| format!("read failed: {e}"))?
+        .file_type();
+
+    match file_type {
+        Some(FileType::Mp4) => {
+            let mut f = fs::File::open(path).map_err(|e| format!("read failed: {e}"))?;
+            let mp4 = lofty::mp4::Mp4File::read_from(&mut f, ParseOptions::new())
+                .map_err(|e| format!("read failed: {e}"))?;
+            drop(f);
+            let ilst = mp4.ilst().cloned().unwrap_or_default();
+            let (remainder, mut tag) = ilst.split_tag();
+            let skipped = apply_changes_to_tag(&mut tag, changes);
+            let mut merged = remainder.merge_tag(tag);
+            restore_mp4_int_widths(&mut merged);
+            merged
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|e| format!("save failed: {e}"))?;
+            Ok(skipped)
+        }
+        Some(FileType::Mpeg) => {
+            let mut f = fs::File::open(path).map_err(|e| format!("read failed: {e}"))?;
+            let mpeg = lofty::mpeg::MpegFile::read_from(&mut f, ParseOptions::new())
+                .map_err(|e| format!("read failed: {e}"))?;
+            drop(f);
+            let id3 = mpeg.id3v2().cloned().unwrap_or_default();
+            // lofty turns a TXXX frame whose description is 4 chars (e.g. "ASIN")
+            // into ItemKey::Unknown("ASIN"), which merge_tag then mistakes for a
+            // frame ID and refuses to save (BadFrame "ASIN"). Pull those values out
+            // of the generic tag and re-insert them as proper TXXX frames.
+            let short_txxx: Vec<String> = (&id3)
+                .into_iter()
+                .filter(|fr| fr.id_str() == "TXXX")
+                .filter_map(|fr| match fr.content() {
+                    lofty::id3::v2::FrameValue::UserText(t) if t.description.len() == 4 => {
+                        Some(t.description.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let (remainder, mut tag) = id3.split_tag();
+            let mut user_text: Vec<(String, String)> = Vec::new();
+            for desc in short_txxx {
+                let key = ItemKey::Unknown(desc.clone());
+                let vals: Vec<String> = tag.take_strings(&key).collect();
+                if !vals.is_empty() {
+                    user_text.push((desc, vals.join("\0")));
+                }
+            }
+            let skipped = apply_changes_to_tag(&mut tag, changes);
+            let mut merged = remainder.merge_tag(tag);
+            for (desc, content) in user_text {
+                let _ = merged.insert_user_text(desc, content);
+            }
+            merged
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|e| format!("save failed: {e}"))?;
+            Ok(skipped)
+        }
+        _ => {
+            let mut tagged = Probe::open(path)
+                .and_then(|p| p.read())
+                .map_err(|e| format!("read failed: {e}"))?;
+            let tag_type = tagged.primary_tag_type();
+            if tagged.primary_tag().is_none() {
+                tagged.insert_tag(Tag::new(tag_type));
+            }
+            let tag = tagged
+                .primary_tag_mut()
+                .ok_or_else(|| "could not create a writable tag".to_string())?;
+            let skipped = apply_changes_to_tag(tag, changes);
+            tagged
+                .save_to_path(path, WriteOptions::default())
+                .map_err(|e| format!("save failed: {e}"))?;
+            Ok(skipped)
+        }
     }
 }
 
@@ -1075,6 +1203,110 @@ mod tests {
         let a = dir.path().join("nope.m4b");
         let c = dir.path().join("c.m4b");
         assert!(rename_one(&a.to_string_lossy(), &c.to_string_lossy()).is_err());
+    }
+
+    // ---- real-file writes against ffmpeg-made scratch files (temp dir only) ----
+
+    fn have_ffmpeg() -> bool {
+        std::process::Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
+    }
+
+    fn run_ffmpeg(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("ffmpeg")
+            .current_dir(dir)
+            .args(["-loglevel", "error", "-y"])
+            .args(args)
+            .output()
+            .expect("ffmpeg");
+        assert!(out.status.success(), "ffmpeg failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// m4b with stik=2 (Audiobook), two chapters and an embedded cover.
+    fn make_m4b(dir: &Path) -> PathBuf {
+        run_ffmpeg(dir, &["-f", "lavfi", "-i", "color=c=red:s=64x64:d=1", "-frames:v", "1", "cover.png"]);
+        fs::write(
+            dir.join("meta.txt"),
+            ";FFMETADATA1\ntitle=Orig\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1500\ntitle=Ch One\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1500\nEND=3000\ntitle=Ch Two\n",
+        )
+        .unwrap();
+        run_ffmpeg(dir, &[
+            "-f", "lavfi", "-i", "sine=d=3", "-i", "meta.txt", "-i", "cover.png",
+            "-map", "0:a", "-map", "2:v", "-map_metadata", "1", "-map_chapters", "1",
+            "-c:a", "aac", "-c:v", "png", "-disposition:v", "attached_pic",
+            "-metadata", "media_type=2", "-movflags", "+faststart", "book.m4b",
+        ]);
+        dir.join("book.m4b")
+    }
+
+    fn ffprobe(path: &Path) -> String {
+        let out = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-show_chapters", "-show_format", "-show_streams"])
+            .arg(path)
+            .output()
+            .expect("ffprobe");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    fn title_change(title: &str) -> HashMap<String, Value> {
+        let mut c = HashMap::new();
+        c.insert("title".into(), json!({ "old": "", "new": title }));
+        c
+    }
+
+    #[test]
+    fn m4b_write_preserves_stik_chapters_and_cover() {
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let m4b = make_m4b(dir.path());
+        let before = ffprobe(&m4b);
+        assert!(before.contains("TAG:media_type=2"), "fixture must carry stik=2");
+
+        let wf = WriteFile { path: m4b.to_string_lossy().to_string(), changes: title_change("New Title") };
+        let out = write_one_file(&wf, false);
+        assert!(out.result.is_ok(), "write failed: {:?}", out.result);
+
+        let after = ffprobe(&m4b);
+        assert!(after.contains("TAG:title=New Title"), "title not written:\n{after}");
+        assert!(after.contains("TAG:media_type=2"), "stik (Audiobook marker) was stripped:\n{after}");
+        assert!(after.contains("TAG:title=Ch One") && after.contains("TAG:title=Ch Two"), "chapters lost:\n{after}");
+        assert!(after.contains("codec_name=png"), "cover lost:\n{after}");
+
+        // A second write (re-reading lofty's own output) must stay stable too.
+        let wf2 = WriteFile { path: m4b.to_string_lossy().to_string(), changes: title_change("Second") };
+        assert!(write_one_file(&wf2, false).result.is_ok());
+        let again = ffprobe(&m4b);
+        assert!(again.contains("TAG:title=Second") && again.contains("TAG:media_type=2"), "{again}");
+        // The atomic write leaves no temp copies behind.
+        let leftovers: Vec<_> = fs::read_dir(dir.path()).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("tagtmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind");
+    }
+
+    #[test]
+    fn mp3_with_txxx_asin_is_writable() {
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        run_ffmpeg(dir.path(), &[
+            "-f", "lavfi", "-i", "sine=d=1", "-c:a", "libmp3lame", "-id3v2_version", "3",
+            "-metadata", "ASIN=B00TEST123", "-metadata", "title=Orig", "book.mp3",
+        ]);
+        let mp3 = dir.path().join("book.mp3");
+        assert!(ffprobe(&mp3).contains("B00TEST123"), "fixture must carry TXXX:ASIN");
+
+        let wf = WriteFile { path: mp3.to_string_lossy().to_string(), changes: title_change("New Title") };
+        let out = write_one_file(&wf, false);
+        assert!(out.result.is_ok(), "write failed: {:?}", out.result);
+        let after = ffprobe(&mp3);
+        assert!(after.contains("TAG:title=New Title"), "title not written:\n{after}");
+        assert!(after.contains("B00TEST123"), "ASIN lost:\n{after}");
     }
 
     // ---- template formatting ----
