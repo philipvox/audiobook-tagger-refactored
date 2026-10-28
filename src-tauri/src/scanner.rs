@@ -338,6 +338,7 @@ fn path_parts(path: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn parse_folder_hierarchy(path: &str) -> FolderHierarchy {
     parse_folder_hierarchy_in(path, "")
 }

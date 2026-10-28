@@ -204,6 +204,50 @@ fn list_models() -> Vec<WhisperLocalModel> {
     models
 }
 
+/// SHA-256 of the pinned whisper.cpp v1.8.4 release assets, as published by
+/// GitHub for the release (`gh api repos/ggml-org/whisper.cpp/releases/tags/v1.8.4`).
+/// Bump these together with the URLs in get_binary_download_url.
+const PINNED_SHA256: &[(&str, &str)] = &[
+    (
+        "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-x64.zip",
+        "74f973345cb52ef5ba3ec9e7e7af8e48cc8c71722d1528603b80588a11f82e3e",
+    ),
+    (
+        "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-Win32.zip",
+        "892596da56c8762bd8a7592d5f42569943985cbd9c7fbad11c679f783f119bab",
+    ),
+];
+
+fn pinned_sha256_for(url: &str) -> Option<&'static str> {
+    PINNED_SHA256.iter().find(|(u, _)| *u == url).map(|(_, h)| *h)
+}
+
+/// Fail unless `bytes` hash to `expected_hex` (case-insensitive).
+fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let actual: String = Sha256::digest(bytes).iter().map(|b| format!("{:02x}", b)).collect();
+    if actual.eq_ignore_ascii_case(expected_hex.trim()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Checksum mismatch for downloaded file (expected {}, got {}). The download was discarded.",
+            expected_hex.trim().to_lowercase(),
+            actual
+        ))
+    }
+}
+
+/// First token of a `sha256sum`-style file, if it is a 64-char hex digest.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_sha256_file(text: &str) -> Option<String> {
+    let tok = text.split_whitespace().next()?;
+    if tok.len() == 64 && tok.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(tok.to_lowercase())
+    } else {
+        None
+    }
+}
+
 /// Get the download URL for whisper-cpp binary for this platform.
 /// macOS and Linux install via Homebrew (see whisper_local_install); only
 /// Windows fetches a prebuilt zip. The macOS xcframework download was removed
@@ -451,6 +495,22 @@ async fn install_ffmpeg(window: &tauri::Window) -> Result<String, String> {
 
     let bytes = resp.bytes().await.map_err(|e| format!("Read error: {}", e))?;
 
+    // gyan.dev publishes a SHA-256 next to each Windows build; verify it.
+    // (evermeet.cx and johnvansickle.com publish no SHA-256 - signature/md5
+    // only - so macOS/Linux downloads are TLS-only.)
+    #[cfg(target_os = "windows")]
+    {
+        let sum_url = format!("{}.sha256", url);
+        let text = client.get(&sum_url).send().await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| format!("Could not fetch FFmpeg checksum: {}", e))?
+            .text().await
+            .map_err(|e| format!("Could not read FFmpeg checksum: {}", e))?;
+        let expected = parse_sha256_file(&text)
+            .ok_or_else(|| "FFmpeg checksum file was not a SHA-256 digest".to_string())?;
+        verify_sha256(&bytes, &expected)?;
+    }
+
     let _ = window.emit("whisper_install_progress", serde_json::json!({
         "stage": "extracting", "status": "Extracting FFmpeg...",
     }));
@@ -526,6 +586,9 @@ async fn download_and_install_binary(url: &str, window: &tauri::Window) -> Resul
     }
 
     let bytes = resp.bytes().await.map_err(|e| format!("Read error: {}", e))?;
+    if let Some(expected) = pinned_sha256_for(url) {
+        verify_sha256(&bytes, expected)?;
+    }
 
     let _ = window.emit("whisper_install_progress", serde_json::json!({
         "stage": "extracting", "status": "Extracting binary...",
@@ -869,6 +932,31 @@ pub fn transcribe_local(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn sha256_verification() {
+        // sha256("abc")
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(verify_sha256(b"abc", abc).is_ok());
+        assert!(verify_sha256(b"abc", &abc.to_uppercase()).is_ok());
+        assert!(verify_sha256(b"abd", abc).is_err());
+        assert_eq!(
+            parse_sha256_file("60F467265B1E312373DBCD92200C2618A74850F98D3D078E94296BB3FA2047BA  ffmpeg.zip\n").as_deref(),
+            Some("60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba")
+        );
+        assert_eq!(parse_sha256_file("<html>not found</html>"), None);
+    }
+
+    #[test]
+    fn pinned_whisper_downloads_have_checksums() {
+        for url in [
+            "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-x64.zip",
+            "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-Win32.zip",
+        ] {
+            assert_eq!(pinned_sha256_for(url).map(|h| h.len()), Some(64), "{url}");
+        }
+        assert_eq!(pinned_sha256_for("https://example.com/x.zip"), None);
+    }
 
     #[test]
     fn model_ids_cannot_traverse_paths() {

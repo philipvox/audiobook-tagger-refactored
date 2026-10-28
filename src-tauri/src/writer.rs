@@ -229,6 +229,7 @@ struct FileWriteOutcome {
     skipped: Vec<String>,
 }
 
+#[cfg(test)]
 fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
     write_one_file_recorded(file, backup, &mut |_| Ok(()))
 }
