@@ -709,8 +709,21 @@ pub async fn whisper_local_download_model(
     Ok(format!("Model {} downloaded ({} MB)", model_id, preset.size_mb))
 }
 
+/// A model id becomes part of a filename (`ggml-<id>.bin`). Only plain
+/// alphanumerics plus `.`, `-`, `_` are allowed, and never "..": an id like
+/// `..\\..\\x` would otherwise escape the models dir on Windows.
+fn is_valid_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 100
+        && !id.contains("..")
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
 #[tauri::command]
 pub async fn whisper_local_delete_model(model_id: String) -> Result<String, String> {
+    if !is_valid_model_id(&model_id) {
+        return Err(format!("Invalid model id: {}", model_id));
+    }
     let models_dir = whisper_models_dir()?;
     let filename = format!("ggml-{}.bin", model_id);
     let path = models_dir.join(&filename);
@@ -723,30 +736,39 @@ pub async fn whisper_local_delete_model(model_id: String) -> Result<String, Stri
     }
 }
 
+/// Remove the bundled whisper binary and every downloaded model. Any failure is
+/// reported (it used to be ignored and the UI said "removed" while the files
+/// stayed). The directory itself is removed only if empty - a bundled ffmpeg
+/// living there is intentionally kept.
+fn remove_whisper_install(dir: &Path, binary: &Path, models_dir: &Path) -> Result<(), String> {
+    let mut errors: Vec<String> = Vec::new();
+    if binary.exists() {
+        if let Err(e) = std::fs::remove_file(binary) {
+            errors.push(format!("could not remove {}: {}", binary.display(), e));
+        }
+    }
+    if models_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(models_dir) {
+            errors.push(format!("could not remove {}: {}", models_dir.display(), e));
+        }
+    }
+    if dir.exists() {
+        let empty = std::fs::read_dir(dir).map(|mut d| d.next().is_none()).unwrap_or(false);
+        if empty {
+            if let Err(e) = std::fs::remove_dir(dir) {
+                errors.push(format!("could not remove {}: {}", dir.display(), e));
+            }
+        }
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+}
+
 /// Uninstall whisper-cpp: remove bundled binary and all downloaded models
 #[tauri::command]
 pub async fn whisper_local_uninstall() -> Result<String, String> {
     let dir = whisper_dir()?;
-
-    // Remove bundled binary
-    if let Ok(binary) = bundled_binary_path() {
-        if binary.exists() {
-            let _ = std::fs::remove_file(&binary);
-        }
-    }
-
-    // Remove all models
-    if let Ok(models_dir) = whisper_models_dir() {
-        if models_dir.exists() {
-            let _ = std::fs::remove_dir_all(&models_dir);
-        }
-    }
-
-    // Remove the whisper directory itself if empty
-    if dir.exists() {
-        let _ = std::fs::remove_dir(&dir);
-    }
-
+    remove_whisper_install(&dir, &bundled_binary_path()?, &whisper_models_dir()?)
+        .map_err(|e| format!("Local Whisper was not fully removed: {}", e))?;
     Ok("Local Whisper removed".to_string())
 }
 
@@ -847,6 +869,43 @@ pub fn transcribe_local(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn model_ids_cannot_traverse_paths() {
+        assert!(is_valid_model_id("base.en"));
+        assert!(is_valid_model_id("large-v3-turbo"));
+        assert!(is_valid_model_id("small_q5"));
+        assert!(!is_valid_model_id(""));
+        assert!(!is_valid_model_id("..\\..\\Windows\\x"));
+        assert!(!is_valid_model_id("../../etc/passwd"));
+        assert!(!is_valid_model_id("a/b"));
+        assert!(!is_valid_model_id("a\\b"));
+        assert!(!is_valid_model_id(".."));
+        assert!(!is_valid_model_id("C:evil"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_reports_failed_removal() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("whisper");
+        let models = dir.join("models");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("ggml-base.bin"), b"x").unwrap();
+        let binary = dir.join("whisper-cpp");
+        std::fs::write(&binary, b"bin").unwrap();
+        // Read-only parent: nothing inside it can be unlinked.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let res = remove_whisper_install(&dir, &binary, &models);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(res.is_err(), "uninstall must not report success when files remain");
+
+        // And succeeds (tolerating a leftover bundled ffmpeg) when removal works.
+        std::fs::write(dir.join("ffmpeg"), b"ff").unwrap();
+        assert!(remove_whisper_install(&dir, &binary, &models).is_ok());
+        assert!(!binary.exists() && !models.exists());
+    }
 
     // ---- Item 16: language code parsing ----
 
