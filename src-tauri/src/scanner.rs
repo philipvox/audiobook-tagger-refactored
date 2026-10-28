@@ -68,6 +68,9 @@ struct RawFile {
     path: String,
     filename: String,
     parent_dir: String,
+    /// The scan root this file was found under; folders at/above it are never
+    /// read as author/series.
+    root: String,
     tags: EmbeddedTags,
 }
 
@@ -212,6 +215,7 @@ fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
                             .to_string_lossy()
                             .to_string(),
                         parent_dir: parent,
+                        root: root.clone(),
                         tags,
                     });
                 }
@@ -308,30 +312,73 @@ struct FolderHierarchy {
     sequence: Option<String>,
 }
 
+/// Well-known container folders (exact, case-insensitive) that hold a library
+/// but are never an author or series name.
+fn is_container_folder(name: &str) -> bool {
+    let lower = name.trim().to_lowercase();
+    matches!(
+        lower.as_str(),
+        "audiobooks" | "audiobook" | "audio" | "audio books" | "media" | "library" | "libraries"
+            | "book" | "books" | "ebooks" | "downloads" | "download" | "desktop" | "documents"
+            | "my documents" | "music" | "my music" | "itunes" | "itunes media" | "volumes"
+            | "users" | "home" | "mnt" | "srv" | "onedrive" | "dropbox" | "icloud drive"
+            | "google drive" | "public"
+    ) || {
+        // Drive roots: "C:" (or a bare "C" left after splitting "C:\").
+        let drive = lower.trim_end_matches(':');
+        drive.len() == 1 && drive.chars().all(|c| c.is_ascii_alphabetic())
+    }
+}
+
+fn path_parts(path: &str) -> Vec<String> {
+    path.replace('\\', "/")
+        .split('/')
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+        .collect()
+}
+
 fn parse_folder_hierarchy(path: &str) -> FolderHierarchy {
+    parse_folder_hierarchy_in(path, "")
+}
+
+/// Parse author/series/sequence from a book folder path. Components at or above
+/// `scan_root` (the folder the user chose) are ignored, as are well-known
+/// container folders (Downloads, Desktop, Music, Audiobooks, ...), home
+/// directories (`/Users/<name>`, `/home/<name>`) and drive roots - otherwise
+/// `/Users/x/Downloads/Stephen King/It` made "Downloads" the author.
+fn parse_folder_hierarchy_in(path: &str, scan_root: &str) -> FolderHierarchy {
     let mut result = FolderHierarchy::default();
-    let normalized = path.replace('\\', "/");
-    let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
+    let mut owned = path_parts(path);
+    let root_parts = path_parts(scan_root);
+    if !root_parts.is_empty()
+        && owned.len() >= root_parts.len()
+        && owned[..root_parts.len()]
+            .iter()
+            .zip(&root_parts)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    {
+        owned.drain(..root_parts.len());
+    }
+    let parts: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
 
     if parts.is_empty() {
         return result;
     }
 
-    // Exact-match root markers only (no ends_with, which mis-fired on names like
-    // "Notebooks" or "MyAudio"). Plural/singular variants are listed explicitly.
-    let root_markers = [
-        "audiobooks", "audiobook", "audio", "media", "library", "libraries", "book", "books",
-    ];
-    let mut root_idx = None;
-    for (i, part) in parts.iter().enumerate() {
-        let lower = part.to_lowercase();
-        if root_markers.iter().any(|m| lower == *m) {
-            root_idx = Some(i);
-            break;
+    // Start after the LAST container component above the book folder (the book
+    // folder itself is never skipped). The folder after users/home is a login
+    // name, also skipped.
+    let mut start_idx = 0;
+    for i in 0..parts.len().saturating_sub(1) {
+        let lower = parts[i].to_lowercase();
+        if is_container_folder(parts[i]) {
+            start_idx = i + 1;
+            if (lower == "users" || lower == "home") && i + 1 < parts.len() - 1 {
+                start_idx = i + 2;
+            }
         }
     }
-
-    let start_idx = root_idx.map(|i| i + 1).unwrap_or(0);
     let mut relevant_parts: Vec<&str> = parts[start_idx..].to_vec();
 
     // Disc-aware: drop trailing chapter/disc folders so a file inside
@@ -605,7 +652,7 @@ fn tags_are_meaningful(t: &EmbeddedTags) -> bool {
         || t.genre.is_some()
 }
 
-fn pick_metadata(raw_files: &[RawFile], parent_dir: &str, group_name: &str) -> BookMetadata {
+fn pick_metadata(raw_files: &[RawFile], parent_dir: &str, group_name: &str, scan_root: &str) -> BookMetadata {
     // Prefer the first file that actually carries embedded tags; fall back to the
     // first file. A leading "intro" or silence track often has empty tags while
     // later tracks are fully tagged.
@@ -618,7 +665,7 @@ fn pick_metadata(raw_files: &[RawFile], parent_dir: &str, group_name: &str) -> B
 
     // Folder-hierarchy parse of the book's parent directory fills any gaps
     // left by missing embedded tags.
-    let hierarchy = parse_folder_hierarchy(parent_dir);
+    let hierarchy = parse_folder_hierarchy_in(parent_dir, scan_root);
 
     let title = first_tags
         .album
@@ -668,6 +715,82 @@ fn pick_metadata(raw_files: &[RawFile], parent_dir: &str, group_name: &str) -> B
     }
 }
 
+/// Lowercased book key with explicit part/disc markers stripped
+/// ("Big Book Part 2" -> "big book"). Bare trailing numbers are kept on purpose:
+/// "Harry Potter 1" and "Harry Potter 2" are different books. A purely numeric
+/// value ("01") carries no identity and yields "".
+fn book_key(raw: &str) -> String {
+    use std::sync::OnceLock;
+    static PART_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = PART_RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)[\s,:_\-\(\[]*\b(part|pt|disc|disk|cd)\.?\s*\d+(\s*(of|/)\s*\d+)?[\)\]]?\s*$").unwrap()
+    });
+    let lower = raw.trim().to_lowercase();
+    let stripped = re.replace(&lower, "").trim().to_string();
+    if stripped.chars().all(|c| c.is_ascii_digit() || c.is_whitespace() || "-_.".contains(c)) {
+        String::new()
+    } else {
+        stripped
+    }
+}
+
+fn file_stem(f: &RawFile) -> String {
+    Path::new(&f.filename)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+fn is_single_file_book_format(f: &RawFile) -> bool {
+    let ext = Path::new(&f.filename)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    ext == "m4b" || ext == "m4a"
+}
+
+/// Which book a file belongs to within its folder. m4b/m4a are usually whole
+/// books, so their title (else album, else filename) identifies the book;
+/// track-based formats (mp3, flac, ...) share an album across chapters, so only
+/// the album separates them. "" = no identity (joins the folder's main book).
+fn file_book_key(f: &RawFile) -> String {
+    let nonempty = |o: &Option<String>| o.as_deref().map(book_key).filter(|k| !k.is_empty());
+    if is_single_file_book_format(f) {
+        nonempty(&f.tags.title)
+            .or_else(|| nonempty(&f.tags.album))
+            .unwrap_or_else(|| book_key(&file_stem(f)))
+    } else {
+        nonempty(&f.tags.album).unwrap_or_default()
+    }
+}
+
+/// Split one folder's files into books. Keyless files join the single keyed
+/// book when there is exactly one (an untagged intro track), else form their
+/// own group, so a folder of one book's tracks never splits.
+fn split_folder_into_books(raw_files: Vec<RawFile>) -> Vec<(String, Vec<RawFile>)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut buckets: HashMap<String, Vec<RawFile>> = HashMap::new();
+    for f in raw_files {
+        let key = file_book_key(&f);
+        if !buckets.contains_key(&key) {
+            order.push(key.clone());
+        }
+        buckets.entry(key).or_default().push(f);
+    }
+    let keyed = order.iter().filter(|k| !k.is_empty()).count();
+    if keyed <= 1 {
+        let all: Vec<RawFile> = order.iter().flat_map(|k| buckets.remove(k).unwrap_or_default()).collect();
+        return vec![(String::new(), all)];
+    }
+    order
+        .into_iter()
+        .map(|k| {
+            let files = buckets.remove(&k).unwrap_or_default();
+            (k, files)
+        })
+        .collect()
+}
+
 fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
     // Key by the climbed book directory (past chapter/disc subfolders) so a
     // multi-disc layout (Author/Book/Disc 1 + Disc 2) merges into one group.
@@ -677,27 +800,39 @@ fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
         map.entry(book_dir).or_default().push(f);
     }
 
-    let mut groups: Vec<BookGroup> = map
-        .into_iter()
-        .map(|(book_dir, mut raw_files)| {
+    let mut groups: Vec<BookGroup> = Vec::new();
+    for (book_dir, folder_files) in map {
+        let books = split_folder_into_books(folder_files);
+        let split = books.len() > 1;
+        for (_key, mut raw_files) in books {
             // Sort by full path so tracks stay ordered across discs
             // (Disc 1/track01, Disc 1/track02, Disc 2/track01, ...).
             raw_files.sort_by(|a, b| natord_cmp(&a.path, &b.path));
 
-            let group_name = Path::new(&book_dir)
+            let folder_name = Path::new(&book_dir)
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-
-            let group_type = if raw_files.len() == 1 {
-                "single"
+            // Several books share this folder: each is named after its own
+            // file, and the folder is read as their PARENT (author/series), as
+            // if each book had a folder of its own.
+            let (group_name, hierarchy_dir) = if split {
+                let first = &raw_files[0];
+                let name = if raw_files.len() == 1 {
+                    file_stem(first)
+                } else {
+                    first.tags.album.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| file_stem(first))
+                };
+                let dir = Path::new(&book_dir).join(&name).to_string_lossy().to_string();
+                (name, dir)
             } else {
-                "chapters"
-            }
-            .to_string();
+                (folder_name, book_dir.clone())
+            };
 
-            let metadata = pick_metadata(&raw_files, &book_dir, &group_name);
+            let group_type = if raw_files.len() == 1 { "single" } else { "chapters" }.to_string();
+            let scan_root = raw_files[0].root.clone();
+            let metadata = pick_metadata(&raw_files, &hierarchy_dir, &group_name, &scan_root);
 
             let audio_files: Vec<AudioFile> = raw_files
                 .iter()
@@ -710,7 +845,7 @@ fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
                 })
                 .collect();
 
-            BookGroup {
+            groups.push(BookGroup {
                 id: uuid::Uuid::new_v4().to_string(),
                 group_name,
                 group_type,
@@ -719,9 +854,9 @@ fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
                 total_changes: 0,
                 scan_status: "not_scanned".to_string(),
                 abs_id: None,
-            }
-        })
-        .collect();
+            });
+        }
+    }
 
     groups.sort_by(|a, b| a.group_name.to_lowercase().cmp(&b.group_name.to_lowercase()));
     groups
@@ -894,6 +1029,7 @@ mod tests {
             path: format!("{}/{}", dir, fname),
             filename: fname.to_string(),
             parent_dir: dir.to_string(),
+            root: String::new(),
             tags: EmbeddedTags::default(),
         };
         let files = vec![
@@ -917,6 +1053,7 @@ mod tests {
             path: format!("{}/{}", dir, fname),
             filename: fname.to_string(),
             parent_dir: dir.to_string(),
+            root: String::new(),
             tags: EmbeddedTags::default(),
         };
         let files = vec![
@@ -983,20 +1120,136 @@ mod tests {
             path: "/b/Author/Book/00-intro.mp3".to_string(),
             filename: "00-intro.mp3".to_string(),
             parent_dir: "/b/Author/Book".to_string(),
+            root: String::new(),
             tags: EmbeddedTags::default(),
         };
         let tagged = RawFile {
             path: "/b/Author/Book/01-ch.mp3".to_string(),
             filename: "01-ch.mp3".to_string(),
             parent_dir: "/b/Author/Book".to_string(),
+            root: String::new(),
             tags: EmbeddedTags {
                 album: Some("Real Title".to_string()),
                 author: Some("Real Author".to_string()),
                 ..Default::default()
             },
         };
-        let meta = pick_metadata(&[untagged, tagged], "/b/Author/Book", "Book");
+        let meta = pick_metadata(&[untagged, tagged], "/b/Author/Book", "Book", "");
         assert_eq!(meta.title, "Real Title");
         assert_eq!(meta.author, "Real Author");
+    }
+
+    // ---- Separate books sharing one folder ----
+
+    fn raw(dir: &str, fname: &str, tags: EmbeddedTags) -> RawFile {
+        RawFile {
+            path: format!("{}/{}", dir, fname),
+            filename: fname.to_string(),
+            parent_dir: dir.to_string(),
+            root: String::new(),
+            tags,
+        }
+    }
+
+    fn names(groups: &[BookGroup]) -> Vec<String> {
+        let mut v: Vec<String> = groups.iter().map(|g| g.metadata.title.clone()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn single_file_books_in_one_folder_are_separate() {
+        let d = "/audiobooks/Stephen King";
+        let groups = group_files(vec![
+            raw(d, "It.m4b", EmbeddedTags::default()),
+            raw(d, "Carrie.m4b", EmbeddedTags::default()),
+        ]);
+        assert_eq!(groups.len(), 2, "two m4b books must not merge");
+        assert_eq!(names(&groups), vec!["Carrie", "It"]);
+        for g in &groups {
+            assert_eq!(g.files.len(), 1);
+            assert_eq!(g.metadata.author, "Stephen King");
+        }
+    }
+
+    #[test]
+    fn tagged_m4b_books_in_one_folder_are_separate() {
+        let d = "/audiobooks/Stephen King";
+        let t = |title: &str| EmbeddedTags { title: Some(title.into()), album: Some(title.into()), ..Default::default() };
+        let groups = group_files(vec![raw(d, "a.m4b", t("It")), raw(d, "b.m4b", t("Carrie"))]);
+        assert_eq!(names(&groups), vec!["Carrie", "It"]);
+    }
+
+    #[test]
+    fn mp3_books_with_distinct_albums_are_separate() {
+        let d = "/audiobooks/Mixed";
+        let a = |album: &str, title: &str| EmbeddedTags { album: Some(album.into()), title: Some(title.into()), ..Default::default() };
+        let groups = group_files(vec![
+            raw(d, "01.mp3", a("Book One", "Chapter 1")),
+            raw(d, "02.mp3", a("Book One", "Chapter 2")),
+            raw(d, "03.mp3", a("Book Two", "Chapter 1")),
+        ]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(names(&groups), vec!["Book One", "Book Two"]);
+    }
+
+    #[test]
+    fn multi_part_mp3_set_stays_one_book() {
+        let d = "/audiobooks/Stephen King/The Stand";
+        let ch = |title: &str| EmbeddedTags { album: Some("The Stand".into()), title: Some(title.into()), ..Default::default() };
+        let groups = group_files(vec![
+            raw(d, "00 intro.mp3", EmbeddedTags::default()),
+            raw(d, "01.mp3", ch("Chapter 1")),
+            raw(d, "02.mp3", ch("Chapter 2")),
+            raw(d, "03.mp3", ch("Chapter 3")),
+        ]);
+        assert_eq!(groups.len(), 1, "one book's tracks must stay grouped");
+        assert_eq!(groups[0].files.len(), 4);
+        // Untagged mp3 tracks with no album stay together too.
+        let groups = group_files(vec![
+            raw(d, "track01.mp3", EmbeddedTags::default()),
+            raw(d, "track02.mp3", EmbeddedTags::default()),
+        ]);
+        assert_eq!(groups.len(), 1);
+    }
+
+    #[test]
+    fn multi_part_m4b_of_one_book_stays_grouped() {
+        let d = "/audiobooks/Author Name/Big Book";
+        let groups = group_files(vec![
+            raw(d, "Big Book Part 1.m4b", EmbeddedTags::default()),
+            raw(d, "Big Book Part 2.m4b", EmbeddedTags::default()),
+        ]);
+        assert_eq!(groups.len(), 1);
+        let groups = group_files(vec![
+            raw(d, "01.m4b", EmbeddedTags::default()),
+            raw(d, "02.m4b", EmbeddedTags::default()),
+        ]);
+        assert_eq!(groups.len(), 1);
+    }
+
+    // ---- Container folders / scan root never become the author ----
+
+    #[test]
+    fn container_folders_are_not_authors() {
+        let h = parse_folder_hierarchy("/Users/x/Downloads/Stephen King/It");
+        assert_eq!(h.author.as_deref(), Some("Stephen King"));
+        assert_eq!(h.series, None);
+        let h = parse_folder_hierarchy(r"C:\Users\Philip\Desktop\The Talisman");
+        assert_eq!(h.author, None);
+        assert_eq!(h.series, None);
+        let h = parse_folder_hierarchy("/home/philip/Music/Some Book");
+        assert_eq!(h.author, None);
+        let h = parse_folder_hierarchy("/Volumes/My Drive/Documents/Neil Gaiman/Coraline");
+        assert_eq!(h.author.as_deref(), Some("Neil Gaiman"));
+    }
+
+    #[test]
+    fn folders_at_or_above_scan_root_are_ignored() {
+        let h = parse_folder_hierarchy_in("/srv/Collections/Shelf Two/Coraline", "/srv/Collections/Shelf Two");
+        assert_eq!(h.author, None, "the scan root itself is not an author");
+        assert_eq!(h.series, None);
+        let h = parse_folder_hierarchy_in("/srv/Collections/Shelf Two/Neil Gaiman/Coraline", "/srv/Collections/Shelf Two/");
+        assert_eq!(h.author.as_deref(), Some("Neil Gaiman"));
     }
 }
