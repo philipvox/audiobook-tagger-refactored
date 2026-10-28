@@ -806,6 +806,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       clearFileStatuses();
     } catch (error) {
       console.error('Rescan failed:', error);
+      // v2.2.3: was console-only; an unimplemented rescan looked like success.
+      toast.error('Rescan Failed', String(error?.message || error));
     }
   };
 
@@ -3082,10 +3084,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const groupsToAnalyze = selectedGroupIds.size > 0 || allSelected
       ? (allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id)))
       : groups; // Fall back to all groups if no selection
-    await runSeriesAnalysis(groupsToAnalyze);
+    try {
+      await runSeriesAnalysis(groupsToAnalyze);
+    } catch (error) {
+      toast.error('Series Analysis Failed', String(error?.message || error));
+      return;
+    }
     // Show modal after analysis completes
     modals.open('series');
-  }, [groups, runSeriesAnalysis, selectedGroupIds, allSelected]);
+  }, [groups, runSeriesAnalysis, selectedGroupIds, allSelected, toast]);
 
   // ✅ Apply selected series fixes from the review modal
   const handleApplySeriesFixes = useCallback(async (fixes) => {
@@ -3093,12 +3100,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     try {
       const updatedGroups = await applySeriesFixes(groups, fixes);
+      if (updatedGroups.error) {
+        toast.error('Series Fixes Failed', updatedGroups.error);
+        return;
+      }
       setGroups(updatedGroups.updatedGroups);
       clearValidation();
     } catch (error) {
       console.error('Failed to apply series fixes:', error);
+      toast.error('Series Fixes Failed', String(error?.message || error));
     }
-  }, [groups, setGroups, applySeriesFixes, clearValidation]);
+  }, [groups, setGroups, applySeriesFixes, clearValidation, toast]);
 
   // ✅ Cancel any running scan
   const handleCancelScan = useCallback(async () => {
@@ -3234,6 +3246,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // Apply series fixes if selected (async)
     if (bfData.selectedTypes.series && seriesAnalysis?.all_fixes?.length > 0) {
       const seriesResult = await applySeriesFixes(currentGroups, seriesAnalysis.all_fixes);
+      if (seriesResult.error) toast.error('Series Fixes Failed', seriesResult.error);
       currentGroups = seriesResult.updatedGroups;
       totalFixes += seriesResult.fixCount;
       if (seriesResult.fixCount > 0) appliedTypes.push('series');

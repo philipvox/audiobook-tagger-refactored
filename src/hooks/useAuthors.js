@@ -97,7 +97,7 @@ export function useAuthors() {
       setAnalysis(result);
       return result;
     } catch (err) {
-      setError(typeof err === 'string' ? err : String(err));
+      setError(typeof err === 'string' ? err : (err?.message || String(err)));
       return null;
     } finally {
       setAnalyzing(false);
@@ -402,11 +402,15 @@ export function useAuthors() {
           totalFailed += failed;
           allErrors = allErrors.concat(errors);
 
+          // v2.2.3: only ids that are actually staged count. A batch-level
+          // error ({ id: 'config' } when ABS is not configured) used to
+          // "identify" a failure, so every real staged edit was cleared.
+          const stagedIds = new Set(changeEntries.map(([id]) => id));
           const idsFromErrors = errors
             .map(e => (e && typeof e === 'object' ? (e.id ?? e.absId ?? null) : null))
-            .filter(id => id != null);
+            .filter(id => id != null && stagedIds.has(id));
 
-          if (failed > 0 && idsFromErrors.length === 0) {
+          if (failed > 0 && idsFromErrors.length < failed) {
             // The backend reported failures but didn't say which ids failed -
             // we can't prove any of them succeeded, so keep them all staged.
             changeEntries.forEach(([id]) => failedChangeIds.add(id));
@@ -449,12 +453,19 @@ export function useAuthors() {
         return next;
       });
 
-      // Reload to get fresh state
+      // Reload to get fresh state (clears `error`, so report failures after).
       await loadAuthors();
+
+      // v2.2.3: surface failures on the page, not only in the return value.
+      if (totalFailed > 0) {
+        const first = allErrors[0];
+        const msg = first && typeof first === 'object' ? (first.error || first.message) : first;
+        setError(`Failed to push ${totalFailed} change(s); they remain staged.${msg ? ` ${msg}` : ''}`);
+      }
 
       return { updated: totalUpdated, failed: totalFailed, errors: allErrors };
     } catch (err) {
-      setError(typeof err === 'string' ? err : String(err));
+      setError(typeof err === 'string' ? err : (err?.message || String(err)));
       return null;
     } finally {
       setPushing(false);

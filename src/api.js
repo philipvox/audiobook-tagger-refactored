@@ -178,9 +178,14 @@ export async function callBackend(cmd, args = {}) {
     return handler(args);
   }
 
-  // Commands that aren't wired up yet, return a stub instead of crashing
-  console.warn(`Command '${cmd}' not available in web version`);
-  return { _stub: true, message: `'${cmd}' is not available in the web version.` };
+  // v2.2.3: commands with no implementation THROW. Returning a stub object
+  // let callers report success for work that never happened (e.g. "Rescan"
+  // on ABS books, series analysis). Every caller must surface this error.
+  console.warn(`Command '${cmd}' is not implemented`);
+  const err = new Error(`'${cmd}' is not available in this version of Audiobook Tagger.`);
+  err.code = 'NOT_IMPLEMENTED';
+  err.command = cmd;
+  throw err;
 }
 
 // ============================================================================

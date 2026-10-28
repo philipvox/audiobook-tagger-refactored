@@ -497,6 +497,8 @@ export function AppProvider({ children }) {
       });
     } catch (error) {
       console.error('Series analysis failed:', error);
+      // v2.2.3: rethrow so the page can tell the user (was silent).
+      throw error;
     } finally {
       unlisten();
       setAnalyzingSeries(false);
@@ -516,7 +518,8 @@ export function AppProvider({ children }) {
       return { updatedGroups, fixCount: fixes.length };
     } catch (error) {
       console.error('Failed to apply series fixes:', error);
-      return { updatedGroups: currentGroups, fixCount: 0 };
+      // v2.2.3: report the failure instead of a silent zero-fix result.
+      return { updatedGroups: currentGroups, fixCount: 0, error: String(error?.message || error) };
     }
   }, []);
 

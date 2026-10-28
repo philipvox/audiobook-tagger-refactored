@@ -671,12 +671,18 @@ export function useScan() {
       const enrichStr = enrichWithCustomProviders ? ' + custom providers' : '';
 
       const result = await callBackend('rescan_abs_imports', { request });
+      // v2.2.3: never report success for a rescan that returned nothing.
+      if (!result || !Array.isArray(result.groups)) {
+        throw new Error('Rescan returned no results; nothing was updated.');
+      }
 
       // Update groups with rescanned data (preserve position in list)
       if (result && result.groups) {
         const updatedMap = new Map(result.groups.map(g => [g.id, g]));
+        // Merge rather than replace so the ABS import snapshot (abs_original)
+        // survives a rescan.
         setGroups(prevGroups =>
-          prevGroups.map(g => updatedMap.get(g.id) || g)
+          prevGroups.map(g => (updatedMap.has(g.id) ? { ...g, ...updatedMap.get(g.id), abs_original: g.abs_original } : g))
         );
 
         // Auto-push to ABS if enabled

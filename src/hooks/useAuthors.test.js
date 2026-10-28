@@ -136,6 +136,26 @@ describe('useAuthors.pushToAbs (H5/M-8)', () => {
     expect(pushResult.failed).toBe(1);
   });
 
+  it('v2.2.3: keeps every staged change when ABS is not configured (config error, not a per-author id)', async () => {
+    mockCallBackend.mockImplementation(async (cmd) => {
+      if (cmd === 'get_abs_authors') return [];
+      if (cmd === 'push_author_changes_to_abs') {
+        return { updated: 0, failed: 1, errors: [{ id: 'config', error: 'ABS is not configured: missing base URL or API token' }] };
+      }
+      return {};
+    });
+    const { result } = renderHook(() => useAuthors());
+    act(() => {
+      result.current.stageChange('a1', 'name', 'A1 New');
+      result.current.stageChange('a2', 'name', 'A2 New');
+    });
+    let pushResult;
+    await act(async () => { pushResult = await result.current.pushToAbs(); });
+    expect(result.current.pendingChanges).toEqual({ a1: { name: 'A1 New' }, a2: { name: 'A2 New' } });
+    expect(pushResult.failed).toBeGreaterThan(0);
+    expect(result.current.error).toMatch(/not configured/);
+  });
+
   it('clears all staged changes when the backend confirms full success', async () => {
     mockCallBackend.mockImplementation(async (cmd) => {
       if (cmd === 'get_abs_authors') return [];

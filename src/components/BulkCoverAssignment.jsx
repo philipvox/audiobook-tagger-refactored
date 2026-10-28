@@ -2,8 +2,10 @@ import { useState, useCallback, useEffect } from 'react';
 import { callBackend, pickPath } from '../api';
 import { X, Upload, Image as ImageIcon, Check, AlertCircle, Sparkles, Trash2, RefreshCw } from 'lucide-react';
 import { assignCovers } from '../lib/coverMatch';
+import { useToast } from './Toast';
 
 export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversAssigned }) {
+  const toast = useToast();
   const [droppedImages, setDroppedImages] = useState([]);
   const [assignments, setAssignments] = useState({}); // groupId -> { imageIndex, score, manual? }
   const [isDragging, setIsDragging] = useState(false);
@@ -119,6 +121,7 @@ export function BulkCoverAssignment({ isOpen, onClose, selectedGroups, onCoversA
       });
     } catch (error) {
       console.error('Failed to add files:', error);
+      toast.error('Could Not Add Images', String(error?.message || error));
     }
   };
 
