@@ -693,7 +693,10 @@ export function useScan() {
           }));
 
           try {
-            pushOutcome = await handlePushAbsImports(result.groups);
+            const snapById = new Map(selectedGroups.map(sg => [sg.id, sg.abs_original]));
+            pushOutcome = await handlePushAbsImports(
+              result.groups.map(rg => ({ ...rg, abs_original: rg.abs_original || snapById.get(rg.id) || null }))
+            );
           } catch (pushError) {
             console.error('Auto-push failed:', pushError);
             pushOutcome = { updated: 0, failed: result.groups.length, errors: [String(pushError?.message || pushError)] };
