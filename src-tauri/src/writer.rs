@@ -230,6 +230,18 @@ struct FileWriteOutcome {
 }
 
 fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
+    write_one_file_recorded(file, backup, &mut |_| Ok(()))
+}
+
+/// `record` persists the undo-journal entry for this file. It runs AFTER the
+/// backup lands and BEFORE the original is touched; if it fails the backup is
+/// removed and the file is left unmodified, so there is never a modified file
+/// that undo does not know about.
+fn write_one_file_recorded(
+    file: &WriteFile,
+    backup: bool,
+    record: &mut dyn FnMut(&JournalEntry) -> Result<(), String>,
+) -> FileWriteOutcome {
     let path = PathBuf::from(&file.path);
     if !path.exists() {
         return FileWriteOutcome {
@@ -250,10 +262,19 @@ fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
                 skipped: Vec::new(),
             };
         }
-        journal = Some(JournalEntry {
+        let entry = JournalEntry {
             original_path: file.path.clone(),
             backup_path: bak.to_string_lossy().to_string(),
-        });
+        };
+        if let Err(e) = record(&entry) {
+            let _ = fs::remove_file(&bak);
+            return FileWriteOutcome {
+                result: Err(format!("could not record undo journal, file left unchanged: {e}")),
+                journal: None,
+                skipped: Vec::new(),
+            };
+        }
+        journal = Some(entry);
     }
 
     // Mutate a temp copy, then atomically swap it in (see write_tags_atomically).
@@ -429,11 +450,16 @@ fn write_tags_in_place(path: &Path, changes: &HashMap<String, Value>) -> Result<
 
 #[tauri::command]
 pub fn write_tags(request: WriteRequest) -> Value {
+    write_tags_at(request, &default_journal_path())
+}
+
+pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
     let mut success = 0usize;
     let mut failed = 0usize;
     let mut errors: Vec<Value> = Vec::new();
     let mut results: Vec<Value> = Vec::new();
     let mut journal_entries: Vec<JournalEntry> = Vec::new();
+    let timestamp = now_secs();
 
     // Iterate file_ids to preserve the caller's order; fall back to the map keys
     // for any ids the caller omitted from file_ids.
@@ -442,6 +468,19 @@ pub fn write_tags(request: WriteRequest) -> Value {
         if !ordered_ids.contains(id) {
             ordered_ids.push(id.clone());
         }
+    }
+
+    // Every write starts a fresh journal so a backup=false write leaves
+    // get_undo_status.available=false. If the stale journal cannot be cleared,
+    // undo would restore the PREVIOUS batch over this one - refuse to write.
+    if let Err(e) = clear_journal(journal_path) {
+        let msg = format!("could not reset undo journal: {e}");
+        for id in &ordered_ids {
+            let path = request.files.get(id).map(|f| f.path.clone()).unwrap_or_default();
+            errors.push(json!({ "file_id": id, "path": path, "error": msg }));
+            results.push(json!({ "file_id": id, "path": path, "status": "failed", "skipped_fields": [] }));
+        }
+        return json!({ "success": 0, "failed": ordered_ids.len(), "errors": errors, "results": results });
     }
 
     for id in &ordered_ids {
@@ -455,11 +494,18 @@ pub fn write_tags(request: WriteRequest) -> Value {
             }
         };
 
+        // Persist the journal (including this file's entry) BEFORE the file is
+        // modified, so a crash mid-batch still leaves every touched file undoable.
+        let mut record = |entry: &JournalEntry| -> Result<(), String> {
+            let mut entries = journal_entries.clone();
+            entries.push(entry.clone());
+            write_journal(journal_path, &UndoJournal { timestamp, entries })
+        };
         let FileWriteOutcome {
             result,
             journal,
             skipped,
-        } = write_one_file(file, request.backup);
+        } = write_one_file_recorded(file, request.backup, &mut record);
         if let Some(entry) = journal {
             journal_entries.push(entry);
         }
@@ -474,18 +520,6 @@ pub fn write_tags(request: WriteRequest) -> Value {
                 results.push(json!({ "file_id": id, "path": file.path, "status": "failed", "skipped_fields": skipped }));
             }
         }
-    }
-
-    // Journal handling: overwrite/clear on EVERY write so a backup=false write
-    // (or one where all backups failed) leaves get_undo_status.available=false.
-    let journal_path = default_journal_path();
-    let _ = clear_journal(&journal_path);
-    if request.backup && !journal_entries.is_empty() {
-        let journal = UndoJournal {
-            timestamp: now_secs(),
-            entries: journal_entries,
-        };
-        let _ = write_journal(&journal_path, &journal);
     }
 
     json!({
@@ -621,15 +655,15 @@ pub fn undo_last_write() -> Value {
     // get_undo_status still reports them and a retry can restore them; only clear
     // the journal outright when every file restored. Preserve the original
     // timestamp so undo-availability age still reflects the original write.
-    if failed.is_empty() {
-        let _ = clear_journal(&journal_path);
+    let journal_result = if failed.is_empty() {
+        clear_journal(&journal_path)
     } else {
         let remaining = UndoJournal {
             timestamp: journal.timestamp,
             entries: failed.iter().map(|(entry, _)| entry.clone()).collect(),
         };
-        let _ = write_journal(&journal_path, &remaining);
-    }
+        write_journal(&journal_path, &remaining)
+    };
 
     let results: Vec<Value> = restored
         .iter()
@@ -647,6 +681,9 @@ pub fn undo_last_write() -> Value {
     // error`): a numeric `success` (even 0) is never `=== false`, and a partial
     // restore that reported success would tell the user everything reverted while
     // a failed file's backup still sits unrestored. Report truthfully.
+    if let Err(e) = journal_result {
+        resp["journal_error"] = json!(format!("undo journal could not be updated: {e}"));
+    }
     if failed_count > 0 {
         let first_reason = failed
             .first()
@@ -667,8 +704,10 @@ pub fn undo_last_write() -> Value {
 #[tauri::command]
 pub fn clear_undo_state() -> Value {
     let journal_path = default_journal_path();
-    let _ = clear_journal(&journal_path);
-    json!({ "cleared": true })
+    match clear_journal(&journal_path) {
+        Ok(()) => json!({ "cleared": true }),
+        Err(e) => json!({ "cleared": false, "error": format!("could not clear undo journal: {e}") }),
+    }
 }
 
 // ============================================================================
@@ -820,12 +859,47 @@ pub fn rename_one(old_path: &str, new_path: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub fn rename_files(renames: Vec<RenamePair>) -> Value {
+    rename_files_at(renames, &default_journal_path())
+}
+
+/// Point any undo-journal entry for `old_path` at `new_path`, so undoing a
+/// write after a rename restores the RENAMED file instead of resurrecting the
+/// old name next to it (a duplicate). Ok(false) when no entry matched.
+fn retarget_journal(journal_path: &Path, old_path: &str, new_path: &str) -> Result<bool, String> {
+    let mut journal = match read_journal(journal_path) {
+        Some(j) => j,
+        None => return Ok(false),
+    };
+    let mut hit = false;
+    for e in journal.entries.iter_mut() {
+        if e.original_path == old_path {
+            e.original_path = new_path.to_string();
+            hit = true;
+        }
+    }
+    if hit {
+        write_journal(journal_path, &journal)?;
+    }
+    Ok(hit)
+}
+
+pub fn rename_files_at(renames: Vec<RenamePair>, journal_path: &Path) -> Value {
     let mut renamed: Vec<Value> = Vec::new();
     let mut results: Vec<Value> = Vec::new();
     let mut failed = 0usize;
 
     for pair in &renames {
-        match rename_one(&pair.old_path, &pair.new_path) {
+        let outcome = rename_one(&pair.old_path, &pair.new_path).and_then(|()| {
+            match retarget_journal(journal_path, &pair.old_path, &pair.new_path) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    // Could not keep undo consistent: put the file back.
+                    let _ = fs::rename(&pair.new_path, &pair.old_path);
+                    Err(format!("could not update undo journal, rename reverted: {e}"))
+                }
+            }
+        });
+        match outcome {
             Ok(()) => {
                 renamed.push(json!({
                     "old_path": pair.old_path,
@@ -1307,6 +1381,85 @@ mod tests {
         let after = ffprobe(&mp3);
         assert!(after.contains("TAG:title=New Title"), "title not written:\n{after}");
         assert!(after.contains("B00TEST123"), "ASIN lost:\n{after}");
+    }
+
+    fn make_mp3(dir: &Path, name: &str) -> PathBuf {
+        run_ffmpeg(dir, &["-f", "lavfi", "-i", "sine=d=1", "-c:a", "libmp3lame", "-metadata", "title=Orig", name]);
+        dir.join(name)
+    }
+
+    fn one_file_request(path: &Path, backup: bool) -> WriteRequest {
+        let mut files = HashMap::new();
+        files.insert("f1".to_string(), WriteFile { path: path.to_string_lossy().to_string(), changes: title_change("New") });
+        WriteRequest { file_ids: vec!["f1".into()], files, backup }
+    }
+
+    #[test]
+    fn journal_entry_is_on_disk_before_the_file_is_modified() {
+        if !have_ffmpeg() { return; }
+        let dir = tempdir().unwrap();
+        let mp3 = make_mp3(dir.path(), "a.mp3");
+        let original = fs::read(&mp3).unwrap();
+        // A journal that can be cleared (absent) but not written: read-only dir.
+        let ro = dir.path().join("ro");
+        fs::create_dir(&ro).unwrap();
+        let journal_path = ro.join("undo.json");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        #[cfg(not(unix))]
+        return;
+
+        let res = write_tags_at(one_file_request(&mp3, true), &journal_path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&ro, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(res["errors"][0]["error"].as_str().unwrap_or("").contains("undo journal"), "{res}");
+        assert_eq!(res["success"], json!(0), "{res}");
+        assert_eq!(res["failed"], json!(1), "{res}");
+        assert_eq!(fs::read(&mp3).unwrap(), original, "file modified without an undo record");
+        assert!(!backup_path_for(&mp3).exists(), "orphan .bak left behind");
+    }
+
+    #[test]
+    fn write_records_journal_per_file() {
+        if !have_ffmpeg() { return; }
+        let dir = tempdir().unwrap();
+        let mp3 = make_mp3(dir.path(), "a.mp3");
+        let journal_path = dir.path().join("undo.json");
+        let res = write_tags_at(one_file_request(&mp3, true), &journal_path);
+        assert_eq!(res["success"], json!(1), "{res}");
+        let j = read_journal(&journal_path).expect("journal");
+        assert_eq!(j.entries.len(), 1);
+        assert_eq!(j.entries[0].original_path, mp3.to_string_lossy());
+    }
+
+    #[test]
+    fn undo_after_rename_restores_renamed_file_without_duplicate() {
+        if !have_ffmpeg() { return; }
+        let dir = tempdir().unwrap();
+        let mp3 = make_mp3(dir.path(), "a.mp3");
+        let original = fs::read(&mp3).unwrap();
+        let journal_path = dir.path().join("undo.json");
+        let res = write_tags_at(one_file_request(&mp3, true), &journal_path);
+        assert_eq!(res["success"], json!(1), "{res}");
+
+        let renamed = dir.path().join("b.mp3");
+        let r = rename_files_at(
+            vec![RenamePair { old_path: mp3.to_string_lossy().to_string(), new_path: renamed.to_string_lossy().to_string() }],
+            &journal_path,
+        );
+        assert_eq!(r["failed"], json!(0), "{r}");
+
+        let (restored, failed) = restore_from_journal(&read_journal(&journal_path).unwrap());
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(restored, vec![renamed.to_string_lossy().to_string()]);
+        assert!(!mp3.exists(), "undo resurrected the old name (duplicate)");
+        assert_eq!(fs::read(&renamed).unwrap(), original);
     }
 
     // ---- template formatting ----
