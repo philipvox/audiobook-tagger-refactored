@@ -30,3 +30,25 @@ describe('RenamePreviewModal (L9 empty-templates state)', () => {
     expect(mockCallBackend).not.toHaveBeenCalledWith('preview_rename', expect.anything());
   });
 });
+
+describe('RenamePreviewModal (v2.2.3 multi-file books)', () => {
+  it('passes each file part number and the group file count to preview_rename', async () => {
+    mockCallBackend.mockImplementation(async (cmd) => {
+      if (cmd === 'get_rename_templates') return [{ id: 't', name: 'T', file_template: '{title}' }];
+      return { old_path: '/a/1.mp3', new_path: '/a/Book.mp3', changed: true };
+    });
+    render(
+      <RenamePreviewModal
+        files={[
+          { fileId: 'f1', path: '/a/1.mp3', metadata: { title: 'Book' }, part: 1, totalParts: 2 },
+          { fileId: 'f2', path: '/a/2.mp3', metadata: { title: 'Book' }, part: 2, totalParts: 2 },
+        ]}
+        onConfirm={() => {}}
+        onCancel={() => {}}
+      />
+    );
+    await vi.waitFor(() => {
+      expect(mockCallBackend).toHaveBeenCalledWith('preview_rename', expect.objectContaining({ filePath: '/a/2.mp3', part: 2, totalParts: 2 }));
+    }, { timeout: 2000 });
+  });
+});

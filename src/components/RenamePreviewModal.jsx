@@ -82,6 +82,10 @@ export function RenamePreviewModal({ files = [], onConfirm, onCancel }) {
             filePath: file.path,
             metadata: file.metadata,
             template: currentTemplate,
+            // v2.2.3: multi-file books get a part number so files don't all
+            // render to the same name.
+            part: file.part ?? null,
+            totalParts: file.totalParts ?? null,
           });
           results.push({ fileId: file.fileId, ...preview });
         } catch (error) {

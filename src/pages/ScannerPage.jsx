@@ -140,7 +140,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       // no longer accurate for any file - clear it.
       clearFileStatuses();
 
-      toast.success('Changes Reverted', 'Restored the files from the last write. Rescan to refresh the on-screen tags.');
+      if (result.journal_error) {
+        // v2.2.3: files were restored but the undo journal could not be updated.
+        toast.warning('Changes Reverted', `Restored the files, but the undo record could not be updated: ${result.journal_error}`);
+      } else {
+        toast.success('Changes Reverted', 'Restored the files from the last write. Rescan to refresh the on-screen tags.');
+      }
     } catch (error) {
       console.error('Undo failed:', error);
       toast.error('Undo Failed', String(error?.message || error));
@@ -153,12 +158,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const dismissUndo = useCallback(async () => {
     setShowUndoToast(false);
     try {
-      await callBackend('clear_undo_state');
+      const result = await callBackend('clear_undo_state');
+      // v2.2.3: the backend reports a failed journal clear instead of hiding it.
+      if (result && result.cleared === false) {
+        toast.error('Could Not Clear Undo', String(result.error || 'The undo record could not be removed.'));
+        return;
+      }
       setUndoStatus(null);
     } catch (error) {
       console.error('Failed to clear undo state:', error);
+      toast.error('Could Not Clear Undo', String(error?.message || error));
     }
-  }, []);
+  }, [toast]);
 
   // #58 restore prompt. Restore drops the saved work back into the workspace;
   // Discard is the only path that deletes a snapshot the user has not replaced,
@@ -3698,11 +3709,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             const fileIds = getSelectedFileIds(groups);
             const out = [];
             for (const group of groups) {
-              for (const file of (group.files || [])) {
+              const groupFiles = group.files || [];
+              groupFiles.forEach((file, index) => {
                 if (file.id != null && fileIds.has(file.id)) {
-                  out.push({ fileId: file.id, path: file.path, metadata: group.metadata });
+                  out.push({
+                    fileId: file.id, path: file.path, metadata: group.metadata,
+                    part: index + 1, totalParts: groupFiles.length,
+                  });
                 }
-              }
+              });
             }
             return out;
           })()}
