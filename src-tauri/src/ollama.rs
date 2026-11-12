@@ -270,10 +270,68 @@ pub async fn ollama_get_disk_usage() -> Result<u64, String> {
     Ok(total)
 }
 
+/// Held for the whole of a start, so two starts never overlap.
+static START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// What a start has to do.
+#[derive(Debug, PartialEq)]
+enum StartPlan {
+    /// The server already answers.
+    AlreadyRunning,
+    /// An Ollama this app started is alive but has not answered yet: wait
+    /// for that one. Spawning another would only fail on the port and
+    /// replace the stored PID with a process that is already gone.
+    WaitFor(u32),
+    Spawn,
+}
+
+fn start_plan(running: bool, live_child: Option<u32>) -> StartPlan {
+    match (running, live_child) {
+        (true, _) => StartPlan::AlreadyRunning,
+        (false, Some(pid)) => StartPlan::WaitFor(pid),
+        (false, None) => StartPlan::Spawn,
+    }
+}
+
+/// The PID of the Ollama this app started, if that process is still there.
+/// A child spawned by this run is reaped (and its PID cleared) when it exits;
+/// an adopted one is checked, and forgotten if it is gone.
+fn live_child_pid() -> Option<u32> {
+    let pid = (*OLLAMA_PID.lock().ok()?)?;
+    if !ADOPTED.load(Ordering::SeqCst) {
+        return Some(pid);
+    }
+    if ollama_binary_path().map(|bin| is_app_ollama(pid, &bin)).unwrap_or(false) {
+        return Some(pid);
+    }
+    clear_pid_if(pid);
+    ADOPTED.store(false, Ordering::SeqCst);
+    if let Ok(pid_file) = pid_file_path() {
+        remove_pid_file_if(&pid_file, pid);
+    }
+    None
+}
+
+/// Poll until the server at `base` answers, for 15 seconds.
+async fn wait_until_responsive(base: &str, pid: u32) -> Result<String, String> {
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if is_running(base).await {
+            return Ok(format!("Ollama started (PID {})", pid));
+        }
+    }
+    Err("Ollama started but didn't become responsive within 15 seconds".to_string())
+}
+
 #[tauri::command]
 pub async fn ollama_start(base_url: Option<String>) -> Result<String, String> {
     let base = effective_base(base_url.as_deref().unwrap_or(""));
-    if is_running(&base).await {
+    // One start at a time: a second call made while the first is still
+    // waiting for the server waits here, then finds that server running (or
+    // still coming up) instead of spawning another.
+    let _starting = START_LOCK.lock().await;
+    let plan = start_plan(is_running(&base).await, live_child_pid());
+    if plan == StartPlan::AlreadyRunning {
         return Ok("Ollama is already running".to_string());
     }
     // Never spawn a local server for a remotely-configured Ollama.
@@ -281,6 +339,9 @@ pub async fn ollama_start(base_url: Option<String>) -> Result<String, String> {
         return Err(
             "Configured Ollama is remote; start it on the remote host instead.".to_string(),
         );
+    }
+    if let StartPlan::WaitFor(pid) = plan {
+        return wait_until_responsive(&base, pid).await;
     }
     let binary = find_best_binary()
         .ok_or_else(|| "Ollama is not installed. Install it via the button above, or install Ollama system-wide from https://ollama.com/download".to_string())?;
@@ -318,13 +379,7 @@ pub async fn ollama_start(base_url: Option<String>) -> Result<String, String> {
         }
     });
 
-    for _ in 0..30 {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if is_running(&base).await {
-            return Ok(format!("Ollama started (PID {})", pid));
-        }
-    }
-    Err("Ollama started but didn't become responsive within 15 seconds".to_string())
+    wait_until_responsive(&base, pid).await
 }
 
 /// Set when OLLAMA_PID came from a previous run's PID file rather than a child
@@ -446,8 +501,10 @@ pub fn kill_spawned_ollama() -> bool {
             }
             #[cfg(windows)]
             {
+                // /T: the whole tree. `ollama serve` runs each loaded model
+                // in a child process, which /PID alone would leave running.
                 let _ = crate::whisper::std_command("taskkill")
-                    .args(["/PID", &pid.to_string(), "/F"])
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
                     .output();
             }
             if let Some(f) = &pid_file {
@@ -615,11 +672,27 @@ fn symlink_stays_inside(link: &Path, target: &Path) -> bool {
     true
 }
 
+/// Where the runtime sits inside the macOS app zip. Only this directory is
+/// installed (it becomes `runtime/`).
+#[cfg_attr(not(unix), allow(dead_code))]
+const APP_RESOURCES: &str = "Ollama.app/Contents/Resources";
+
 /// Extract the macOS app zip into `dest`. The zip extraction itself is the
 /// shared `extract_zip` (zip-slip guarded); it writes symlink entries as small
-/// files holding the link text, so each symlink entry is then recreated as a
-/// real symlink. The runtime needs them: `llama-server` loads its libraries
-/// through names like `libllama.0.dylib -> libllama.0.9.0.dylib`.
+/// files holding the link text, so each symlink entry under `APP_RESOURCES`
+/// is then recreated as a real symlink. The runtime needs them:
+/// `llama-server` loads its libraries through names like
+/// `libllama.0.dylib -> libllama.0.9.0.dylib`.
+///
+/// A link must stay inside `APP_RESOURCES`, the directory that gets
+/// installed, not merely inside the archive: a link that climbs out of it
+/// would point outside the runtime once that is moved into place. It is
+/// checked twice: by its text (`symlink_stays_inside`, relative to
+/// `APP_RESOURCES`) before it is created, and, once every link exists, by
+/// resolving it on disk, which also catches a link that leaves through
+/// another link. A link that resolves nowhere fails too. Symlink entries
+/// outside `APP_RESOURCES` are not installed and stay the plain files
+/// `extract_zip` wrote.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn extract_app_zip(archive: &Path, dest: &Path) -> Result<(), String> {
     crate::whisper_local::extract_zip(archive, dest)?;
@@ -628,6 +701,7 @@ fn extract_app_zip(archive: &Path, dest: &Path) -> Result<(), String> {
         use std::io::Read;
         let file = std::fs::File::open(archive).map_err(|e| format!("Zip open error: {}", e))?;
         let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("Zip read error: {}", e))?;
+        let mut links: Vec<(PathBuf, String)> = Vec::new();
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).map_err(|e| format!("Zip entry error: {}", e))?;
             if !entry.is_symlink() {
@@ -636,17 +710,31 @@ fn extract_app_zip(archive: &Path, dest: &Path) -> Result<(), String> {
             let rel = entry
                 .enclosed_name()
                 .ok_or_else(|| format!("Zip entry has unsafe path: {}", entry.name()))?;
+            let Ok(rel_in_resources) = rel.strip_prefix(APP_RESOURCES) else {
+                continue;
+            };
             let mut target = String::new();
             entry
                 .read_to_string(&mut target)
                 .map_err(|e| format!("Zip symlink read error: {}", e))?;
             let target = PathBuf::from(target);
-            if !symlink_stays_inside(&rel, &target) {
-                return Err(format!("Zip symlink points outside the archive: {}", entry.name()));
+            if !symlink_stays_inside(rel_in_resources, &target) {
+                return Err(format!("Zip symlink points outside the runtime: {}", entry.name()));
             }
             let link = dest.join(&rel);
             std::fs::remove_file(&link).map_err(|e| format!("Symlink error: {}", e))?;
             std::os::unix::fs::symlink(&target, &link).map_err(|e| format!("Symlink error: {}", e))?;
+            links.push((link, entry.name().to_string()));
+        }
+        if !links.is_empty() {
+            let resources = std::fs::canonicalize(dest.join(APP_RESOURCES))
+                .map_err(|e| format!("Zip has symlinks but no {}: {}", APP_RESOURCES, e))?;
+            for (link, name) in &links {
+                let inside = std::fs::canonicalize(link).map(|to| to.starts_with(&resources)).unwrap_or(false);
+                if !inside {
+                    return Err(format!("Zip symlink does not resolve inside the runtime: {}", name));
+                }
+            }
         }
     }
     Ok(())
@@ -753,8 +841,9 @@ fn extract_linux_runtime(archive: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Check a staged runtime works: the binary runs (`ollama --version`) and, on
-/// macOS, its code signature verifies.
+/// Check a staged runtime before it is installed: on macOS its code
+/// signature verifies, and then the binary runs (`ollama --version`). The
+/// signature comes first, so a binary that fails it is never executed.
 #[cfg_attr(windows, allow(dead_code))]
 async fn verify_runtime_binary(binary: &Path) -> Result<(), String> {
     let never_cancelled = AtomicBool::new(false);
@@ -764,21 +853,6 @@ async fn verify_runtime_binary(binary: &Path) -> Result<(), String> {
         StepError::TimedOut => "timed out".to_string(),
         StepError::Cancelled => "cancelled".to_string(),
     };
-
-    let mut version = tokio_command(binary);
-    version.arg("--version");
-    // Point the client half at a closed port so it never talks to a user's server.
-    version.env("OLLAMA_HOST", "127.0.0.1:9");
-    let out = run_child(version, deadline, &never_cancelled)
-        .await
-        .map_err(|e| format!("Installed Ollama did not run: {}", step(e)))?;
-    if !out.status.success() {
-        return Err(format!(
-            "Installed Ollama did not run ({}): {}",
-            out.status,
-            stderr_tail(&out.stderr, 1000)
-        ));
-    }
 
     #[cfg(target_os = "macos")]
     {
@@ -796,6 +870,21 @@ async fn verify_runtime_binary(binary: &Path) -> Result<(), String> {
                 ));
             }
         }
+    }
+
+    let mut version = tokio_command(binary);
+    version.arg("--version");
+    // Point the client half at a closed port so it never talks to a user's server.
+    version.env("OLLAMA_HOST", "127.0.0.1:9");
+    let out = run_child(version, deadline, &never_cancelled)
+        .await
+        .map_err(|e| format!("Installed Ollama did not run: {}", step(e)))?;
+    if !out.status.success() {
+        return Err(format!(
+            "Installed Ollama did not run ({}): {}",
+            out.status,
+            stderr_tail(&out.stderr, 1000)
+        ));
     }
     Ok(())
 }
@@ -824,6 +913,43 @@ fn swap_into_place(staged: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Tidy up after an install that a crash or a quit cut short, before a new
+/// one starts (installs are serialised by `INSTALL_LOCK`, so nothing here
+/// belongs to a running install):
+///   - `.install-*` staging directories in `dir` are removed (each can hold
+///     the whole download, up to 1.5 GB);
+///   - if the swap stopped between moving the old runtime aside and moving
+///     the new one in, `runtime` is missing and `runtime.old` is the last
+///     working runtime: it is put back.
+/// Best effort: a leftover that cannot be removed does not block the install.
+#[cfg_attr(windows, allow(dead_code))]
+fn recover_from_interrupted_install(dir: &Path, runtime: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let staging = entry.file_name().to_string_lossy().starts_with(".install-");
+            if staging && entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    let old = runtime.with_extension("old");
+    if !runtime.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, runtime);
+    }
+}
+
+/// Held for the whole of an install: a second one would remove the first
+/// one's staging directory (`recover_from_interrupted_install`).
+#[cfg_attr(windows, allow(dead_code))]
+static INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Whether the Ollama this app tracks (`pid`) is alive and running from
+/// `binary`, the runtime an install would replace.
+#[cfg_attr(windows, allow(dead_code))]
+fn tracked_ollama_runs_from(pid: Option<u32>, binary: &Path) -> bool {
+    pid.is_some_and(|pid| is_app_ollama(pid, binary))
+}
+
 /// Download, verify, extract and check the pinned runtime in a temp directory
 /// inside `dir`, then move it to `runtime`. A failure at any step leaves the
 /// existing runtime (if any) untouched and removes the temp directory. A
@@ -831,6 +957,7 @@ fn swap_into_place(staged: &Path, dest: &Path) -> Result<(), String> {
 #[cfg_attr(windows, allow(dead_code))]
 async fn install_runtime(asset: &OllamaAsset, dir: &Path, runtime: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create ollama dir: {}", e))?;
+    recover_from_interrupted_install(dir, runtime);
     let work = tempfile::Builder::new()
         .prefix(".install-")
         .tempdir_in(dir)
@@ -860,7 +987,7 @@ async fn install_from_verified_archive(
             OllamaArchive::MacAppZip => {
                 let extracted = work_c.join("extracted");
                 extract_app_zip(&archive_c, &extracted)?;
-                let resources = extracted.join("Ollama.app").join("Contents").join("Resources");
+                let resources = extracted.join(APP_RESOURCES);
                 if !resources.join("ollama").is_file() {
                     return Err("Could not find Ollama.app/Contents/Resources/ollama in the download".to_string());
                 }
@@ -907,7 +1034,16 @@ pub async fn ollama_install() -> Result<String, String> {
             )
         })?;
         let dir = ollama_dir()?;
-        install_runtime(asset, &dir, &ollama_runtime_dir()?).await?;
+        let runtime = ollama_runtime_dir()?;
+        let _installing = INSTALL_LOCK
+            .try_lock()
+            .map_err(|_| "An Ollama install is already in progress.".to_string())?;
+        // Never swap the runtime out from under the server running from it.
+        let tracked = OLLAMA_PID.lock().ok().and_then(|guard| *guard);
+        if tracked_ollama_runs_from(tracked, &runtime_binary(&runtime)) {
+            return Err("Ollama is running. Stop it, then install it again.".to_string());
+        }
+        install_runtime(asset, &dir, &runtime).await?;
         if let Ok(legacy) = legacy_binary_path() {
             let _ = std::fs::remove_file(legacy);
         }
@@ -1052,24 +1188,46 @@ async fn pull_model(base: &str, model_name: &str, on_progress: impl FnMut(u64, u
     consume_pull_stream(resp.bytes_stream(), PULL_IDLE_TIMEOUT, on_progress).await
 }
 
+/// Longest a model delete may take. Ollama only unlinks files, so this is
+/// generous; without it a hung server left the UI waiting for ever.
+const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[tauri::command]
 pub async fn ollama_delete_model(model_name: String, base_url: Option<String>) -> Result<String, String> {
     let base = effective_base(base_url.as_deref().unwrap_or(""));
+    let model_name = model_name.trim().to_string();
+    if !is_valid_model_name(&model_name) {
+        return Err("Invalid model name".to_string());
+    }
     if !is_running(&base).await {
         return Err("Ollama is not running".to_string());
     }
-    let client = reqwest::Client::new();
+    delete_model(&base, &model_name, DELETE_TIMEOUT).await?;
+    Ok(format!("Model '{}' deleted", model_name))
+}
+
+async fn delete_model(base: &str, model_name: &str, timeout: Duration) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("HTTP error: {}", e))?;
     let resp = client
         .delete(format!("{}/api/delete", base))
         .json(&serde_json::json!({ "name": model_name }))
         .send().await
-        .map_err(|e| format!("Delete failed: {}", e))?;
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("Delete failed: Ollama did not answer within {} seconds", timeout.as_secs())
+            } else {
+                format!("Delete failed: {}", e)
+            }
+        })?;
 
     if !resp.status().is_success() {
         let text = resp.text().await.unwrap_or_default();
         return Err(format!("Delete failed: {}", text));
     }
-    Ok(format!("Model '{}' deleted", model_name))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1381,6 +1539,160 @@ mod tests {
         swap_into_place(&staged, &dest).unwrap();
         assert!(dest.join("new").exists() && !dest.join("old").exists());
         assert!(!staged.exists() && !dest.with_extension("old").exists());
+    }
+
+    // ---- Final review follow-ups ----
+
+    #[test]
+    fn a_start_never_spawns_beside_a_child_that_is_still_coming_up() {
+        assert_eq!(start_plan(true, None), StartPlan::AlreadyRunning);
+        assert_eq!(start_plan(true, Some(7)), StartPlan::AlreadyRunning);
+        assert_eq!(start_plan(false, Some(7)), StartPlan::WaitFor(7), "the second of two quick starts waits for the first's child");
+        assert_eq!(start_plan(false, None), StartPlan::Spawn);
+    }
+
+    #[test]
+    fn interrupted_install_is_tidied_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path().join("runtime");
+        let old = dir.path().join("runtime.old");
+        // A crash mid-download, and a crash mid-swap.
+        let staging = dir.path().join(".install-abc123");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("ollama-archive.partial"), b"half a download").unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("ollama"), b"the last working runtime").unwrap();
+        // Not staging directories: left alone.
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(dir.path().join(".install-notes"), b"a file").unwrap();
+
+        recover_from_interrupted_install(dir.path(), &runtime);
+        assert!(!staging.exists(), "leftover staging directory");
+        assert_eq!(std::fs::read(runtime.join("ollama")).unwrap(), b"the last working runtime", "runtime.old was not put back");
+        assert!(!old.exists());
+        assert!(dir.path().join("models").is_dir() && dir.path().join(".install-notes").is_file());
+
+        // A runtime that is in place is never replaced by an old one.
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("ollama"), b"older").unwrap();
+        recover_from_interrupted_install(dir.path(), &runtime);
+        assert_eq!(std::fs::read(runtime.join("ollama")).unwrap(), b"the last working runtime");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn reinstall_is_refused_only_while_our_ollama_runs_from_the_runtime() {
+        // This test process plays the part of the running Ollama.
+        let me = std::env::current_exe().unwrap();
+        assert!(tracked_ollama_runs_from(Some(std::process::id()), &me));
+        // Running from somewhere else (a system Ollama the app started): no conflict.
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("ollama");
+        std::fs::write(&other, b"x").unwrap();
+        assert!(!tracked_ollama_runs_from(Some(std::process::id()), &other));
+        assert!(!tracked_ollama_runs_from(None, &me));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_binary_that_fails_its_signature_check_is_never_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("i-was-run");
+        let binary = dir.path().join("ollama");
+        // Unsigned, and it leaves a mark if anything executes it.
+        std::fs::write(&binary, format!("#!/bin/sh\ntouch '{}'\necho 'ollama version is 0.0.0'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = verify_runtime_binary(&binary).await.unwrap_err();
+        assert!(err.contains("code signature"), "{err}");
+        assert!(!marker.exists(), "the binary was executed before its signature was checked");
+    }
+
+    #[cfg(unix)]
+    fn app_zip(dir: &Path, build: impl FnOnce(&mut zip::ZipWriter<std::fs::File>, zip::write::SimpleFileOptions)) -> PathBuf {
+        let archive = dir.join("Ollama-darwin.zip");
+        let mut z = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(0o755);
+        build(&mut z, opts);
+        z.finish().unwrap();
+        archive
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_zip_links_must_stay_inside_the_installed_directory() {
+        use std::io::Write;
+        const RES: &str = "Ollama.app/Contents/Resources";
+        let dir = tempfile::tempdir().unwrap();
+
+        // Inside the archive, but outside what gets installed.
+        let archive = app_zip(dir.path(), |z, opts| {
+            z.start_file("Ollama.app/Contents/Info.plist", opts).unwrap();
+            z.write_all(b"plist").unwrap();
+            z.start_file(format!("{RES}/ollama"), opts).unwrap();
+            z.write_all(b"bin").unwrap();
+            z.add_symlink(format!("{RES}/evil"), "../Info.plist", opts).unwrap();
+        });
+        let err = extract_app_zip(&archive, &dir.path().join("a")).unwrap_err();
+        assert!(err.contains("outside the runtime"), "{err}");
+
+        // Every step of its text stays inside, but it leaves through
+        // another link: only resolving it shows that.
+        let archive = app_zip(dir.path(), |z, opts| {
+            z.start_file("Ollama.app/Contents/Info.plist", opts).unwrap();
+            z.write_all(b"plist").unwrap();
+            z.start_file(format!("{RES}/sub/keep"), opts).unwrap();
+            z.write_all(b"k").unwrap();
+            z.add_symlink(format!("{RES}/sub/up"), "..", opts).unwrap();
+            z.add_symlink(format!("{RES}/sneaky"), "sub/up/../Info.plist", opts).unwrap();
+        });
+        assert!(symlink_stays_inside(Path::new("sneaky"), Path::new("sub/up/../Info.plist")), "its text alone passes");
+        let err = extract_app_zip(&archive, &dir.path().join("b")).unwrap_err();
+        assert!(err.contains("does not resolve inside the runtime"), "{err}");
+
+        // A link to nothing.
+        let archive = app_zip(dir.path(), |z, opts| {
+            z.start_file(format!("{RES}/ollama"), opts).unwrap();
+            z.write_all(b"bin").unwrap();
+            z.add_symlink(format!("{RES}/dangling"), "missing.dylib", opts).unwrap();
+        });
+        let err = extract_app_zip(&archive, &dir.path().join("c")).unwrap_err();
+        assert!(err.contains("does not resolve"), "{err}");
+
+        // A link outside the installed directory is not installed: it stays
+        // the plain file the extraction wrote.
+        let archive = app_zip(dir.path(), |z, opts| {
+            z.start_file(format!("{RES}/ollama"), opts).unwrap();
+            z.write_all(b"bin").unwrap();
+            z.add_symlink("Ollama.app/Contents/MacOS/Ollama", "../Resources/ollama", opts).unwrap();
+        });
+        let dest = dir.path().join("d");
+        extract_app_zip(&archive, &dest).unwrap();
+        let outside = dest.join("Ollama.app/Contents/MacOS/Ollama");
+        assert!(!std::fs::symlink_metadata(&outside).unwrap().file_type().is_symlink());
+    }
+
+    #[tokio::test]
+    async fn model_delete_checks_the_name_and_does_not_wait_for_ever() {
+        // The name is checked before anything is sent anywhere.
+        for bad in ["", "model; rm -rf /", "../etc/passwd", "a b"] {
+            let err = ollama_delete_model(bad.to_string(), Some("http://127.0.0.1:9".to_string())).await.unwrap_err();
+            assert_eq!(err, "Invalid model name", "{bad:?}");
+        }
+        // A server that accepts the request and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let started = std::time::Instant::now();
+        let err = delete_model(&base, "qwen3:4b", Duration::from_millis(300)).await.unwrap_err();
+        assert!(err.contains("did not answer"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     // ---- Orphan adoption ----
