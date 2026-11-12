@@ -144,3 +144,17 @@ describe('E: fix_authors_batch - AI confirms an already-valid author (force mode
     expect(result.results[0].fixed).toBe(false);
   });
 });
+
+describe('fix_authors_batch: names that are already correct are not rewritten (C-4)', () => {
+  it('reports "Don DeLillo" as unchanged and not fixed', async () => {
+    const result = await callBackend('fix_authors_batch', {
+      books: [{ id: 'b1', title: 'White Noise', current_author: 'Don DeLillo' }],
+    });
+    const r = result.results[0];
+    expect(r.author).toBe('Don DeLillo');
+    expect(r.fixed).toBe(false);
+    expect(r.source).toBe('existing');
+    expect(result.total_fixed).toBe(0);
+    expect(result.total_skipped).toBe(1);
+  });
+});

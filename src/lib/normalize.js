@@ -130,18 +130,36 @@ const SUFFIX_CANONICAL_CASE = new Map([
   ["ph.d.", "Ph.D."],
 ]);
 
-// Title-case each whitespace-separated word in a name, handling initials
-// (capitalizeNamePart), particles (kept as-is), and suffix canonical casing.
+// Re-case a name only when it is entirely upper case or entirely lower case.
+// A mixed-case name ("Don DeLillo", "CS Lewis", "Ursula K. Le Guin") is already
+// curated, so its casing is kept. Suffixes (phd, md) are still normalized to
+// their canonical form. Particles keep their given casing.
 function _titleCaseNameWords(str) {
+  const hasLetters = /[a-z]/i.test(str);
+  const recase = hasLetters && (str === str.toUpperCase() || str === str.toLowerCase());
   return str
     .split(/\s+/)
     .map((w) => {
       const lower = w.toLowerCase();
       if (SUFFIX_CANONICAL_CASE.has(lower)) return SUFFIX_CANONICAL_CASE.get(lower);
+      if (!recase) return w;
       if (NAME_PARTICLES.has(lower)) return w;
       return capitalizeNamePart(lower);
     })
     .join(" ");
+}
+
+// A "Last, First" comma pair is one inverted name only when the surname side is
+// a single word and the given-name side is a single word or bare initials
+// ("Tolkien, J. R. R."). "Homer, Emily Wilson" is two co-authors.
+const _wordCount = (s) => s.split(/\s+/).filter(Boolean).length;
+function _isGivenNameSide(s) {
+  const words = s.split(/\s+/).filter(Boolean);
+  if (words.length === 1) return true;
+  return words.length > 1 && words.every((w) => /^[A-Za-z]\.?$/.test(w));
+}
+function _isInvertedPair(last, first) {
+  return _wordCount(last) === 1 && _isGivenNameSide(first);
 }
 
 // =============================================================================
@@ -360,43 +378,34 @@ export function cleanAuthorName(name) {
   result = result.replace(/^["']|["']$/g, "").trim();
 
   // Handle "Last, First" / "Last, First, Suffix" -> "First Last [Suffix]".
-  // Never leave an embedded comma: authors are later split on "," downstream,
-  // so "King, Stephen, Jr." must not become "Stephen, Jr. King" (two authors).
-  //
-  // But a comma is also how co-authors are joined ("Stephen King, Peter
-  // Straub"). The "Last, First" swap only makes sense when the first
-  // comma-part is a single word (a surname) and the second is 1-2 words (a
-  // given name, optionally with a middle name) - if BOTH parts are
-  // multi-word, this is a co-author list, not a single inverted name, and
-  // swapping would mangle it into one garbled name. In that case each name
-  // is cleaned individually and the list is preserved comma-joined.
+  // Never leave an embedded comma for a single inverted name: authors are
+  // later split on "," downstream. A comma is also how co-authors are joined
+  // ("Stephen King, Peter Straub", "Homer, Emily Wilson"), so the swap only
+  // happens when each side is a single name (see _isInvertedPair); otherwise
+  // each name is cleaned on its own and the list stays comma-joined.
   const suffixes = ["jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "phd", "md", "m.d.", "ph.d."];
   const commaParts = result.split(",").map((p) => p.trim()).filter(Boolean);
-  const wordCount = (s) => s.split(/\s+/).filter(Boolean).length;
+  const asList = () => commaParts.map((p) => _titleCaseNameWords(p)).join(", ");
 
   if (commaParts.length === 2) {
     const [first, second] = commaParts;
     if (suffixes.includes(second.toLowerCase())) {
       // "Name, Suffix" -> "Name Suffix"
       result = `${first} ${second}`;
-    } else if (wordCount(first) === 1 && wordCount(second) <= 2) {
-      // "Last, First [Middle]" -> "First [Middle] Last"
+    } else if (_isInvertedPair(first, second)) {
+      // "Last, First" -> "First Last"
       result = `${second} ${first}`;
     } else {
-      // Co-authors already in "First Last" order - clean each name
-      // independently and keep them comma-separated.
-      return commaParts.map((p) => _titleCaseNameWords(p)).join(", ");
+      return asList();
     }
   } else if (commaParts.length >= 3) {
-    const allMultiWord = commaParts.every((p) => wordCount(p) > 1);
-    if (allMultiWord) {
-      // "Stephen King, Peter Straub, Neil Gaiman" - a co-author list, not a
-      // "Last, First, Suffix..." inversion.
-      return commaParts.map((p) => _titleCaseNameWords(p)).join(", ");
-    }
-    // "Last, First, Suffix..." -> "First Last Suffix..."
     const [lastName, firstName, ...rest] = commaParts;
-    result = `${firstName} ${lastName} ${rest.join(" ")}`.trim();
+    if (_isInvertedPair(lastName, firstName) && rest.every((r) => suffixes.includes(r.toLowerCase()))) {
+      // "Last, First, Suffix..." -> "First Last Suffix..."
+      result = `${firstName} ${lastName} ${rest.join(" ")}`.trim();
+    } else {
+      return asList();
+    }
   }
 
   return _titleCaseNameWords(result);
@@ -712,11 +721,12 @@ export function splitAuthors(str) {
   const authors = [];
   for (const chunk of chunks) {
     const commaParts = chunk.split(",").map((p) => p.trim()).filter(Boolean);
-    // A single "Last, First" name ("King, Stephen", "Tolkien, J. R. R."): two
-    // parts with a one-word surname first. Not two authors.
-    if (commaParts.length === 2 && !/\s/.test(commaParts[0])
+    // A single "Last, First" name ("King, Stephen", "Tolkien, J. R. R."): a
+    // one-word surname then a one-word or initials-only given name. Not two
+    // authors, and returned in "First Last" order. "Homer, Emily Wilson" is two.
+    if (commaParts.length === 2 && _isInvertedPair(commaParts[0], commaParts[1])
         && !AUTHOR_SUFFIXES.has(commaParts[1].toLowerCase())) {
-      authors.push(`${commaParts[0]}, ${commaParts[1]}`);
+      authors.push(`${commaParts[1]} ${commaParts[0]}`);
       continue;
     }
     for (const part of commaParts) {

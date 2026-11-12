@@ -65,9 +65,9 @@ describe("splitAuthors: suffix-aware comma splitting", () => {
 });
 
 describe("splitAuthors: single names that must not be split (v2.2.3)", () => {
-  it("keeps a single 'Last, First' name together", () => {
-    expect(splitAuthors("King, Stephen")).toEqual(["King, Stephen"]);
-    expect(splitAuthors("Tolkien, J. R. R.")).toEqual(["Tolkien, J. R. R."]);
+  it("keeps a single 'Last, First' name together, in First Last order", () => {
+    expect(splitAuthors("King, Stephen")).toEqual(["Stephen King"]);
+    expect(splitAuthors("Tolkien, J. R. R.")).toEqual(["J. R. R. Tolkien"]);
   });
 
   it("does not split ' and ' when either side is not a full name", () => {

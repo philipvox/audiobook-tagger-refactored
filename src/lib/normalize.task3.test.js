@@ -15,8 +15,8 @@ describe("H-2: cleanAuthorName - co-author corruption", () => {
     expect(cleanAuthorName("King, Stephen")).toBe("Stephen King");
   });
 
-  it("still swaps Last, First Middle (2-word first name)", () => {
-    expect(cleanAuthorName("King, Stephen Edwin")).toBe("Stephen Edwin King");
+  it("no longer swaps Last, First Middle (could be two co-authors; C-4)", () => {
+    expect(cleanAuthorName("King, Stephen Edwin")).toBe("King, Stephen Edwin");
   });
 
   it("still handles Last, First, Suffix", () => {

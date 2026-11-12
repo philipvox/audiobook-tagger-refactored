@@ -123,15 +123,15 @@ describe('authors and narrators', () => {
     expect(buildAbsPayload({ author: 'Unknown', title: 'X' }, null, cfg).metadata).not.toHaveProperty('authors');
   });
 
-  it('keeps "Last, First" and suffixed names whole', () => {
+  it('inverts a single "Last, First" name and keeps suffixed names whole', () => {
     expect(buildAbsPayload({ ...base, author: 'King, Stephen' }, orig(), cfg).metadata.authors)
-      .toEqual([{ id: 'new-1', name: 'King, Stephen' }]);
+      .toEqual([{ id: 'new-1', name: 'Stephen King' }]);
     expect(buildAbsPayload({ ...base, author: 'Martin Luther King, Jr.' }, orig(), cfg).metadata.authors)
       .toEqual([{ id: 'new-1', name: 'Martin Luther King, Jr.' }]);
   });
 
   it('does not split a single narrator name on its comma', () => {
-    expect(buildAbsPayload({ ...base, narrator: 'Brick, Scott' }, orig(), cfg).metadata.narrators).toEqual(['Brick, Scott']);
+    expect(buildAbsPayload({ ...base, narrator: 'Brick, Scott' }, orig(), cfg).metadata.narrators).toEqual(['Scott Brick']);
     expect(buildAbsPayload({ ...base, narrator: 'Scott Brick, Euan Morton' }, orig(), cfg).metadata.narrators)
       .toEqual(['Scott Brick', 'Euan Morton']);
   });
