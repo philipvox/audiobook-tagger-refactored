@@ -261,6 +261,37 @@ pub fn backup_path_for(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Where this write's backup of `path` goes. `<path>.bak` when nothing is
+/// there, or when what is there is this app's own backup of this file: the
+/// journal the write replaces (`previous`) recorded it. Anything else at
+/// that name (the user's own backup, another tool's, a backup whose journal
+/// is gone) is never overwritten: the backup then goes to the first free
+/// `<path>.bak.<n>`. The journal records the name used and undo restores
+/// from it.
+fn choose_backup_path(path: &Path, previous: &[JournalEntry]) -> Result<PathBuf, String> {
+    let bak = backup_path_for(path);
+    let taken = |p: &Path| fs::symlink_metadata(p).is_ok();
+    if !taken(&bak) {
+        return Ok(bak);
+    }
+    let same_original = |recorded: &str| {
+        Path::new(recorded) == path || matches!((fs::canonicalize(recorded), fs::canonicalize(path)), (Ok(a), Ok(b)) if a == b)
+    };
+    let ours = fs::symlink_metadata(&bak).map(|m| m.file_type().is_file()).unwrap_or(false)
+        && previous.iter().any(|e| Path::new(&e.backup_path) == bak && same_original(&e.original_path));
+    if ours {
+        return Ok(bak);
+    }
+    (1..10_000u32)
+        .map(|n| {
+            let mut s = bak.as_os_str().to_os_string();
+            s.push(format!(".{n}"));
+            PathBuf::from(s)
+        })
+        .find(|candidate| !taken(candidate))
+        .ok_or_else(|| "no free backup name next to the file".to_string())
+}
+
 /// Result of attempting to write one file. `journal` is Some whenever a backup
 /// landed (even if the subsequent tag save failed), so undo can restore a
 /// partially written file. `result` is the truthful per-file outcome. `skipped`
@@ -275,17 +306,20 @@ struct FileWriteOutcome {
 #[cfg(test)]
 fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
     let multi_file = file.group_size.unwrap_or(1) > 1;
-    write_one_file_recorded(file, backup, multi_file, &mut |_| Ok(()))
+    write_one_file_recorded(file, backup, multi_file, &[], &mut |_| Ok(()))
 }
 
 /// `record` persists the undo-journal entry for this file. It runs AFTER the
 /// backup lands and BEFORE the original is touched; if it fails the backup is
 /// removed and the file is left unmodified, so there is never a modified file
-/// that undo does not know about.
+/// that undo does not know about. `previous` holds the entries of the journal
+/// this write replaces: the only existing `.bak` files the backup may
+/// overwrite (see `choose_backup_path`).
 fn write_one_file_recorded(
     file: &WriteFile,
     backup: bool,
     multi_file: bool,
+    previous: &[JournalEntry],
     record: &mut dyn FnMut(&JournalEntry) -> Result<(), String>,
 ) -> FileWriteOutcome {
     let path = PathBuf::from(&file.path);
@@ -300,7 +334,16 @@ fn write_one_file_recorded(
     // Backup FIRST. If it fails, never touch the original.
     let mut journal = None;
     if backup {
-        let bak = backup_path_for(&path);
+        let bak = match choose_backup_path(&path, previous) {
+            Ok(bak) => bak,
+            Err(e) => {
+                return FileWriteOutcome {
+                    result: Err(format!("backup failed: {e}")),
+                    journal: None,
+                    skipped: Vec::new(),
+                }
+            }
+        };
         if let Err(e) = fs::copy(&path, &bak) {
             return FileWriteOutcome {
                 result: Err(format!("backup failed: {e}")),
@@ -437,14 +480,11 @@ pub fn sweep_temp_files(dir: &Path) -> usize {
     removed
 }
 
-/// Audio extensions a temp copy can carry (the formats the scanner reads).
-const TEMP_AUDIO_EXTENSIONS: &[&str] = &["m4b", "m4a", "mp3", "flac", "ogg", "opus", "aac"];
-
 /// True only for a temp copy a tag write stages through, matched exactly so a
 /// user's own dot-file is never swept:
 ///   current form  `.tagtmp-<32 lowercase hex>.<ext>`
 ///   older form    `.<file name>.tagtmp-<32 lowercase hex>.<ext>`
-/// where `<ext>` is one audio extension.
+/// where `<ext>` is one audio extension the scanner reads.
 pub fn is_temp_file_name(name: &str) -> bool {
     let rest = match name.strip_prefix('.') {
         Some(r) => r,
@@ -454,7 +494,7 @@ pub fn is_temp_file_name(name: &str) -> bool {
         Some(parts) => parts,
         None => return false,
     };
-    if !TEMP_AUDIO_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
+    if !crate::scanner::AUDIO_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
         return false;
     }
     let tag = &TEMP_PREFIX[1..]; // "tagtmp-"
@@ -737,12 +777,19 @@ pub async fn write_tags(request: WriteRequest) -> Result<Value, String> {
 /// Whether a file belongs to a multi-file book. The caller's `group_size` wins;
 /// without it, files in the same request that share a directory are taken to be
 /// one book (the scanner groups by folder). `files_per_dir` is the request's
-/// per-directory file count, computed once per batch.
+/// per-directory count of distinct files, by canonical path
+/// (`canonical_file_path`), computed once per batch.
 fn is_multi_file(file: &WriteFile, files_per_dir: &HashMap<PathBuf, usize>) -> bool {
     match file.group_size {
         Some(n) => n > 1,
-        None => files_per_dir.get(&parent_dir_of(Path::new(&file.path))).copied().unwrap_or(0) > 1,
+        None => files_per_dir.get(&parent_dir_of(&canonical_file_path(&file.path))).copied().unwrap_or(0) > 1,
     }
+}
+
+/// The path a file is told apart by within one request: symlinks and `..`
+/// resolved when the file exists, else the path as given.
+fn canonical_file_path(path: &str) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
 }
 
 pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
@@ -762,6 +809,10 @@ pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
         }
     }
 
+    // What the journal about to be replaced owns: its `.bak` files are this
+    // app's and may be overwritten; any other existing `.bak` may not.
+    let previous_entries = read_journal(journal_path).map(|j| j.entries).unwrap_or_default();
+
     // Every write starts a fresh journal so a backup=false write leaves
     // get_undo_status.available=false. If the stale journal cannot be cleared,
     // undo would restore the PREVIOUS batch over this one - refuse to write.
@@ -778,10 +829,19 @@ pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
     // Count the request's files per folder (for is_multi_file), and clear temp
     // copies a crashed earlier write left behind in those folders before any
     // new work starts.
+    //
+    // A file listed under two ids (overlapping scan roots in an older
+    // session) is one file: it counts once, and is written once below.
+    let canonical: HashMap<&String, PathBuf> =
+        request.files.iter().map(|(id, f)| (id, canonical_file_path(&f.path))).collect();
     let mut files_per_dir: HashMap<PathBuf, usize> = HashMap::new();
-    for file in request.files.values() {
-        *files_per_dir.entry(parent_dir_of(Path::new(&file.path))).or_insert(0) += 1;
+    let unique_paths: std::collections::HashSet<&PathBuf> = canonical.values().collect();
+    for path in unique_paths {
+        *files_per_dir.entry(parent_dir_of(path)).or_insert(0) += 1;
     }
+    // The id that wrote each file, and what came of it.
+    let mut written_by: HashMap<&PathBuf, &String> = HashMap::new();
+    let mut outcomes: HashMap<&String, (Result<(), String>, Vec<String>)> = HashMap::new();
     for dir in files_per_dir.keys() {
         sweep_temp_files(dir);
     }
@@ -797,6 +857,33 @@ pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
             }
         };
 
+        // The same file again under another id: never written (or backed up)
+        // twice. With the same changes it shares the first entry's outcome;
+        // with different ones it is refused, since only one set was applied.
+        if let Some(first_id) = canonical.get(id).and_then(|c| written_by.get(c)).copied() {
+            let same_changes = request.files.get(first_id).is_some_and(|first| first.changes == file.changes);
+            let (result, skipped) = if same_changes {
+                outcomes.get(first_id).cloned().unwrap_or((Ok(()), Vec::new()))
+            } else {
+                (Err("this file is listed twice in the request with different changes; only the first was written".to_string()), Vec::new())
+            };
+            match result {
+                Ok(()) => {
+                    success += 1;
+                    results.push(json!({ "file_id": id, "path": file.path, "status": "success", "skipped_fields": skipped }));
+                }
+                Err(e) => {
+                    failed += 1;
+                    errors.push(json!({ "file_id": id, "path": file.path, "error": e }));
+                    results.push(json!({ "file_id": id, "path": file.path, "status": "failed", "skipped_fields": skipped }));
+                }
+            }
+            continue;
+        }
+        if let Some(c) = canonical.get(id) {
+            written_by.insert(c, id);
+        }
+
         // Persist the journal (including this file's entry) BEFORE the file is
         // modified, so a crash mid-batch still leaves every touched file undoable.
         let mut record = |entry: &JournalEntry| -> Result<(), String> {
@@ -808,10 +895,11 @@ pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
             result,
             journal,
             skipped,
-        } = write_one_file_recorded(file, request.backup, is_multi_file(file, &files_per_dir), &mut record);
+        } = write_one_file_recorded(file, request.backup, is_multi_file(file, &files_per_dir), &previous_entries, &mut record);
         if let Some(entry) = journal {
             journal_entries.push(entry);
         }
+        outcomes.insert(id, (result.clone(), skipped.clone()));
         match result {
             Ok(()) => {
                 success += 1;
@@ -1829,6 +1917,153 @@ mod tests {
         assert_eq!(restored, vec![renamed.to_string_lossy().to_string()]);
         assert!(!mp3.exists(), "undo resurrected the old name (duplicate)");
         assert_eq!(fs::read(&renamed).unwrap(), original);
+    }
+
+    // ---- Final review: backups the app does not own, duplicate paths ----
+
+    fn bak_n(path: &Path, n: u32) -> PathBuf {
+        PathBuf::from(format!("{}.bak.{n}", path.to_string_lossy()))
+    }
+
+    #[test]
+    fn foreign_bak_is_never_overwritten() {
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let mp3 = make_mp3(dir.path(), "a.mp3");
+        let original = fs::read(&mp3).unwrap();
+        // The user's own backup, made before this app ever saw the file.
+        let foreign = backup_path_for(&mp3);
+        fs::write(&foreign, b"the user's own backup").unwrap();
+        let journal_path = dir.path().join("undo.json");
+
+        let res = write_tags_at(one_file_request(&mp3, true), &journal_path);
+        assert_eq!(res["success"], json!(1), "{res}");
+        assert_eq!(fs::read(&foreign).unwrap(), b"the user's own backup", "foreign .bak changed by a write");
+        let journal = read_journal(&journal_path).expect("journal");
+        assert_eq!(journal.entries[0].backup_path, bak_n(&mp3, 1).to_string_lossy(), "the name used is recorded");
+        assert_eq!(fs::read(bak_n(&mp3, 1)).unwrap(), original, "the app's backup holds the original");
+        assert_ne!(fs::read(&mp3).unwrap(), original, "the write happened");
+
+        let undo = undo_last_write_at(&journal_path);
+        assert_eq!(undo["success"], json!(1), "{undo}");
+        assert_eq!(fs::read(&mp3).unwrap(), original, "undo restores from the recorded name");
+        assert_eq!(fs::read(&foreign).unwrap(), b"the user's own backup", "foreign .bak changed by an undo");
+        assert!(!bak_n(&mp3, 1).exists(), "the app's backup is consumed");
+    }
+
+    #[test]
+    fn only_a_bak_the_journal_owns_is_reused() {
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let mp3 = make_mp3(dir.path(), "a.mp3");
+        let original = fs::read(&mp3).unwrap();
+        let journal_path = dir.path().join("undo.json");
+        let bak = backup_path_for(&mp3);
+        // Each write sets another title, so every state of the file differs.
+        let write = |title: &str| {
+            let mut request = one_file_request(&mp3, true);
+            request.files.get_mut("f1").unwrap().changes = title_change(title);
+            let res = write_tags_at(request, &journal_path);
+            assert_eq!(res["success"], json!(1), "{res}");
+            fs::read(&mp3).unwrap()
+        };
+
+        let after_first = write("First");
+        assert_eq!(fs::read(&bak).unwrap(), original);
+
+        // The journal still records that .bak as this app's: the next write
+        // replaces it, so backups do not pile up.
+        let after_second = write("Second");
+        assert_ne!(after_second, after_first);
+        assert_eq!(fs::read(&bak).unwrap(), after_first);
+        assert!(!bak_n(&mp3, 1).exists());
+        assert_eq!(read_journal(&journal_path).unwrap().entries[0].backup_path, bak.to_string_lossy());
+
+        // With the journal gone nothing says the .bak is the app's: keep it.
+        clear_journal(&journal_path).unwrap();
+        write("Third");
+        assert_eq!(fs::read(&bak).unwrap(), after_first, "an unowned .bak was overwritten");
+        assert_eq!(fs::read(bak_n(&mp3, 1)).unwrap(), after_second);
+    }
+
+    #[test]
+    fn backup_name_never_collides_with_a_file_the_journal_does_not_own() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("book.m4b");
+        fs::write(&file, b"audio").unwrap();
+        let bak = backup_path_for(&file);
+        assert_eq!(choose_backup_path(&file, &[]).unwrap(), bak, "free name: plain .bak");
+
+        fs::write(&bak, b"someone's").unwrap();
+        assert_eq!(choose_backup_path(&file, &[]).unwrap(), bak_n(&file, 1));
+        fs::write(bak_n(&file, 1), b"someone's too").unwrap();
+        assert_eq!(choose_backup_path(&file, &[]).unwrap(), bak_n(&file, 2));
+
+        let entry = |original: &Path, backup: &Path| JournalEntry {
+            original_path: original.to_string_lossy().to_string(),
+            backup_path: backup.to_string_lossy().to_string(),
+        };
+        // Recorded as this app's backup of this file: reused.
+        assert_eq!(choose_backup_path(&file, &[entry(&file, &bak)]).unwrap(), bak);
+        // Recorded for ANOTHER file, or another backup name: not this file's.
+        let other = dir.path().join("other.m4b");
+        assert_eq!(choose_backup_path(&file, &[entry(&other, &bak)]).unwrap(), bak_n(&file, 2));
+        assert_eq!(choose_backup_path(&file, &[entry(&file, &bak_n(&file, 7))]).unwrap(), bak_n(&file, 2));
+
+        // Anything at the name counts as taken, a dangling link included.
+        #[cfg(unix)]
+        {
+            let linked = dir.path().join("linked.m4b");
+            fs::write(&linked, b"audio").unwrap();
+            let link = backup_path_for(&linked);
+            std::os::unix::fs::symlink(dir.path().join("nowhere"), &link).unwrap();
+            assert_eq!(choose_backup_path(&linked, &[]).unwrap(), bak_n(&linked, 1));
+            assert_eq!(choose_backup_path(&linked, &[entry(&linked, &link)]).unwrap(), bak_n(&linked, 1), "a link is not our backup file");
+        }
+    }
+
+    #[test]
+    fn a_file_listed_twice_is_written_and_backed_up_once() {
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let mp3 = make_mp3(dir.path(), "a.mp3");
+        let original = fs::read(&mp3).unwrap();
+        let journal_path = dir.path().join("undo.json");
+        // The same file under two ids, spelled two ways (overlapping roots).
+        let other_spelling = dir.path().join(".").join("a.mp3");
+        let request = |second_title: &str| {
+            let mut files = HashMap::new();
+            files.insert("f1".to_string(), WriteFile { path: mp3.to_string_lossy().to_string(), changes: title_change("New"), group_size: None });
+            files.insert("f2".to_string(), WriteFile { path: other_spelling.to_string_lossy().to_string(), changes: title_change(second_title), group_size: None });
+            WriteRequest { file_ids: vec!["f1".into(), "f2".into()], files, backup: true }
+        };
+
+        let res = write_tags_at(request("New"), &journal_path);
+        assert_eq!(res["success"], json!(2), "{res}");
+        assert_eq!(res["results"][1]["status"], json!("success"), "{res}");
+        let journal = read_journal(&journal_path).expect("journal");
+        assert_eq!(journal.entries.len(), 1, "one file, one backup: {journal:?}");
+        assert_eq!(fs::read(backup_path_for(&mp3)).unwrap(), original, "the backup is the file before the write");
+        assert!(!bak_n(&mp3, 1).exists());
+        // One file is a single-file book: the title goes to the title field.
+        assert_eq!(read_generic_tag(&mp3).title().as_deref(), Some("New"));
+
+        // The second entry asks for something else: refused, not half-applied.
+        let res = write_tags_at(request("Other"), &journal_path);
+        assert_eq!(res["success"], json!(1), "{res}");
+        assert_eq!(res["failed"], json!(1), "{res}");
+        assert_eq!(res["errors"][0]["file_id"], json!("f2"), "{res}");
+        assert!(res["errors"][0]["error"].as_str().unwrap_or("").contains("listed twice"), "{res}");
+        assert_eq!(read_generic_tag(&mp3).title().as_deref(), Some("New"));
     }
 
     #[test]

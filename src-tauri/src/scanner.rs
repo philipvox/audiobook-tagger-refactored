@@ -9,7 +9,9 @@ use lofty::prelude::{Accessor, ItemKey};
 use lofty::probe::Probe;
 use lofty::tag::ItemValue;
 
-const AUDIO_EXTENSIONS: &[&str] = &["m4b", "m4a", "mp3", "flac", "ogg", "opus", "aac"];
+/// The audio formats the app reads. The writer matches its temp copies
+/// against the same list (`writer::is_temp_file_name`).
+pub(crate) const AUDIO_EXTENSIONS: &[&str] = &["m4b", "m4a", "mp3", "flac", "ogg", "opus", "aac"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioFile {
@@ -247,8 +249,17 @@ struct FoundFile {
 
 /// Walk the roots for audio files, counting them into `state.total`. Stops
 /// early (with what it found) when the scan is cancelled.
+///
+/// Roots that overlap (a folder and one of its subfolders, or one folder
+/// given twice) reach the same file more than once. It is listed once, under
+/// the first root that reaches it: listed twice, a one-file book would read
+/// as a two-file book, and a write would back the file up twice.
 fn find_audio_files(paths: &[String], state: &ScanState) -> Vec<FoundFile> {
     let mut found = Vec::new();
+    // One root cannot reach a file twice (links are not followed), so the
+    // per-file canonical path is only resolved when there are several.
+    let several_roots = paths.len() > 1;
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     for root in paths {
         for entry in WalkDir::new(root)
             .follow_links(false)
@@ -291,6 +302,9 @@ fn find_audio_files(paths: &[String], state: &ScanState) -> Vec<FoundFile> {
                     continue;
                 }
                 if AUDIO_EXTENSIONS.contains(&ext_lower.as_str()) {
+                    if several_roots && !seen.insert(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())) {
+                        continue;
+                    }
                     found.push(FoundFile { path: path.to_path_buf(), root: root.clone() });
                     state.total.fetch_add(1, Ordering::SeqCst);
                 }
@@ -2681,6 +2695,34 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].metadata.title, "Dune");
         assert_eq!(groups[0].metadata.author, "Frank Herbert");
+    }
+
+    #[test]
+    fn overlapping_roots_list_a_file_once() {
+        let tmp = tempfile::Builder::new().prefix("tagger-test-").tempdir().unwrap();
+        let author = tmp.path().join("Some Author");
+        let book = author.join("Alpha");
+        std::fs::create_dir_all(&book).unwrap();
+        std::fs::write(book.join("Alpha.m4b"), b"").unwrap();
+        let root = tmp.path().to_string_lossy().to_string();
+        // A folder, one of its subfolders, the folder again, and another spelling.
+        let roots = vec![
+            root.clone(),
+            author.to_string_lossy().to_string(),
+            root.clone(),
+            tmp.path().join("Some Author").join(".").to_string_lossy().to_string(),
+        ];
+        assert_eq!(collect_audio_files(&roots).len(), 1);
+        let state = ScanState::new();
+        state.begin();
+        let result = scan_paths(&roots, &state, |_| {});
+        assert_eq!(result.total_files, 1);
+        assert_eq!(state.progress().total, 1);
+        assert_eq!(result.groups.len(), 1, "{:?}", result.groups);
+        assert_eq!(result.groups[0].files.len(), 1, "a one-file book stays a one-file book");
+        assert_eq!(result.groups[0].group_type, "single");
+        // Listed under the first root that reaches it.
+        assert_eq!(result.groups[0].metadata.author, "Some Author");
     }
 
     // ---- Progress and cancel (#62) ----
