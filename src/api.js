@@ -139,6 +139,10 @@ async function getTauriInvoke() {
 // Commands that route to Rust when running in Tauri
 const TAURI_COMMANDS = new Set([
   'scan_library',
+  // #62: local folder scan progress and cancel. The HANDLERS stubs below are
+  // the browser-build fallback only (the browser build has no local scanning).
+  'get_scan_progress',
+  'cancel_scan',
   // Task 9b: local-file write/undo/rename backend (Tauri-only; the browser build
   // keeps the stub behavior, which the frontend already reports as a visible
   // failure). No HANDLERS fallback by design.
@@ -1985,7 +1989,7 @@ Return JSON: {"year":"2005"}`;
   get_genre_stats: () => 'No server-side genre stats in web mode',
   normalize_genres: () => 'Genre normalization runs client-side in web mode',
 
-  // === Scan progress (no-op in client mode) ===
+  // === Scan progress (browser build only; Tauri routes these to Rust) ===
   get_scan_progress: () => ({ scanning: false, current: 0, total: 0 }),
   cancel_scan: () => {},
 
@@ -2096,6 +2100,18 @@ export function pickPath(options = {}) {
     };
     input.click();
   });
+}
+
+/**
+ * Ask the user a yes/no question before a destructive step. Native dialog in
+ * Tauri, window.confirm in the browser. Resolves true only on an explicit yes.
+ */
+export async function askToConfirm(message, { title, okLabel, cancelLabel } = {}) {
+  if (isTauri()) {
+    const { ask } = await import('@tauri-apps/plugin-dialog');
+    return (await ask(message, { title, kind: 'warning', okLabel, cancelLabel })) === true;
+  }
+  return typeof window !== 'undefined' && window.confirm(message) === true;
 }
 
 export function resolveFileBrowser(path) {

@@ -19,7 +19,7 @@ import { ValidationIssueModal } from '../components/ValidationIssueModal';
 import { AuthorAnalysisModal } from '../components/AuthorAnalysisModal';
 import { BatchFixModal } from '../components/BatchFixModal';
 import { useToast } from '../components/Toast';
-import { useScan, importFromAbsWithNotice, hasAbsConnection, hasAiProvider } from '../hooks/useScan';
+import { useScan, importFromAbsWithNotice, scanFolderWithNotice, hasAbsConnection, hasAiProvider } from '../hooks/useScan';
 import { useFileSelection } from '../hooks/useFileSelection';
 import { useTagOperations } from '../hooks/useTagOperations';
 import { useBatchOperations } from '../hooks/useBatchOperations';
@@ -271,10 +271,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
   const {
     scanning,
+    scanningFolder,
     scanProgress,
     calculateETA,
     handleScan,
-    handleImport,
     handleImportFromAbs,
     handleRescanAbsImports,
     handlePipelineRescan,
@@ -453,6 +453,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     clearSelection();
     setSelectedGroupIds(new Set());
   };
+
+  // #62: Scan Folder. A scan that replaced the workspace clears the selection
+  // (the old ids are gone); failures, cancels and empty scans are toasted by
+  // scanFolderWithNotice. Never rethrows (bound to onClick).
+  const handleScanFolder = () => scanFolderWithNotice(handleScan, toast, {
+    onReplaced: () => {
+      clearSelection();
+      setSelectedGroupIds(new Set());
+      setSelectedGroup(null);
+    },
+  });
 
   const handleEditMetadata = (group) => {
     modals.open('edit', { group });
@@ -2917,7 +2928,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         fileStatuses={fileStatuses}
         selectedGroupCount={selectedGroupIds.size}
         totalBookCount={groups.length}
-        onScan={handleScan}
+        onScan={handleScanFolder}
         onRescan={handleRescanClick}
         onPipelineRescan={handlePipelineClick}
         onWrite={handleWriteClick}
@@ -2964,6 +2975,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         writing={writing}
         pushing={pushing || absPushing}
         scanning={scanning}
+        scanningFolder={scanningFolder}
         cleaningGenres={cleaningGenres}
         assigningTags={assigningTags}
         fixingDescriptions={fixingDescriptions}
@@ -3005,8 +3017,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           }}
           onSelectGroup={handleSelectGroup}
           onSelectFile={handleGroupClick}
-          onScan={handleScan}
-          onImport={handleImport}
+          onScan={handleScanFolder}
           onImportFromAbs={handleImportFromAbsNotify}
           onCleanupAllGenres={handleCleanupAllGenres}
           scanning={scanning}

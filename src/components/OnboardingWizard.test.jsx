@@ -138,7 +138,7 @@ describe('WelcomeModal local-folders choice', () => {
     render(<WelcomeModal onDismiss={onDismiss} onStartWizard={onStartWizard} onLocalOnly={onLocalOnly} />);
 
     const option = screen.getByRole('button', { name: /I only use local folders/ });
-    expect(option).toHaveTextContent('Skip the AudiobookShelf setup. Connect it later from Settings.');
+    expect(option).toHaveTextContent('You can scan a local folder from the Library tab.');
     fireEvent.click(option);
 
     expect(hasCompletedOnboarding()).toBe(true);

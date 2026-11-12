@@ -1,6 +1,6 @@
 // src/hooks/useScan.js
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { callBackend, subscribe, pickPath } from '../api';
+import { callBackend, subscribe, pickPath, askToConfirm } from '../api';
 import { useApp } from '../context/AppContext';
 import { getAbsId, normalizePushResult, buildPushItems, applyPushSnapshots, applyRefreshedLists, failedPushResult } from '../lib/absPush';
 import { logEvent } from '../lib/logEvent';
@@ -138,11 +138,46 @@ export async function importFromAbsWithNotice(importFn, toast, ...args) {
   return result;
 }
 
+/** #62: asked before a folder scan replaces a workspace with staged changes. */
+export const SCAN_REPLACE_PROMPT = 'Scanning a folder replaces the books in your workspace. You have unpushed or unwritten changes that will be lost. Continue?';
+
+/**
+ * #62: run a folder scan and tell the user how it ended. A rejected scan gets
+ * an error toast with its message; a cancelled one says the workspace was not
+ * changed; one that found nothing warns. Only a scan that replaced the
+ * workspace calls `onReplaced` (the caller clears its selection there). A
+ * dismissed picker or a declined prompt is silent. Never rethrows (the Scan
+ * Folder controls are bound straight to onClick).
+ */
+export async function scanFolderWithNotice(scanFn, toast, { onReplaced } = {}) {
+  let result;
+  try {
+    result = await scanFn();
+  } catch (error) {
+    const message = String(error?.message || error);
+    toast.error('Scan Failed', message);
+    return { success: false, error: message };
+  }
+  if (result?.cancelled) {
+    toast.info('Scan cancelled', 'The workspace was not changed.');
+  } else if (result?.empty) {
+    toast.warning('No Audiobooks Found', 'No audio files were found in that folder. The workspace was not changed.');
+  } else if (result?.success) {
+    onReplaced?.();
+    const n = result.count;
+    const files = result.files ?? 0;
+    toast.success('Scan Complete', `Found ${n} ${n === 1 ? 'book' : 'books'} in ${files} ${files === 1 ? 'file' : 'files'}.`);
+  }
+  return result;
+}
+
 export function useScan() {
   const { groups: currentGroups, setGroups } = useApp();
   const groupsRef = useRef(currentGroups);
   groupsRef.current = currentGroups;
   const [scanning, setScanning] = useState(false);
+  // #62: true while the running operation is a local folder scan.
+  const [scanningFolder, setScanningFolder] = useState(false);
   // H-7: the cancel token (lib/cancel.js) of the operation the scan progress
   // bar is showing (import, push, pipeline rescan); null while the running
   // operation cannot be cancelled, so the bar offers no Cancel for it.
@@ -226,184 +261,110 @@ export function useScan() {
   }, [scanProgress]);
 
   /**
-   * Scan library with configurable scan mode
-   * @param {string} scanMode - Scan mode: 'normal' (default), 'force_fresh' (clean scan)
+   * #62: Scan Folder. Pick one or more folders, read their audio files and
+   * replace the workspace with the books found. Takes no arguments: it is
+   * bound straight to onClick, so the click event must not become an option.
+   *
+   * With staged changes in the workspace it asks before replacing. A
+   * cancelled scan, or one that found no audiobooks, leaves the workspace as
+   * it was (Rust returns the partial groups of a cancelled scan; they are not
+   * applied). Resolves { success, count, files } or { success: false } with
+   * `dismissed` (picker closed), `declined` (prompt answered No), `cancelled`
+   * or `empty`. A failed scan rethrows (scanFolderWithNotice toasts it).
    */
-  const handleScan = useCallback(async (scanMode = 'normal') => {
-    // Clean up any existing intervals
+  const handleScan = useCallback(async () => {
     if (progressIntervalRef.current) {
       clearInterval(progressIntervalRef.current);
       progressIntervalRef.current = null;
     }
-
     if (resetTimeoutRef.current) {
       clearTimeout(resetTimeoutRef.current);
       resetTimeoutRef.current = null;
     }
 
-    try {
-      // OPEN FILE PICKER
-      const selected = await pickPath({
-        directory: true,
-        multiple: true,
+    if ((groupsRef.current || []).some(groupHasStagedChanges)) {
+      const ok = await askToConfirm(SCAN_REPLACE_PROMPT, {
+        title: 'Replace your workspace?',
+        okLabel: 'Scan and replace',
+        cancelLabel: 'Cancel',
       });
+      if (!ok) return { success: false, declined: true };
+    }
 
-      if (!selected) {
-        return;
-      }
+    const selected = await pickPath({ directory: true, multiple: true });
+    const paths = (Array.isArray(selected) ? selected : [selected]).filter(Boolean);
+    if (paths.length === 0) return { success: false, dismissed: true };
 
-      const paths = Array.isArray(selected) ? selected : [selected];
-      const modeLabel = scanMode === 'force_fresh' ? 'clean scan' : 'normal scan';
+    const bar = beginScanCancel();
+    const cancel = bar.token;
+    setScanning(true);
+    setScanningFolder(true);
+    const startTime = Date.now();
+    setScanProgress({
+      current: 0,
+      total: 0,
+      currentFile: 'Reading audio files...',
+      startTime,
+      filesPerSecond: 0,
+      covers_found: 0,
+    });
 
-      setScanning(true);
-      const startTime = Date.now();
-      setScanProgress({
-        current: 0,
-        total: 0,
-        currentFile: '',
-        startTime,
-        filesPerSecond: 0,
-        covers_found: 0,
-      });
-
-      // Poll for progress - use 1 second interval to reduce IPC overhead
-      // Progress updates don't need to be more frequent than this
-      progressIntervalRef.current = setInterval(async () => {
-        try {
-          const progress = await callBackend('get_scan_progress');
-          const now = Date.now();
-          const elapsed = (now - startTime) / 1000;
-          const rate = progress.current > 0 && elapsed > 0 ? progress.current / elapsed : 0;
-
-          setScanProgress({
-            current: progress.current,
-            total: progress.total,
-            currentFile: progress.current_file || '',
-            startTime,
-            filesPerSecond: rate,
-            covers_found: progress.covers_found || 0,
-          });
-        } catch (error) {
-          console.warn('Scan progress polling error:', error);
-        }
-      }, 1000);
-
+    // Poll the Rust progress counters once a second.
+    progressIntervalRef.current = setInterval(async () => {
       try {
-        // Pass scan mode to backend
-        const result = await callBackend('scan_library', { paths, scanMode });
-
-        if (progressIntervalRef.current) {
-          clearInterval(progressIntervalRef.current);
-          progressIntervalRef.current = null;
-        }
-
-        // Simple direct set - replace all groups
-        if (result && result.groups) {
-          setGroups(result.groups);
-        }
-
-      } finally {
-        if (progressIntervalRef.current) {
-          clearInterval(progressIntervalRef.current);
-          progressIntervalRef.current = null;
-        }
-
-        setScanning(false);
-
-        resetTimeoutRef.current = setTimeout(() => {
-          setScanProgress({
-            current: 0,
-            total: 0,
-            currentFile: '',
-            startTime: null,
-            filesPerSecond: 0,
-            covers_found: 0,
-          });
-          resetTimeoutRef.current = null;
-        }, 500);
+        const progress = await callBackend('get_scan_progress');
+        if (cancel.cancelled) return; // keep showing "Cancelling..."
+        const elapsed = (Date.now() - startTime) / 1000;
+        const rate = progress.current > 0 && elapsed > 0 ? progress.current / elapsed : 0;
+        setScanProgress(prev => ({
+          ...prev,
+          current: progress.current || 0,
+          total: progress.total || 0,
+          filesPerSecond: rate,
+        }));
+      } catch (error) {
+        console.warn('Scan progress polling error:', error);
       }
+    }, 1000);
+
+    try {
+      const result = await callBackend('scan_library', { paths });
+
+      if (result?.cancelled || cancel.cancelled) {
+        logEvent('scan', 'folder scan cancelled', { files_read: result?.total_files ?? 0 });
+        return { success: false, cancelled: true };
+      }
+
+      const scannedGroups = Array.isArray(result?.groups) ? result.groups : [];
+      if (scannedGroups.length === 0) {
+        return { success: false, empty: true, count: 0, files: result?.total_files ?? 0 };
+      }
+
+      setGroups(scannedGroups);
+      logEvent('scan', 'folder scan', { books: scannedGroups.length, files: result.total_files ?? 0 });
+      return { success: true, count: scannedGroups.length, files: result.total_files ?? 0 };
     } catch (error) {
       console.error('Scan failed:', error);
-
+      throw error;
+    } finally {
       if (progressIntervalRef.current) {
         clearInterval(progressIntervalRef.current);
         progressIntervalRef.current = null;
       }
-
-      if (resetTimeoutRef.current) {
-        clearTimeout(resetTimeoutRef.current);
+      bar.release();
+      setScanning(false);
+      setScanningFolder(false);
+      resetTimeoutRef.current = setTimeout(() => {
+        setScanProgress({
+          current: 0,
+          total: 0,
+          currentFile: '',
+          startTime: null,
+          filesPerSecond: 0,
+          covers_found: 0,
+        });
         resetTimeoutRef.current = null;
-      }
-
-      setScanning(false);
-      throw error;
-    }
-  }, [setGroups]);
-
-  // Import folders without metadata scanning
-  const handleImport = useCallback(async () => {
-    // Clean up any existing intervals
-    if (progressIntervalRef.current) {
-      clearInterval(progressIntervalRef.current);
-      progressIntervalRef.current = null;
-    }
-
-    if (resetTimeoutRef.current) {
-      clearTimeout(resetTimeoutRef.current);
-      resetTimeoutRef.current = null;
-    }
-
-    try {
-      // OPEN FILE PICKER
-      const selected = await pickPath({
-        directory: true,
-        multiple: true,
-      });
-
-      if (!selected) {
-        return;
-      }
-
-      const paths = Array.isArray(selected) ? selected : [selected];
-
-      setScanning(true);
-      const startTime = Date.now();
-      setScanProgress({
-        current: 0,
-        total: 0,
-        currentFile: 'Importing folders...',
-        startTime,
-        filesPerSecond: 0,
-        covers_found: 0,
-      });
-
-      try {
-        const result = await callBackend('import_folders', { paths });
-
-        // Simple direct set - replace all groups
-        if (result && result.groups) {
-          setGroups(result.groups);
-        }
-
-      } finally {
-        setScanning(false);
-
-        resetTimeoutRef.current = setTimeout(() => {
-          setScanProgress({
-            current: 0,
-            total: 0,
-            currentFile: '',
-            startTime: null,
-            filesPerSecond: 0,
-            covers_found: 0,
-          });
-          resetTimeoutRef.current = null;
-        }, 500);
-      }
-    } catch (error) {
-      console.error('Import failed:', error);
-      setScanning(false);
-      throw error;
+      }, 500);
     }
   }, [setGroups]);
 
@@ -1021,11 +982,11 @@ export function useScan() {
 
   return {
     scanning,
+    scanningFolder,
     scanCancellable,
     scanProgress,
     calculateETA,
     handleScan,
-    handleImport,
     handleImportFromAbs,
     handleRescanAbsImports,
     handlePipelineRescan,

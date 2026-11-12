@@ -11,6 +11,8 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .invoke_handler(tauri::generate_handler![
             scanner::scan_library,
+            scanner::get_scan_progress,
+            scanner::cancel_scan,
             writer::write_tags,
             writer::get_undo_status,
             writer::undo_last_write,

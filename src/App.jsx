@@ -7,6 +7,7 @@ import { GlobalProgressBar } from './components/GlobalProgressBar';
 import { FileBrowser } from './components/FileBrowser';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { closeEventSource } from './api';
+import { isTauri } from './lib/platform';
 import { WelcomeModal, SetupWizard, hasCompletedOnboarding } from './components/OnboardingWizard';
 import logoSvg from './assets/logo.svg';
 
@@ -104,10 +105,11 @@ function AppContent() {
             setShowWelcome(false);
             setShowWizard(true);
           }}
-          onLocalOnly={() => {
+          // #62: local folders can only be scanned in the desktop build.
+          onLocalOnly={isTauri() ? () => {
             setShowWelcome(false);
             navigateTo('scanner');
-          }}
+          } : undefined}
         />
       )}
 

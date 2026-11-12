@@ -72,7 +72,7 @@ export function WelcomeModal({ onDismiss, onStartWizard, onLocalOnly }) {
               <FolderOpen className="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5" />
               <span>
                 <span className="block text-sm text-white font-medium">I only use local folders</span>
-                <span className="block text-xs text-gray-400 mt-0.5">Skip the AudiobookShelf setup. Connect it later from Settings.</span>
+                <span className="block text-xs text-gray-400 mt-0.5">You can scan a local folder from the Library tab.</span>
               </span>
             </button>
           )}

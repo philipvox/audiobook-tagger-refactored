@@ -3,7 +3,8 @@ import { callBackend } from '../../api';
 import { ErrorPill } from './ErrorPill';
 import { computeListMetrics } from '../../lib/listLayout';
 import { aggregateGroupChanges } from '../../lib/aggregateChanges';
-import { CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, X, Sparkles, FileJson, Cloud, ArrowRight, ArrowUpDown, ArrowUp, ArrowDown, AlertTriangle, AlertCircle, Filter } from 'lucide-react';
+import { CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, X, Sparkles, FileJson, Cloud, ArrowRight, ArrowUpDown, ArrowUp, ArrowDown, AlertCircle, Filter, FolderOpen } from 'lucide-react';
+import { isTauri } from '../../lib/platform';
 
 // Virtualized item height (approximate) - more compact
 const ITEM_HEIGHT = 80;
@@ -191,6 +192,7 @@ export function BookList({
   onClearSelection,
   validationResults = {}, // { bookId: { issues, errorCount, warningCount } }
   hasAbsConnection = false,
+  onScan, // #62: Scan Folder (desktop build only)
   onImportFromAbs,
   onNavigateToSettings,
   coverInvalidation = { nonce: 0, ids: [] }, // M9: { nonce, ids } to evict cached covers
@@ -629,56 +631,45 @@ export function BookList({
   }), [groups]);
 
   if (groups.length === 0) {
+    // #62: two equal ways in. Local scanning needs the desktop build.
+    const canScanLocal = isTauri() && !!onScan;
+    const choiceClass = 'w-full h-full px-5 py-5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-left rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex flex-col gap-2';
     return (
       <div className="flex-1 flex items-center justify-center p-8 bg-neutral-950">
-        <div className="text-center max-w-md">
-          {hasAbsConnection ? (
-            <>
-              <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-orange-500 flex items-center justify-center">
-                <Cloud className="w-10 h-10 text-white" />
-              </div>
-              <h2 className="text-2xl font-bold text-white mb-3">Load Your Library</h2>
-              <p className="text-gray-400 mb-6">
-                Connect to AudiobookShelf to import your audiobook library and start enriching metadata.
-              </p>
-              <button
-                onClick={onImportFromAbs}
-                disabled={scanning}
-                className="w-full px-6 py-4 bg-orange-500 hover:bg-orange-600 text-white rounded-xl font-semibold text-lg transition-all shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3"
-              >
-                {scanning ? (
-                  <>
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-                    Loading...
-                  </>
-                ) : (
-                  <>
-                    <Cloud className="w-5 h-5" />
-                    Load from AudiobookShelf
-                  </>
-                )}
+        <div className="text-center max-w-xl w-full">
+          <h2 className="text-2xl font-bold text-white mb-3">Load Your Library</h2>
+          <p className="text-gray-400 mb-6">
+            {canScanLocal
+              ? 'Scan a folder of audiobook files on this computer, or import your AudiobookShelf library.'
+              : 'Import your AudiobookShelf library to start enriching metadata.'}
+          </p>
+          <div className={`grid gap-3 ${canScanLocal ? 'sm:grid-cols-2' : ''}`}>
+            {canScanLocal && (
+              <button onClick={() => onScan()} disabled={scanning} className={choiceClass}>
+                <FolderOpen className="w-6 h-6 text-orange-400" />
+                <span className="text-white font-semibold">Scan a local folder</span>
+                <span className="text-sm text-gray-400">Read the audio files in a folder on this computer.</span>
               </button>
-            </>
-          ) : (
-            <>
-              <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
-                <AlertTriangle className="w-10 h-10 text-white" />
-              </div>
-              <h2 className="text-2xl font-bold text-white mb-3">Connect to AudiobookShelf</h2>
-              <p className="text-gray-400 mb-6">
-                Configure your AudiobookShelf server connection to import your library and start enriching metadata.
-              </p>
-              <button
-                onClick={onNavigateToSettings}
-                className="w-full px-6 py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl font-semibold text-lg transition-all shadow-lg hover:shadow-xl flex items-center justify-center gap-3"
-              >
-                <ArrowRight className="w-5 h-5" />
-                Go to Settings
-              </button>
-              <p className="text-gray-500 text-sm mt-4">
-                You'll need your server URL and API token
-              </p>
-            </>
+            )}
+            <button
+              onClick={hasAbsConnection ? onImportFromAbs : onNavigateToSettings}
+              disabled={scanning}
+              className={choiceClass}
+            >
+              <Cloud className="w-6 h-6 text-orange-400" />
+              <span className="text-white font-semibold">Load from AudiobookShelf</span>
+              <span className="text-sm text-gray-400">
+                {hasAbsConnection
+                  ? 'Import the books on your AudiobookShelf server.'
+                  : 'Connect your server in Settings first. You will need its URL and an API token.'}
+              </span>
+            </button>
+          </div>
+          {scanning && (
+            <div className="mt-6 flex items-center justify-center gap-3 text-gray-400">
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+              Loading...
+            </div>
           )}
         </div>
       </div>

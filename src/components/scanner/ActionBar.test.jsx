@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { ActionBar } from './ActionBar';
 
@@ -60,5 +60,29 @@ describe('ActionBar Push and busy state', () => {
     renderBar({ selectedGroupCount: 2, fixingSubtitles: true });
     expect(button('Import')).toBeDisabled();
     expect(button('Push')).toBeDisabled();
+  });
+});
+
+describe('ActionBar Scan Folder (#62)', () => {
+  afterEach(() => { delete window.__TAURI_INTERNALS__; });
+
+  it('in the desktop build, Scan Folder is enabled with no ABS connection and no books, and calls onScan', () => {
+    window.__TAURI_INTERNALS__ = {};
+    const onScan = vi.fn();
+    renderBar({ onScan, hasAbsConnection: false, groups: [] });
+    expect(button('Scan Folder')).not.toBeDisabled();
+    fireEvent.click(button('Scan Folder'));
+    expect(onScan).toHaveBeenCalledTimes(1);
+  });
+
+  it('Scan Folder is disabled while another operation runs', () => {
+    window.__TAURI_INTERNALS__ = {};
+    renderBar({ onScan: vi.fn(), pushing: true });
+    expect(button('Scan Folder')).toBeDisabled();
+  });
+
+  it('the browser build has no Scan Folder (it cannot read local files)', () => {
+    renderBar({ onScan: vi.fn() });
+    expect(screen.queryByRole('button', { name: /^Scan Folder$/ })).not.toBeInTheDocument();
   });
 });

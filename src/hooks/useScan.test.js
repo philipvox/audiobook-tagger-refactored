@@ -14,8 +14,11 @@ import { useScan } from './useScan';
 
 // Mock the AppContext
 const mockSetGroups = vi.fn();
+// The workspace the hook sees (Task 14 tests set it; others leave it empty).
+const mockApp = { groups: [] };
 vi.mock('../context/AppContext', () => ({
   useApp: () => ({
+    groups: mockApp.groups,
     setGroups: mockSetGroups,
   }),
 }));
@@ -24,6 +27,7 @@ vi.mock('../context/AppContext', () => ({
 const mockInvoke = vi.fn();
 const mockListen = vi.fn(() => Promise.resolve(() => {}));
 const mockOpen = vi.fn();
+const mockAsk = vi.fn();
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args) => mockInvoke(...args),
@@ -35,6 +39,8 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: (...args) => mockOpen(...args),
+  save: vi.fn(),
+  ask: (...args) => mockAsk(...args),
 }));
 
 describe.skip('useScan hook', () => {
@@ -647,5 +653,214 @@ describe('scan bar Cancel after a modal push (Task 9 fix round 2)', () => {
     expect(out.push).toBeTruthy();
     expect(out.push.updated).toHaveLength(2);
     expect(hook.result.current.scanCancellable).toBe(false);
+  });
+});
+
+// ============================================================================
+// Task 14 (#62): Scan Folder, with progress and cancel. Runs as the desktop
+// build (window.__TAURI_INTERNALS__ set), so pickPath opens the mocked native
+// dialog and scan_library / cancel_scan go to the mocked Rust invoke.
+// ============================================================================
+
+describe('Scan Folder (#62)', () => {
+  const REPLACE_PROMPT = 'Scanning a folder replaces the books in your workspace. You have unpushed or unwritten changes that will be lost. Continue?';
+  const scanned = [
+    { id: 's1', group_name: 'Dune', metadata: { title: 'Dune' }, files: [{ id: 'f1', path: '/books/Dune/Dune.m4b', changes: {} }], total_changes: 0 },
+  ];
+  const staged = { id: 'g1', metadata: { title: 'Old' }, files: [{ id: 'x', path: '/old/a.mp3', changes: { title: { old: 'a', new: 'b' } } }], total_changes: 1 };
+  const clean = { id: 'g2', metadata: { title: 'Clean' }, files: [{ id: 'y', path: '/old/b.mp3', changes: {} }], total_changes: 0 };
+
+  const serveScan = (result) => mockInvoke.mockImplementation(async (cmd) => {
+    if (cmd === 'scan_library') return typeof result === 'function' ? result() : result;
+    if (cmd === 'get_scan_progress') return { scanning: true, current: 0, total: 0 };
+    return undefined;
+  });
+
+  beforeEach(() => {
+    window.__TAURI_INTERNALS__ = {};
+    mockApp.groups = [];
+    mockSetGroups.mockReset();
+    mockInvoke.mockReset();
+    mockOpen.mockReset();
+    mockAsk.mockReset();
+    mockOpen.mockResolvedValue('/books');
+  });
+
+  afterEach(() => {
+    delete window.__TAURI_INTERNALS__;
+    mockApp.groups = [];
+  });
+
+  it('with staged changes in the workspace, asks before replacing, and a No leaves everything alone', async () => {
+    mockApp.groups = [staged, clean];
+    mockAsk.mockResolvedValue(false);
+    serveScan({ groups: scanned, total_files: 1, cancelled: false });
+    const { result } = renderHook(() => useScan());
+
+    let out;
+    await act(async () => { out = await result.current.handleScan(); });
+
+    expect(mockAsk).toHaveBeenCalledWith(REPLACE_PROMPT, expect.objectContaining({ kind: 'warning' }));
+    expect(mockOpen).not.toHaveBeenCalled();
+    expect(mockInvoke).not.toHaveBeenCalledWith('scan_library', expect.anything());
+    expect(mockSetGroups).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ success: false, declined: true });
+  });
+
+  it('with staged changes and a Yes, the scan replaces the workspace', async () => {
+    mockApp.groups = [staged];
+    mockAsk.mockResolvedValue(true);
+    serveScan({ groups: scanned, total_files: 1, cancelled: false });
+    const { result } = renderHook(() => useScan());
+
+    let out;
+    await act(async () => { out = await result.current.handleScan(); });
+
+    expect(mockAsk).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith('scan_library', { paths: ['/books'] });
+    expect(mockSetGroups).toHaveBeenCalledWith(scanned);
+    expect(out).toMatchObject({ success: true, count: 1 });
+  });
+
+  it('without staged changes it does not ask', async () => {
+    mockApp.groups = [clean];
+    serveScan({ groups: scanned, total_files: 1, cancelled: false });
+    const { result } = renderHook(() => useScan());
+    await act(async () => { await result.current.handleScan(); });
+    expect(mockAsk).not.toHaveBeenCalled();
+    expect(mockSetGroups).toHaveBeenCalledWith(scanned);
+  });
+
+  it('a click event passed as the first argument is ignored (no scanMode)', async () => {
+    serveScan({ groups: scanned, total_files: 1, cancelled: false });
+    const { result } = renderHook(() => useScan());
+    await act(async () => { await result.current.handleScan({ type: 'click' }); });
+    expect(mockInvoke).toHaveBeenCalledWith('scan_library', { paths: ['/books'] });
+  });
+
+  it('a dismissed folder picker changes nothing', async () => {
+    mockOpen.mockResolvedValue(null);
+    const { result } = renderHook(() => useScan());
+    let out;
+    await act(async () => { out = await result.current.handleScan(); });
+    expect(mockInvoke).not.toHaveBeenCalledWith('scan_library', expect.anything());
+    expect(mockSetGroups).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ success: false, dismissed: true });
+    expect(result.current.scanning).toBe(false);
+  });
+
+  it('a scan that finds no audiobooks keeps the workspace', async () => {
+    mockApp.groups = [clean];
+    serveScan({ groups: [], total_files: 0, cancelled: false });
+    const { result } = renderHook(() => useScan());
+    let out;
+    await act(async () => { out = await result.current.handleScan(); });
+    expect(mockSetGroups).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ success: false, empty: true });
+  });
+
+  it('Cancel on the bar calls the Rust cancel_scan, and the partial result is not applied', async () => {
+    mockApp.groups = [clean];
+    let finishScan;
+    serveScan(() => new Promise((r) => { finishScan = r; }));
+    const { result } = renderHook(() => useScan());
+
+    let scanPromise;
+    await act(async () => { scanPromise = result.current.handleScan(); await Promise.resolve(); await Promise.resolve(); });
+    expect(result.current.scanning).toBe(true);
+    expect(result.current.scanCancellable).toBe(true);
+
+    await act(async () => { await result.current.cancelScan(); });
+    expect(mockInvoke).toHaveBeenCalledWith('cancel_scan', {});
+
+    let out;
+    await act(async () => { finishScan({ groups: scanned, total_files: 1, cancelled: true }); out = await scanPromise; });
+
+    expect(out).toMatchObject({ success: false, cancelled: true });
+    expect(mockSetGroups).not.toHaveBeenCalled();
+    expect(result.current.scanning).toBe(false);
+    expect(result.current.scanCancellable).toBe(false);
+  });
+
+  it('a scan Rust reports as cancelled is not applied', async () => {
+    serveScan({ groups: scanned, total_files: 1, cancelled: true });
+    const { result } = renderHook(() => useScan());
+    let out;
+    await act(async () => { out = await result.current.handleScan(); });
+    expect(out).toMatchObject({ cancelled: true });
+    expect(mockSetGroups).not.toHaveBeenCalled();
+  });
+
+  it('a rejected scan rethrows and clears the busy state', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    serveScan(() => Promise.reject(new Error('Permission denied')));
+    const { result } = renderHook(() => useScan());
+    await act(async () => {
+      await expect(result.current.handleScan()).rejects.toThrow('Permission denied');
+    });
+    expect(result.current.scanning).toBe(false);
+    expect(result.current.scanCancellable).toBe(false);
+  });
+
+  it('scanned groups are local books: never flagged needs_reimport', async () => {
+    serveScan({ groups: scanned, total_files: 1, cancelled: false });
+    const { result } = renderHook(() => useScan());
+    await act(async () => { await result.current.handleScan(); });
+    const applied = mockSetGroups.mock.calls[0][0];
+    expect(applied.every((g) => g.source !== 'abs' && !g.needs_reimport && g.files.every((f) => f.path))).toBe(true);
+  });
+
+  it('the hook no longer offers handleImport (import_folders does not exist)', () => {
+    const { result } = renderHook(() => useScan());
+    expect(result.current.handleImport).toBeUndefined();
+  });
+});
+
+describe('scanFolderWithNotice (#62)', () => {
+  const makeToast = () => ({ error: vi.fn(), info: vi.fn(), warning: vi.fn(), success: vi.fn() });
+
+  it('a rejected scan shows an error toast with the message', async () => {
+    const { scanFolderWithNotice } = await import('./useScan');
+    const toast = makeToast();
+    const onReplaced = vi.fn();
+    const out = await scanFolderWithNotice(vi.fn().mockRejectedValue(new Error('Permission denied')), toast, { onReplaced });
+    expect(toast.error).toHaveBeenCalledWith('Scan Failed', 'Permission denied');
+    expect(onReplaced).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ success: false });
+  });
+
+  it('a successful scan clears the selection (onReplaced) and says how many books it found', async () => {
+    const { scanFolderWithNotice } = await import('./useScan');
+    const toast = makeToast();
+    const onReplaced = vi.fn();
+    await scanFolderWithNotice(async () => ({ success: true, count: 3, files: 40 }), toast, { onReplaced });
+    expect(onReplaced).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith('Scan Complete', 'Found 3 books in 40 files.');
+  });
+
+  it('a cancelled scan toasts "Scan cancelled" and keeps the selection', async () => {
+    const { scanFolderWithNotice } = await import('./useScan');
+    const toast = makeToast();
+    const onReplaced = vi.fn();
+    await scanFolderWithNotice(async () => ({ success: false, cancelled: true }), toast, { onReplaced });
+    expect(toast.info).toHaveBeenCalledWith('Scan cancelled', 'The workspace was not changed.');
+    expect(onReplaced).not.toHaveBeenCalled();
+  });
+
+  it('a scan that found nothing warns and keeps the selection', async () => {
+    const { scanFolderWithNotice } = await import('./useScan');
+    const toast = makeToast();
+    const onReplaced = vi.fn();
+    await scanFolderWithNotice(async () => ({ success: false, empty: true, count: 0 }), toast, { onReplaced });
+    expect(toast.warning).toHaveBeenCalledWith('No Audiobooks Found', expect.any(String));
+    expect(onReplaced).not.toHaveBeenCalled();
+  });
+
+  it('a dismissed picker or a declined prompt is silent', async () => {
+    const { scanFolderWithNotice } = await import('./useScan');
+    const toast = makeToast();
+    await scanFolderWithNotice(async () => ({ success: false, dismissed: true }), toast);
+    await scanFolderWithNotice(async () => ({ success: false, declined: true }), toast);
+    expect(Object.values(toast).every((fn) => fn.mock.calls.length === 0)).toBe(true);
   });
 });

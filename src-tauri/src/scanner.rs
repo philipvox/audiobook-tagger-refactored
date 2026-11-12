@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use walkdir::WalkDir;
 
 use lofty::file::{AudioFile as _, TaggedFileExt};
@@ -50,6 +51,8 @@ pub struct BookGroup {
 pub struct ScanResult {
     pub groups: Vec<BookGroup>,
     pub total_files: usize,
+    /// The user cancelled: `groups` holds only the files read before it.
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -177,8 +180,75 @@ fn lookup_tag_field(tag: &lofty::tag::Tag, names: &[&str], known: &[ItemKey]) ->
     None
 }
 
-pub(crate) fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
-    let mut files = Vec::new();
+/// Progress and cancel for a scan (#62). `scan_library` drives the global
+/// `SCAN`; tests drive their own. `current` counts files read, `total` the
+/// audio files found by the walk so far.
+pub(crate) struct ScanState {
+    scanning: AtomicBool,
+    current: AtomicUsize,
+    total: AtomicUsize,
+    cancel: AtomicBool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanProgress {
+    pub scanning: bool,
+    pub current: usize,
+    pub total: usize,
+}
+
+impl ScanState {
+    pub(crate) const fn new() -> Self {
+        Self {
+            scanning: AtomicBool::new(false),
+            current: AtomicUsize::new(0),
+            total: AtomicUsize::new(0),
+            cancel: AtomicBool::new(false),
+        }
+    }
+
+    /// A scan starts: counters at zero, any earlier cancel cleared (a Cancel
+    /// clicked while no scan ran must not stop this one).
+    pub(crate) fn begin(&self) {
+        self.cancel.store(false, Ordering::SeqCst);
+        self.current.store(0, Ordering::SeqCst);
+        self.total.store(0, Ordering::SeqCst);
+        self.scanning.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn finish(&self) {
+        self.scanning.store(false, Ordering::SeqCst);
+    }
+
+    pub(crate) fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn progress(&self) -> ScanProgress {
+        ScanProgress {
+            scanning: self.scanning.load(Ordering::SeqCst),
+            current: self.current.load(Ordering::SeqCst),
+            total: self.total.load(Ordering::SeqCst),
+        }
+    }
+}
+
+static SCAN: ScanState = ScanState::new();
+
+/// An audio file the walk found, before its tags are read.
+struct FoundFile {
+    path: std::path::PathBuf,
+    root: String,
+}
+
+/// Walk the roots for audio files, counting them into `state.total`. Stops
+/// early (with what it found) when the scan is cancelled.
+fn find_audio_files(paths: &[String], state: &ScanState) -> Vec<FoundFile> {
+    let mut found = Vec::new();
     for root in paths {
         for entry in WalkDir::new(root)
             .follow_links(false)
@@ -208,6 +278,9 @@ pub(crate) fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
             })
             .filter_map(|e| e.ok())
         {
+            if state.is_cancelled() {
+                return found;
+            }
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -218,28 +291,63 @@ pub(crate) fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
                     continue;
                 }
                 if AUDIO_EXTENSIONS.contains(&ext_lower.as_str()) {
-                    let parent = path
-                        .parent()
-                        .unwrap_or(Path::new(""))
-                        .to_string_lossy()
-                        .to_string();
-                    let tags = read_embedded_tags(path);
-                    files.push(RawFile {
-                        path: path.to_string_lossy().to_string(),
-                        filename: path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string(),
-                        parent_dir: parent,
-                        root: root.clone(),
-                        tags,
-                    });
+                    found.push(FoundFile { path: path.to_path_buf(), root: root.clone() });
+                    state.total.fetch_add(1, Ordering::SeqCst);
                 }
             }
         }
     }
+    found
+}
+
+/// Read each found file's tags, counting into `state.current` and calling
+/// `after_file` after each one. Checks the cancel flag between files and
+/// returns the files read so far when it is set.
+fn read_found_files(found: Vec<FoundFile>, state: &ScanState, mut after_file: impl FnMut(&ScanState)) -> Vec<RawFile> {
+    let mut files = Vec::with_capacity(found.len());
+    for f in found {
+        if state.is_cancelled() {
+            break;
+        }
+        let path = f.path.as_path();
+        let parent = path
+            .parent()
+            .unwrap_or(Path::new(""))
+            .to_string_lossy()
+            .to_string();
+        let tags = read_embedded_tags(path);
+        files.push(RawFile {
+            path: path.to_string_lossy().to_string(),
+            filename: path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            parent_dir: parent,
+            root: f.root,
+            tags,
+        });
+        state.current.fetch_add(1, Ordering::SeqCst);
+        after_file(state);
+    }
     files
+}
+
+/// Walk and read without progress or cancel (tests of grouping and writing).
+#[cfg(test)]
+pub(crate) fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
+    let state = ScanState::new();
+    read_found_files(find_audio_files(paths, &state), &state, |_| {})
+}
+
+/// One scan: walk, read, group. On cancel the files read so far are grouped
+/// and returned with `cancelled: true`.
+pub(crate) fn scan_paths(paths: &[String], state: &ScanState, after_file: impl FnMut(&ScanState)) -> ScanResult {
+    let found = find_audio_files(paths, state);
+    let files = read_found_files(found, state, after_file);
+    let total_files = files.len();
+    let groups = group_files(files);
+    ScanResult { groups, total_files, cancelled: state.is_cancelled() }
 }
 
 /// A chapter/disc subfolder that should be climbed past to find the real book folder.
@@ -1102,13 +1210,32 @@ pub async fn scan_library(paths: Vec<String>) -> Result<ScanResult, String> {
     // The walk + per-file lofty probe is blocking I/O; keep it off the async
     // runtime's worker threads so the UI stays responsive during large scans.
     tauri::async_runtime::spawn_blocking(move || {
-        let files = collect_audio_files(&paths);
-        let total_files = files.len();
-        let groups = group_files(files);
-        ScanResult { groups, total_files }
+        // Clears `scanning` however the scan ends, a panic included.
+        struct Finish;
+        impl Drop for Finish {
+            fn drop(&mut self) {
+                SCAN.finish();
+            }
+        }
+        SCAN.begin();
+        let _finish = Finish;
+        scan_paths(&paths, &SCAN, |_| {})
     })
     .await
     .map_err(|e| format!("Scan task failed: {}", e))
+}
+
+/// Progress of the running scan, polled by the UI.
+#[tauri::command]
+pub fn get_scan_progress() -> ScanProgress {
+    SCAN.progress()
+}
+
+/// Stop the running scan after the file it is reading; it returns what it
+/// has grouped so far with `cancelled: true`. No-op when no scan runs.
+#[tauri::command]
+pub fn cancel_scan() {
+    SCAN.request_cancel();
 }
 
 #[cfg(test)]
@@ -1707,6 +1834,74 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].metadata.title, "Dune");
         assert_eq!(groups[0].metadata.author, "Frank Herbert");
+    }
+
+    // ---- Progress and cancel (#62) ----
+
+    /// Four one-file books, each in its own folder under a fresh root.
+    fn four_book_library() -> tempfile::TempDir {
+        let tmp = tempfile::Builder::new().prefix("tagger-test-").tempdir().unwrap();
+        for name in ["Alpha", "Bravo", "Charlie", "Delta"] {
+            let book = tmp.path().join("Some Author").join(name);
+            std::fs::create_dir_all(&book).unwrap();
+            std::fs::write(book.join(format!("{name}.m4b")), b"").unwrap();
+        }
+        tmp
+    }
+
+    #[test]
+    fn cancel_during_a_scan_returns_the_groups_found_so_far() {
+        let tmp = four_book_library();
+        let state = ScanState::new();
+        state.begin();
+        let result = scan_paths(&[tmp.path().to_string_lossy().to_string()], &state, |s| {
+            if s.progress().current == 2 {
+                s.request_cancel();
+            }
+        });
+        assert!(result.cancelled, "a cancelled scan says so");
+        assert_eq!(result.total_files, 2, "files after the cancel are not read");
+        let grouped: usize = result.groups.iter().map(|g| g.files.len()).sum();
+        assert_eq!(grouped, 2, "the files read before the cancel are grouped");
+        assert_eq!(result.groups.len(), 2);
+    }
+
+    #[test]
+    fn an_uncancelled_scan_reports_progress_and_reads_everything() {
+        let tmp = four_book_library();
+        let state = ScanState::new();
+        state.begin();
+        let mut seen = Vec::new();
+        let result = scan_paths(&[tmp.path().to_string_lossy().to_string()], &state, |s| {
+            let p = s.progress();
+            seen.push((p.current, p.total));
+        });
+        assert!(!result.cancelled);
+        assert_eq!(result.total_files, 4);
+        assert_eq!(result.groups.len(), 4);
+        assert_eq!(seen, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
+        state.finish();
+        assert!(!state.progress().scanning);
+    }
+
+    #[test]
+    fn cancel_scan_command_stops_the_running_scan() {
+        // The only test that touches the global scan state.
+        let tmp = four_book_library();
+        SCAN.begin();
+        assert!(get_scan_progress().scanning);
+        cancel_scan();
+        let result = scan_paths(&[tmp.path().to_string_lossy().to_string()], &SCAN, |_| {});
+        SCAN.finish();
+        assert!(result.cancelled);
+        assert_eq!(result.total_files, 0);
+        assert!(result.groups.is_empty());
+        assert!(!get_scan_progress().scanning);
+        // A new scan starts with the cancel cleared.
+        SCAN.begin();
+        assert!(!SCAN.is_cancelled());
+        assert_eq!(get_scan_progress().current, 0);
+        SCAN.finish();
     }
 
     // ---- Container folders / scan root never become the author ----

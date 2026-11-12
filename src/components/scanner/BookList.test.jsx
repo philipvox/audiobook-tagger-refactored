@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 
 vi.mock('../../api', () => ({ callBackend: vi.fn(async () => null) }));
@@ -49,5 +49,62 @@ describe('BookList per-book file list (LOW)', () => {
     renderList({ expandedGroups: new Set(['multi']) });
     expect(screen.getByRole('button', { name: '12 files' })).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByText('Long Book part 12.mp3')).toBeInTheDocument();
+  });
+});
+
+describe('BookList empty state (#62)', () => {
+  afterEach(() => { delete window.__TAURI_INTERNALS__; });
+
+  const renderEmpty = (props = {}) => {
+    const handlers = { onScan: vi.fn(), onImportFromAbs: vi.fn(), onNavigateToSettings: vi.fn() };
+    render(
+      <BookList
+        groups={[]}
+        selectedFiles={new Set()}
+        selectedGroupIds={new Set()}
+        expandedGroups={new Set()}
+        fileStatuses={{}}
+        {...handlers}
+        {...props}
+      />
+    );
+    return handlers;
+  };
+
+  it('with no ABS credentials, shows "Scan a local folder", and clicking it calls onScan', () => {
+    window.__TAURI_INTERNALS__ = {};
+    const { onScan, onImportFromAbs } = renderEmpty({ hasAbsConnection: false });
+    fireEvent.click(screen.getByRole('button', { name: /Scan a local folder/ }));
+    expect(onScan).toHaveBeenCalledTimes(1);
+    expect(onImportFromAbs).not.toHaveBeenCalled();
+  });
+
+  it('offers both choices; without credentials the ABS choice goes to Settings', () => {
+    window.__TAURI_INTERNALS__ = {};
+    const { onImportFromAbs, onNavigateToSettings } = renderEmpty({ hasAbsConnection: false });
+    fireEvent.click(screen.getByRole('button', { name: /Load from AudiobookShelf/ }));
+    expect(onNavigateToSettings).toHaveBeenCalledTimes(1);
+    expect(onImportFromAbs).not.toHaveBeenCalled();
+  });
+
+  it('with ABS credentials, "Load from AudiobookShelf" imports', () => {
+    window.__TAURI_INTERNALS__ = {};
+    const { onImportFromAbs } = renderEmpty({ hasAbsConnection: true });
+    expect(screen.getByRole('button', { name: /Scan a local folder/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Load from AudiobookShelf/ }));
+    expect(onImportFromAbs).toHaveBeenCalledTimes(1);
+  });
+
+  it('both choices are disabled while an operation runs', () => {
+    window.__TAURI_INTERNALS__ = {};
+    renderEmpty({ hasAbsConnection: true, scanning: true });
+    expect(screen.getByRole('button', { name: /Scan a local folder/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Load from AudiobookShelf/ })).toBeDisabled();
+  });
+
+  it('the browser build offers no local scan', () => {
+    renderEmpty({ hasAbsConnection: true });
+    expect(screen.queryByRole('button', { name: /Scan a local folder/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Load from AudiobookShelf/ })).toBeInTheDocument();
   });
 });

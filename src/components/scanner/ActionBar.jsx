@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
-import { Download, Upload, Tag, CheckCircle, Sparkles, FileText, Type, Library, X, Zap, RefreshCw, AlertTriangle, User, Search, Wrench, BookOpen, Users, Hash, Dna, ChevronDown, MoreHorizontal, Calendar, Settings, Mic } from 'lucide-react';
+import { Download, Upload, Tag, CheckCircle, Sparkles, FileText, Type, Library, X, Zap, RefreshCw, AlertTriangle, User, Search, Wrench, BookOpen, Users, Hash, Dna, ChevronDown, MoreHorizontal, Calendar, Settings, Mic, FolderOpen } from 'lucide-react';
+import { isTauri } from '../../lib/platform';
 
 // Per-book cost estimate (input ~2000 tokens, output ~1000 tokens)
 const MODEL_PRICES = {
@@ -76,6 +77,7 @@ export function ActionBar({
   writing,
   pushing,
   scanning,
+  scanningFolder = false, // #62: the running operation is a local folder scan
   cleaningGenres = false,
   assigningTags = false,
   fixingDescriptions = false,
@@ -248,11 +250,23 @@ export function ActionBar({
 
       {/* Action buttons */}
       <div className="flex items-center gap-1.5 flex-wrap">
+        {/* #62: Scan Folder (desktop only: the browser build cannot read local files) */}
+        {isTauri() && onScan && (
+          <PillBtn
+            onClick={onScan}
+            disabled={isProcessing}
+            active={scanningFolder}
+            icon={FolderOpen}
+            label="Scan Folder"
+            variant="primary"
+          />
+        )}
+
         {/* Import */}
         <PillBtn
           onClick={onPull}
           disabled={!hasAbsConnection || isProcessing}
-          active={scanning && !pushing}
+          active={scanning && !pushing && !scanningFolder}
           icon={Download}
           label="Import"
           variant="primary"
