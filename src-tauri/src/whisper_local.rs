@@ -2,6 +2,7 @@
 // Local whisper.cpp manager - download binary + models, transcribe locally
 // Follows the same pattern as ollama.rs
 
+use crate::download::{download_url_verified, partial_path_for, sha256_of_file, Pinned, IDLE_TIMEOUT, MAX_RETRIES};
 use crate::whisper::{run_child, std_command, stderr_tail, tokio_command, StepError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -352,6 +353,7 @@ fn check_sha256_hex(actual_hex: &str, expected_hex: &str) -> Result<(), String> 
 }
 
 /// Fail unless `bytes` hash to `expected_hex` (case-insensitive).
+#[cfg(test)]
 fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     check_sha256_hex(&hex_digest(&Sha256::digest(bytes)), expected_hex)
@@ -368,27 +370,28 @@ pub(crate) fn download_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("HTTP error: {}", e))
 }
 
-/// Download one pinned file, trying each mirror, and return its bytes only if
-/// they match the pinned SHA-256.
-async fn download_pinned(urls: &[&str], sha256: &str) -> Result<Vec<u8>, String> {
+/// Download one pinned file to `dest`, trying each mirror in turn. The file
+/// exists at `dest` only if it matches the pinned SHA-256. A stall or a
+/// broken stream resumes the same mirror (`download_url_verified`) before the
+/// next one is tried.
+async fn download_pinned(urls: &[&str], sha256: &str, dest: &Path) -> Result<(), String> {
     let client = download_client()?;
+    let partial = partial_path_for(dest);
+    let pin = Pinned { sha256, size: None, max_size: None };
     let mut errors = Vec::new();
     for url in urls {
-        let attempt = async {
-            let resp = client.get(*url).send().await.map_err(|e| format!("Download failed: {}", e))?;
-            if !resp.status().is_success() {
-                return Err(format!("Download failed: HTTP {}", resp.status()));
-            }
-            let bytes = resp.bytes().await.map_err(|e| format!("Read error: {}", e))?;
-            verify_sha256(&bytes, sha256)?;
-            Ok(bytes.to_vec())
-        };
-        match attempt.await {
-            Ok(bytes) => return Ok(bytes),
+        match download_url_verified(&client, url, &partial, dest, &pin, IDLE_TIMEOUT, MAX_RETRIES, |_, _| {}).await {
+            Ok(()) => return Ok(()),
             Err(e) => errors.push(format!("{}: {}", url, e)),
         }
     }
     Err(errors.join("; "))
+}
+
+/// The smallest file the app pins, for the real-download test.
+#[cfg(test)]
+pub(crate) fn smallest_pinned_download() -> (&'static str, &'static str) {
+    PINNED_SHA256[1]
 }
 
 /// Get the download URL for whisper-cpp binary for this platform.
@@ -697,24 +700,25 @@ async fn download_and_install_ffmpeg(window: &tauri::Window) -> Result<String, S
     let dir = whisper_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Dir error: {}", e))?;
 
-    let bytes = download_pinned(pinned.urls, pinned.sha256).await?;
+    // Straight to disk (resumable), then extracted from there.
+    let temp_dir = tempfile::tempdir().map_err(|e| format!("Temp error: {}", e))?;
+    let archive_path = temp_dir.path().join(match pinned.archive {
+        ArchiveKind::Zip => "ffmpeg.zip",
+        ArchiveKind::TarXz => "ffmpeg.tar.xz",
+    });
+    download_pinned(pinned.urls, pinned.sha256, &archive_path).await?;
 
     let _ = window.emit("whisper_install_progress", serde_json::json!({
         "stage": "extracting", "status": "Extracting FFmpeg...",
     }));
 
-    let temp_dir = tempfile::tempdir().map_err(|e| format!("Temp error: {}", e))?;
     let target_path = bundled_ffmpeg_path()?;
 
     match pinned.archive {
         ArchiveKind::Zip => {
-            let archive_path = temp_dir.path().join("ffmpeg.zip");
-            std::fs::write(&archive_path, &bytes).map_err(|e| format!("Write error: {}", e))?;
             extract_zip(&archive_path, temp_dir.path())?;
         }
         ArchiveKind::TarXz => {
-            let archive_path = temp_dir.path().join("ffmpeg.tar.xz");
-            std::fs::write(&archive_path, &bytes).map_err(|e| format!("Write error: {}", e))?;
             let mut cmd = tokio_command("tar");
             cmd.arg("-xJf").arg(&archive_path).arg("-C").arg(temp_dir.path());
             let never_cancelled = AtomicBool::new(false);
@@ -814,15 +818,14 @@ async fn download_and_install_binary(url: &str, window: &tauri::Window) -> Resul
     use tauri::Emitter;
 
     let expected = pinned_sha256_for(url).ok_or_else(|| format!("No pinned checksum for {}", url))?;
-    let bytes = download_pinned(&[url], expected).await?;
+    let temp_dir = tempfile::tempdir().map_err(|e| format!("Temp error: {}", e))?;
+    let zip_path = temp_dir.path().join("whisper.zip");
+    download_pinned(&[url], expected, &zip_path).await?;
 
     let _ = window.emit("whisper_install_progress", serde_json::json!({
         "stage": "extracting", "status": "Extracting binary...",
     }));
 
-    let temp_dir = tempfile::tempdir().map_err(|e| format!("Temp error: {}", e))?;
-    let zip_path = temp_dir.path().join("whisper.zip");
-    std::fs::write(&zip_path, &bytes).map_err(|e| format!("Write error: {}", e))?;
     let extracted = temp_dir.path().join("extracted");
     extract_zip(&zip_path, &extracted)?;
 
@@ -859,16 +862,10 @@ pub async fn whisper_local_download_model(
     let model_path = models_dir.join(preset.filename);
     let partial_path = models_dir.join(format!("{}.partial", preset.filename));
 
-    // Clean up any stale partial from a previous interrupted download.
-    if partial_path.exists() {
-        let _ = std::fs::remove_file(&partial_path);
-    }
-
-    // Treat an existing final file as valid only if it's not absurdly small
-    // (a truncated/failed download). Otherwise remove it and re-download.
+    // An existing file is reused only if it is the pinned file: a truncated
+    // or tampered one is removed and downloaded again.
     if model_path.exists() {
-        let size = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
-        if size >= 1_000_000 {
+        if existing_model_is_valid(&model_path, preset.sha256).await {
             return Ok(format!("Model {} already downloaded", model_id));
         }
         let _ = std::fs::remove_file(&model_path);
@@ -880,76 +877,25 @@ pub async fn whisper_local_download_model(
         "status": format!("Downloading {} ({}MB)...", preset.label, preset.size_mb),
     }));
 
+    // Into a .partial file (a stale one is discarded first), renamed to the
+    // final name only once its SHA-256 matches, so an interrupted download
+    // never passes for a valid model. A stall resumes; the download aborts as
+    // soon as more arrives than the model can be.
     let client = download_client()?;
-
-    let resp = client.get(&url).send().await.map_err(|e| format!("Download failed: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("Download failed: HTTP {}", resp.status()));
-    }
-
-    let total_size = resp.content_length().unwrap_or(0);
-    let mut downloaded: u64 = 0;
-    // Download into a .partial file; only rename to the final name once the size
-    // is verified, so an interrupted download never masquerades as a valid model.
-    let mut file =
-        std::fs::File::create(&partial_path).map_err(|e| format!("File error: {}", e))?;
-
-    use futures::StreamExt;
-    use sha2::{Digest, Sha256};
-    use std::io::Write;
-    let mut stream = resp.bytes_stream();
-    let mut hasher = Sha256::new();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = std::fs::remove_file(&partial_path);
-                return Err(format!("Stream error: {}", e));
-            }
-        };
-        if let Err(e) = file.write_all(&chunk) {
-            let _ = std::fs::remove_file(&partial_path);
-            return Err(format!("Write error: {}", e));
-        }
-        hasher.update(&chunk);
-        downloaded += chunk.len() as u64;
-
-        if total_size > 0 {
-            let pct = (downloaded as f64 / total_size as f64 * 100.0) as u32;
+    let pin = Pinned { sha256: preset.sha256, size: None, max_size: Some(model_size_limit(preset)) };
+    download_url_verified(&client, &url, &partial_path, &model_path, &pin, IDLE_TIMEOUT, MAX_RETRIES, |downloaded, total| {
+        if let Some(total) = total.filter(|t| *t > 0) {
+            let pct = (downloaded as f64 / total as f64 * 100.0) as u32;
             let _ = window.emit("whisper_install_progress", serde_json::json!({
                 "stage": "downloading",
                 "status": format!("Downloading {}: {}%", preset.label, pct),
                 "percent": pct,
                 "downloaded": downloaded,
-                "total": total_size,
+                "total": total,
             }));
         }
-    }
-
-    drop(file);
-
-    // Verify the downloaded size is within 20% of the expected size when known.
-    let expected = (preset.size_mb as u64) * 1_000_000;
-    if expected > 0 {
-        let low = expected * 8 / 10;
-        let high = expected * 12 / 10;
-        if downloaded < low || downloaded > high {
-            let _ = std::fs::remove_file(&partial_path);
-            return Err(format!(
-                "Downloaded {} looks wrong: got {} bytes, expected ~{} bytes. Please retry.",
-                preset.label, downloaded, expected
-            ));
-        }
-    } else if downloaded < 1_000_000 {
-        let _ = std::fs::remove_file(&partial_path);
-        return Err(format!(
-            "Downloaded {} is too small ({} bytes). Please retry.",
-            preset.label, downloaded
-        ));
-    }
-
-    finalize_model_download(&partial_path, &model_path, &hex_digest(&hasher.finalize()), preset.sha256)?;
+    })
+    .await?;
 
     let _ = window.emit("whisper_install_progress", serde_json::json!({
         "stage": "complete",
@@ -957,6 +903,22 @@ pub async fn whisper_local_download_model(
     }));
 
     Ok(format!("Model {} downloaded ({} MB)", model_id, preset.size_mb))
+}
+
+/// Most bytes a model download may bring: 20% over the preset's listed size
+/// (the listed sizes are rounded). The stream is cut off there, long before
+/// the hash would reject the file.
+fn model_size_limit(preset: &WhisperModelPreset) -> u64 {
+    (preset.size_mb as u64) * 1_000_000 * 12 / 10
+}
+
+/// Whether the model file already on disk is the pinned one. Hashed once,
+/// when the download is asked for again.
+async fn existing_model_is_valid(path: &Path, expected_sha256: &str) -> bool {
+    match sha256_of_file(path).await {
+        Ok(actual) => check_sha256_hex(&actual, expected_sha256).is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// Promote a downloaded model from `partial` to `dest` only if its SHA-256
@@ -1214,6 +1176,28 @@ mod tests {
     }
 
     /// The layout of the pinned whisper-bin-x64.zip (v1.8.4), trimmed.
+    #[tokio::test]
+    async fn existing_model_is_reused_only_when_it_matches_the_pin() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("ggml-base.bin");
+        // Over the old 1 MB "looks fine" threshold, but not the pinned file.
+        let bytes = vec![7u8; 1_200_000];
+        std::fs::write(&model, &bytes).unwrap();
+        let pinned = WHISPER_MODEL_PRESETS[0].sha256;
+        assert!(!existing_model_is_valid(&model, pinned).await, "a wrong file of plausible size was trusted");
+        assert!(existing_model_is_valid(&model, &hex_digest(&Sha256::digest(&bytes))).await);
+        assert!(!existing_model_is_valid(&dir.path().join("missing.bin"), pinned).await);
+    }
+
+    #[test]
+    fn model_downloads_stop_a_little_over_the_listed_size() {
+        for preset in WHISPER_MODEL_PRESETS {
+            let listed = preset.size_mb as u64 * 1_000_000;
+            assert!(model_size_limit(preset) > listed && model_size_limit(preset) <= listed * 12 / 10, "{}", preset.id);
+        }
+    }
+
     fn fake_windows_release(root: &Path) -> PathBuf {
         let release = root.join("Release");
         std::fs::create_dir_all(&release).unwrap();

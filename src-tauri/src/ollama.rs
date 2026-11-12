@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use crate::whisper::{run_child, stderr_tail, tokio_command, StepError};
-use crate::whisper_local::{download_client, finalize_model_download, hex_digest};
+use crate::download::{download_url_verified, next_chunk, partial_path_for, Pinned, IDLE_TIMEOUT, MAX_RETRIES};
+use crate::whisper_local::download_client;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -543,45 +544,29 @@ fn ollama_asset_for(os: &str, arch: &str) -> Option<&'static OllamaAsset> {
     OLLAMA_ASSETS.iter().find(|a| a.os == os && a.arch == arch)
 }
 
-/// Longest wait for the next chunk of any download or of the model pull
-/// stream. There is no overall deadline: a 9.6 GB model on a slow line is fine
-/// as long as bytes keep arriving. (The shared download client also sets a
-/// 30 s connect timeout and the same per-read timeout.)
-const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Longest silence the model pull stream may have. Ollama sends nothing while
+/// it verifies the digest of a large blob it has just downloaded, which takes
+/// minutes for a model of several GB, so the 60 s limit of the install
+/// downloads cut finished pulls off. There is no overall deadline.
+const PULL_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// An error and its sources, so "error decoding response body" also says why
-/// (for example "operation timed out").
-fn error_chain(e: &dyn std::error::Error) -> String {
-    let mut msg = e.to_string();
-    let mut source = e.source();
-    while let Some(s) = source {
-        msg.push_str(": ");
-        msg.push_str(&s.to_string());
-        source = s.source();
-    }
-    msg
-}
-
-/// The next item of `stream`, failing if nothing arrives within `idle`.
-async fn next_chunk<S, B, E>(stream: &mut S, idle: Duration) -> Result<Option<B>, String>
-where
-    S: futures::Stream<Item = Result<B, E>> + Unpin,
-    E: std::error::Error,
-{
-    use futures::StreamExt;
-    match tokio::time::timeout(idle, stream.next()).await {
-        Err(_) => Err(format!("No data received for {} seconds; the connection stalled", idle.as_secs())),
-        Ok(None) => Ok(None),
-        Ok(Some(Err(e))) => Err(format!("Stream error: {}", error_chain(&e))),
-        Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
-    }
+/// HTTP client for the model pull only: its per-read timeout is the pull's
+/// idle limit, not the 60 s of `download_client`.
+fn pull_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(PULL_IDLE_TIMEOUT)
+        .build()
+        .map_err(|e| format!("HTTP error: {}", e))
 }
 
 /// Stream `stream` into `<dest>.partial` while hashing it, then rename it to
 /// `dest` only if the size and SHA-256 match. Nothing is kept on failure.
-#[cfg_attr(windows, allow(dead_code))]
+/// One body, no retry: the install itself goes through
+/// `download_url_verified`, which runs the same checks and can resume.
+#[cfg(test)]
 async fn stream_to_verified_file<S, B, E>(
-    mut stream: S,
+    stream: S,
     dest: &Path,
     expected_size: u64,
     expected_sha256: &str,
@@ -591,39 +576,18 @@ where
     B: AsRef<[u8]>,
     E: std::error::Error,
 {
-    use sha2::{Digest, Sha256};
-    use std::io::Write;
-    let partial = dest.with_extension("partial");
-    let result = async {
-        let mut file = std::fs::File::create(&partial).map_err(|e| format!("File error: {}", e))?;
-        let mut hasher = Sha256::new();
-        let mut written: u64 = 0;
-        while let Some(chunk) = next_chunk(&mut stream, IDLE_TIMEOUT).await? {
-            let chunk = chunk.as_ref();
-            file.write_all(chunk).map_err(|e| format!("Write error: {}", e))?;
-            hasher.update(chunk);
-            written += chunk.len() as u64;
-            if written > expected_size {
-                return Err(format!("Download is larger than the expected {} bytes", expected_size));
-            }
+    use crate::download::{download_verified, FetchError, Opened, Pinned};
+    let mut body = Some(stream);
+    let fetch = |_offset: u64| {
+        let stream = body.take();
+        async move {
+            stream
+                .map(|stream| Opened { start: 0, total: None, stream })
+                .ok_or_else(|| FetchError::Fatal("the stream was already read".to_string()))
         }
-        file.flush().map_err(|e| format!("Write error: {}", e))?;
-        if written != expected_size {
-            return Err(format!(
-                "Download ended early: got {} of {} bytes",
-                written, expected_size
-            ));
-        }
-        Ok(hex_digest(&hasher.finalize()))
-    }
-    .await;
-    match result {
-        Ok(actual_hex) => finalize_model_download(&partial, dest, &actual_hex, expected_sha256),
-        Err(e) => {
-            let _ = std::fs::remove_file(&partial);
-            Err(e)
-        }
-    }
+    };
+    let pin = Pinned { sha256: expected_sha256, size: Some(expected_size), max_size: None };
+    download_verified(fetch, &dest.with_extension("partial"), dest, &pin, IDLE_TIMEOUT, 0, |_, _| {}).await
 }
 
 /// True if a symlink at `link` (relative to the extraction root, plain
@@ -862,7 +826,8 @@ fn swap_into_place(staged: &Path, dest: &Path) -> Result<(), String> {
 
 /// Download, verify, extract and check the pinned runtime in a temp directory
 /// inside `dir`, then move it to `runtime`. A failure at any step leaves the
-/// existing runtime (if any) untouched and removes the temp directory.
+/// existing runtime (if any) untouched and removes the temp directory. A
+/// stalled download is resumed, not started over (`download_url_verified`).
 #[cfg_attr(windows, allow(dead_code))]
 async fn install_runtime(asset: &OllamaAsset, dir: &Path, runtime: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create ollama dir: {}", e))?;
@@ -872,12 +837,10 @@ async fn install_runtime(asset: &OllamaAsset, dir: &Path, runtime: &Path) -> Res
         .map_err(|e| format!("Temp dir error: {}", e))?;
 
     let client = download_client()?;
-    let resp = client.get(asset.url).send().await.map_err(|e| format!("Download failed: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("Download failed with status {}", resp.status()));
-    }
     let archive = work.path().join("ollama-archive");
-    stream_to_verified_file(resp.bytes_stream(), &archive, asset.size, asset.sha256).await?;
+    let pin = Pinned { sha256: asset.sha256, size: Some(asset.size), max_size: None };
+    download_url_verified(&client, asset.url, &partial_path_for(&archive), &archive, &pin, IDLE_TIMEOUT, MAX_RETRIES, |_, _| {})
+        .await?;
     install_from_verified_archive(asset.archive, &archive, work.path(), runtime).await
 }
 
@@ -1053,9 +1016,25 @@ pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String,
     if !is_running(&base).await {
         return Err("Ollama is not running. Start it first.".to_string());
     }
-    // Connect and idle timeouts only: a 9.6 GB model on a slow line is fine.
-    let client = download_client()?;
-    let resp = client
+    pull_model(&base, &model_name, |completed, total, status| {
+        let _ = app_handle.emit("ollama-pull-progress", serde_json::json!({
+            "completed": completed,
+            "total": total,
+            "status": status,
+            "model": model_name,
+        }));
+    })
+    .await?;
+
+    Ok(format!("Model '{}' pulled successfully", model_name))
+}
+
+/// Ask the Ollama at `base` to pull `model_name` and follow its progress
+/// stream to the end. No overall deadline (a 9.6 GB model on a slow line is
+/// fine); the only limits are the connect timeout and `PULL_IDLE_TIMEOUT`
+/// between two chunks, on the client and on the stream alike.
+async fn pull_model(base: &str, model_name: &str, on_progress: impl FnMut(u64, u64, &str)) -> Result<(), String> {
+    let resp = pull_client()?
         .post(format!("{}/api/pull", base))
         .json(&serde_json::json!({ "name": model_name, "stream": true }))
         .send().await
@@ -1070,17 +1049,7 @@ pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String,
         return Err(format!("Pull failed: {}", msg));
     }
 
-    consume_pull_stream(resp.bytes_stream(), IDLE_TIMEOUT, |completed, total, status| {
-        let _ = app_handle.emit("ollama-pull-progress", serde_json::json!({
-            "completed": completed,
-            "total": total,
-            "status": status,
-            "model": model_name,
-        }));
-    })
-    .await?;
-
-    Ok(format!("Model '{}' pulled successfully", model_name))
+    consume_pull_stream(resp.bytes_stream(), PULL_IDLE_TIMEOUT, on_progress).await
 }
 
 #[tauri::command]
@@ -1204,6 +1173,60 @@ mod tests {
         assert!(result.unwrap_err().contains("No data received"));
     }
 
+    /// A pull stream that goes silent for `silence` between its first line
+    /// and its success line.
+    fn pull_with_silence(silence: Duration) -> impl futures::Stream<Item = Result<Vec<u8>, std::io::Error>> + Unpin {
+        use futures::StreamExt;
+        let last = futures::stream::once(async move {
+            tokio::time::sleep(silence).await;
+            Ok(b"{\"status\":\"success\"}\n".to_vec())
+        });
+        Box::pin(chunks(&["{\"status\":\"verifying sha256 digest\"}\n"]).chain(last))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pull_survives_the_silence_of_a_large_blob_being_verified() {
+        // Five minutes without a byte: longer than the install downloads
+        // allow, and what a pull of several GB really does.
+        assert!(Duration::from_secs(5 * 60) > IDLE_TIMEOUT);
+        let result = consume_pull_stream(pull_with_silence(Duration::from_secs(5 * 60)), PULL_IDLE_TIMEOUT, |_, _, _| {}).await;
+        assert_eq!(result, Ok(()));
+        // The limit is ten minutes, and it is still a limit.
+        assert_eq!(PULL_IDLE_TIMEOUT, Duration::from_secs(600));
+        let result = consume_pull_stream(pull_with_silence(Duration::from_secs(11 * 60)), PULL_IDLE_TIMEOUT, |_, _, _| {}).await;
+        assert!(result.unwrap_err().contains("No data received for 600 seconds"));
+    }
+
+    /// The pull as the command runs it (its own client and idle limit)
+    /// against a local server that is really silent for 65 seconds, longer
+    /// than the 60 s read timeout of the install downloads' client. Takes 65
+    /// seconds: `cargo test pull_outlasts_a_real_silence -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn pull_outlasts_a_real_silence_longer_than_the_install_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n").await;
+            let _ = socket.write_all(b"{\"status\":\"verifying sha256 digest\"}\n").await;
+            let _ = socket.flush().await;
+            tokio::time::sleep(Duration::from_secs(65)).await;
+            let _ = socket.write_all(b"{\"status\":\"success\"}\n").await;
+            let _ = socket.shutdown().await;
+        });
+        let mut statuses = Vec::new();
+        let started = std::time::Instant::now();
+        let result = pull_model(&base, "some-model", |_, _, s| statuses.push(s.to_string())).await;
+        eprintln!("pull result after {:?}: {result:?}", started.elapsed());
+        assert_eq!(result, Ok(()));
+        assert_eq!(statuses, vec!["verifying sha256 digest", "success"]);
+        assert!(started.elapsed() >= Duration::from_secs(65));
+    }
+
     // ---- Pinned install ----
 
     #[test]
@@ -1228,7 +1251,7 @@ mod tests {
 
     fn sha_hex(bytes: &[u8]) -> String {
         use sha2::{Digest, Sha256};
-        hex_digest(&Sha256::digest(bytes))
+        crate::whisper_local::hex_digest(&Sha256::digest(bytes))
     }
 
     #[tokio::test]

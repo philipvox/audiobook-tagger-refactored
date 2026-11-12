@@ -28,3 +28,7 @@ sha2 = "0.10"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 tar = "0.4"
 ruzstd = "0.8"
+
+[dev-dependencies]
+# Paused clock for the timeout tests (same tokio, one more feature).
+tokio = { version = "1", features = ["test-util"] }

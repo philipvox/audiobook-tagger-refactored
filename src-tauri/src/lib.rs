@@ -1,3 +1,4 @@
+mod download;
 mod scanner;
 mod session;
 mod writer;
