@@ -201,21 +201,24 @@ export function failedPushResult(groups, error) {
 /**
  * Orchestrate a push for the confirmed groups (#60).
  *
- *   pushById(groups)        -> handlePushAbsImports; used for every ABS-backed
- *                              group, whether or not it carries files.
- *   pushByFileIds(Set<id>)  -> pushToAudiobookShelf; only for local groups.
+ *   pushById(groups, { cancel })       -> handlePushAbsImports; used for
+ *                              every ABS-backed group, files or not.
+ *   pushByFileIds(Set<id>, { cancel }) -> pushToAudiobookShelf; only for
+ *                              local groups.
+ *
+ * H-7: `cancel` is this push's token (lib/cancel.js); both branches stop on it.
  *
  * A branch that throws is recorded as all of its books failing, so one
  * branch's failure never hides the other's outcome. Never throws.
  * Returns { attempted, absCount, localCount, updated, skipped, failed, summary }.
  */
-export async function runPush(groups, { pushById, pushByFileIds }) {
+export async function runPush(groups, { pushById, pushByFileIds, cancel = null }) {
   const { absGroups, localGroups } = partitionPushGroups(groups);
   const parts = [];
 
   if (absGroups.length > 0) {
     try {
-      parts.push(await pushById(absGroups));
+      parts.push(await (cancel ? pushById(absGroups, { cancel }) : pushById(absGroups)));
     } catch (error) {
       parts.push(failedPushResult(absGroups, error));
     }
@@ -228,7 +231,7 @@ export async function runPush(groups, { pushById, pushByFileIds }) {
       (g.files || []).forEach(f => { if (f.id != null) fileIds.add(f.id); })
     );
     try {
-      parts.push(await pushByFileIds(fileIds));
+      parts.push(await (cancel ? pushByFileIds(fileIds, { cancel }) : pushByFileIds(fileIds)));
     } catch (error) {
       parts.push(failedPushResult(localGroups, error));
     }
@@ -365,13 +368,11 @@ export async function pushOneAbsItem(item, { request, cfg = {} }) {
  * holds the advanced abs_original of each updated book and `refreshed` the
  * { snapshot, fields } of each book skipped because ABS already matched,
  * both keyed by book id.
- */
-/**
- * Push every item, `pushConcurrency(cfg)` at a time. H-7: once `shouldStop()`
- * is true no new book starts; books in flight finish and every book not
- * started is skipped with reason 'cancelled' (the result then carries
- * `cancelled: true`). Snapshots for the books that were written are returned
- * either way, so the caller can apply them.
+ *
+ * H-7: once `shouldStop()` is true no new book starts; books in flight finish
+ * and every book not started is skipped with reason 'cancelled' (the result
+ * then carries `cancelled: true`). Snapshots for the books that were written
+ * are returned either way, so the caller can apply them.
  */
 export async function pushAbsItems(items, { request, cfg = {}, shouldStop } = {}) {
   const onError = (err, item) => {

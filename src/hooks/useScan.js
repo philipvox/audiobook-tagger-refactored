@@ -4,7 +4,7 @@ import { callBackend, subscribe, pickPath } from '../api';
 import { useApp } from '../context/AppContext';
 import { getAbsId, normalizePushResult, buildPushItems, applyPushSnapshots, applyRefreshedLists, failedPushResult } from '../lib/absPush';
 import { logEvent } from '../lib/logEvent';
-import { requestCancel, resetCancel } from '../lib/cancel';
+import { requestCancel, startCancellable, finishCancellable } from '../lib/cancel';
 import { applyEntries } from '../lib/enrichActions';
 import { applyStaticGenreCleanupResult } from '../lib/applyAiResults';
 
@@ -143,6 +143,26 @@ export function useScan() {
   const groupsRef = useRef(currentGroups);
   groupsRef.current = currentGroups;
   const [scanning, setScanning] = useState(false);
+  // H-7: the cancel token (lib/cancel.js) of the operation the scan progress
+  // bar is showing (import, push, pipeline rescan); null while the running
+  // operation cannot be cancelled, so the bar offers no Cancel for it.
+  const scanCancelRef = useRef(null);
+  const [scanCancellable, setScanCancellable] = useState(false);
+  // Take a token for a bar operation (or adopt `parent`, the token of the
+  // operation it runs inside, e.g. a pipeline's auto-push).
+  const beginScanCancel = (parent = null) => {
+    const token = parent || startCancellable();
+    scanCancelRef.current = token;
+    setScanCancellable(true);
+    return token;
+  };
+  const endScanCancel = (token) => {
+    finishCancellable(token);
+    if (scanCancelRef.current === token) {
+      scanCancelRef.current = null;
+      setScanCancellable(false);
+    }
+  };
   const [scanProgress, setScanProgress] = useState({
     current: 0,
     total: 0,
@@ -537,7 +557,7 @@ export function useScan() {
     }
 
     let unlisten = null;
-    resetCancel();
+    const cancel = beginScanCancel();
     try {
       setScanning(true);
       const startTime = Date.now();
@@ -568,7 +588,7 @@ export function useScan() {
           ? { enrich_with_custom_providers: true }
           : null;
         let refreshed = 0;
-        const result = await callBackend('import_from_abs', { request });
+        const result = await callBackend('import_from_abs', { request, cancel });
 
         // H-7: a cancelled import leaves the workspace exactly as it was.
         if (result?.cancelled) {
@@ -583,10 +603,12 @@ export function useScan() {
           setGroups(prevGroups => mergeAbsPullGroups(prevGroups, result.groups));
         }
 
-        return { success: true, count: result?.total_imported || 0, refreshed };
+        // import_from_abs reports the number of books as `total`.
+        return { success: true, count: result?.total ?? result?.groups?.length ?? 0, refreshed };
 
       } finally {
         if (unlisten) unlisten();
+        endScanCancel(cancel);
         setScanning(false);
 
         resetTimeoutRef.current = setTimeout(() => {
@@ -604,19 +626,22 @@ export function useScan() {
     } catch (error) {
       console.error('ABS import failed:', error);
       if (unlisten) unlisten();
+      endScanCancel(cancel);
       setScanning(false);
       throw error;
     }
   }, [setGroups]);
 
   // Push ABS-imported books back to ABS library
-  const handlePushAbsImports = useCallback(async (groupsToPush) => {
+  // H-7: `cancel` (optional) is the token of an operation this push runs
+  // inside (a pipeline auto-push); without it the push takes its own.
+  const handlePushAbsImports = useCallback(async (groupsToPush, { cancel: parentCancel = null } = {}) => {
     if (!groupsToPush || groupsToPush.length === 0) {
       return { success: false, attempted: 0, updated: [], skipped: [], failed: [] };
     }
 
     let unlisten = null;
-    resetCancel();
+    const cancel = beginScanCancel(parentCancel);
     try {
 
       // Set up progress listener
@@ -646,7 +671,7 @@ export function useScan() {
       // what changed (see src/lib/absPayload.js).
       const request = { items: buildPushItems(groupsToPush) };
 
-      const raw = await callBackend('push_abs_imports', { request });
+      const raw = await callBackend('push_abs_imports', { request, cancel });
       const result = normalizePushResult(raw);
       // H-5: pushed books take the server's tags/genres and drop staged state.
       // Books skipped because ABS already matched adopt the server lists too.
@@ -685,6 +710,7 @@ export function useScan() {
       throw error;
     } finally {
       if (unlisten) unlisten();
+      if (!parentCancel) endScanCancel(cancel);
       setScanning(false);
     }
   }, [setGroups]);
@@ -810,6 +836,7 @@ export function useScan() {
 
     let unlisten = null;
     let pushOutcome = null; // #60: auto-push result, returned to the caller
+    const cancel = beginScanCancel();
     try {
       setScanning(true);
       const startTime = Date.now();
@@ -857,7 +884,7 @@ export function useScan() {
         concurrency: 150,  // Tier 3: 5000 RPM, 4M TPM
       };
 
-      const result = await callBackend('process_with_pipeline', { request });
+      const result = await callBackend('process_with_pipeline', { request, cancel });
 
       // Update groups with pipeline results
       if (result && result.books) {
@@ -883,8 +910,8 @@ export function useScan() {
           })
         );
 
-        // Auto-push to ABS if enabled
-        if (autoPush && result.processed > 0) {
+        // Auto-push to ABS if enabled (not after a Cancel: the user stopped the run)
+        if (autoPush && result.processed > 0 && !cancel.cancelled) {
           setScanProgress(prev => ({
             ...prev,
             currentFile: 'Pushing to ABS...',
@@ -892,7 +919,7 @@ export function useScan() {
 
           const groupsToPush = selectedGroups.filter(g => updatedMap.has(g.id));
           try {
-            pushOutcome = await handlePushAbsImports(groupsToPush);
+            pushOutcome = await handlePushAbsImports(groupsToPush, { cancel });
           } catch (pushError) {
             console.error('Auto-push failed:', pushError);
             pushOutcome = failedPushResult(groupsToPush, pushError);
@@ -900,7 +927,7 @@ export function useScan() {
         }
       }
 
-      return { success: true, count: result.processed, failed: result.failed, push: pushOutcome };
+      return { success: true, count: result.processed, failed: result.failed, cancelled: result.cancelled || 0, push: pushOutcome };
 
     } catch (error) {
       console.error('Pipeline rescan failed:', error);
@@ -909,6 +936,7 @@ export function useScan() {
       // L-10: unlisten belongs in finally (matching the other handlers) so a
       // thrown callBackend/setGroups error doesn't leak the subscription.
       if (unlisten) unlisten();
+      endScanCancel(cancel);
       setScanning(false);
       setScanProgress({
         current: 0,
@@ -959,8 +987,11 @@ export function useScan() {
   // operation's own finally hides the bar once it has stopped. Hiding the bar
   // here would only make the work invisible while it carried on.
   const cancelScan = useCallback(async () => {
-    requestCancel();
-    setScanProgress(prev => ({ ...prev, currentFile: 'Cancelling...' }));
+    const token = scanCancelRef.current;
+    if (token) {
+      requestCancel(token);
+      setScanProgress(prev => ({ ...prev, currentFile: 'Cancelling...' }));
+    }
     try {
       await callBackend('cancel_scan');
     } catch (error) {
@@ -970,6 +1001,7 @@ export function useScan() {
 
   return {
     scanning,
+    scanCancellable,
     scanProgress,
     calculateETA,
     handleScan,

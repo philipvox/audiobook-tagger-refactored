@@ -181,8 +181,8 @@ describe('runBatchChunks (M-6)', () => {
 
   it('a cancel during the first chunk keeps that chunk and skips the rest', async () => {
     const { runBatchChunks } = await import('./enrichActions');
-    const { requestCancel, resetCancel } = await import('./cancel');
-    resetCancel();
+    const { requestCancel, startCancellable } = await import('./cancel');
+    const token = startCancellable();
     const groups = Array.from({ length: 60 }, (_, i) => book(`b${i}`));
     const applied = [];
     const callBackend = classifyBackend();
@@ -190,12 +190,12 @@ describe('runBatchChunks (M-6)', () => {
     const out = await runBatchChunks(groups, {
       callChunk: async (chunk) => {
         const r = await callBackend('classify_books_batch', { books: chunk.map((g) => ({ id: g.id })) });
-        requestCancel();
+        requestCancel(token);
         return r;
       },
       applyChunk: (result) => applied.push(result.results.length),
+      shouldStop: () => token.cancelled,
     });
-    resetCancel();
 
     expect(applied).toEqual([25]);
     expect(out).toMatchObject({ processed: 25, cancelled: 35 });
@@ -215,25 +215,57 @@ describe('runBatchChunks (M-6)', () => {
       applyChunk: () => {},
       shouldStop: () => false,
     });
-    expect(out).toMatchObject({ processed: 5, failed: 25 });
+    expect(out).toMatchObject({ processed: 5, failed: 25, notProcessed: 0, firstError: 'HTTP 500' });
     expect(out.results[0]).toMatchObject({ id: 'b0', success: false, error: 'HTTP 500' });
     expect(out.results[0].errorDetail).toMatchObject({ stage: 'classify' });
+  });
+
+  it('two consecutive chunks failing with the same error stop the run; the rest are not processed', async () => {
+    const { runBatchChunks } = await import('./enrichActions');
+    const groups = Array.from({ length: 100 }, (_, i) => book(`b${i}`));
+    const callChunk = vi.fn(async () => { throw new Error('Invalid API key'); });
+    const out = await runBatchChunks(groups, { callChunk, applyChunk: () => {}, stage: 'resolve' });
+    expect(callChunk).toHaveBeenCalledTimes(2);
+    expect(out).toMatchObject({ processed: 0, failed: 50, notProcessed: 50, cancelled: 0, firstError: 'Invalid API key' });
+  });
+
+  it('different errors on consecutive chunks do not stop the run', async () => {
+    const { runBatchChunks } = await import('./enrichActions');
+    const groups = Array.from({ length: 75 }, (_, i) => book(`b${i}`));
+    let n = 0;
+    const callChunk = vi.fn(async () => { n++; throw new Error(`HTTP 50${n}`); });
+    const out = await runBatchChunks(groups, { callChunk, applyChunk: () => {}, stage: 'classify' });
+    expect(callChunk).toHaveBeenCalledTimes(3);
+    expect(out).toMatchObject({ failed: 75, notProcessed: 0, firstError: 'HTTP 501' });
+  });
+
+  it('with no shouldStop the run is never stopped (no shared token to go stale)', async () => {
+    const { runBatchChunks } = await import('./enrichActions');
+    const { requestCancel } = await import('./cancel');
+    requestCancel(); // cancels every running operation; this run has none
+    const groups = Array.from({ length: 30 }, (_, i) => book(`b${i}`));
+    const out = await runBatchChunks(groups, {
+      callChunk: async (chunk) => ({ results: chunk.map((g) => ({ id: g.id, success: true })), total_processed: chunk.length, total_failed: 0 }),
+      applyChunk: () => {},
+    });
+    expect(out).toMatchObject({ processed: 30, cancelled: 0 });
   });
 });
 
 describe('runEnrichAction stops between chunks on Cancel (M-6)', () => {
   it('what was applied stays applied and the toast says how many were processed', async () => {
-    const { requestCancel, resetCancel } = await import('./cancel');
-    resetCancel();
+    const { requestCancel, startCancellable } = await import('./cancel');
+    const token = startCancellable();
     const groups = Array.from({ length: 30 }, (_, i) => book(`b${i}`));
     const h = harness(groups);
     const callBackend = vi.fn(async () => {
-      requestCancel();
+      requestCancel(token);
       return { success: true, result: { title: 'New Title' } };
     });
 
-    const { counts, cancelled } = await runEnrichAction('titles', groups, { callBackend, setGroups: h.setGroups, toast: h.toast });
-    resetCancel();
+    const { counts, cancelled } = await runEnrichAction('titles', groups, {
+      callBackend, setGroups: h.setGroups, toast: h.toast, shouldStop: () => token.cancelled,
+    });
 
     expect(callBackend).toHaveBeenCalledTimes(25);
     expect(cancelled).toBe(5);

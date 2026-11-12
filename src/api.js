@@ -427,11 +427,12 @@ async function pushAbsHandler(args) {
     };
   }
 
-  // H-7: Cancel stops the pool; books not started come back skipped 'cancelled'.
+  // H-7: the caller's cancel token (args.cancel, lib/cancel.js) stops the
+  // pool; books not started come back skipped 'cancelled'.
   return pushAbsItems(items, {
     request: (path, options) => absApi(baseUrl, token, path, options),
     cfg: config,
-    shouldStop: isCancelled,
+    shouldStop: () => isCancelled(args.cancel),
   });
 }
 
@@ -474,12 +475,14 @@ const HANDLERS = {
     // instead: keep going while the last page was a full page, stop on an
     // empty or short page, and cap iterations so a misbehaving server can't
     // spin this forever.
-    // H-7: a cancelled import changes nothing; the caller must not replace
-    // or merge the workspace when it sees `cancelled`.
+    // H-7: a cancelled import (args.cancel, lib/cancel.js) changes nothing;
+    // the caller must not replace or merge the workspace when it sees
+    // `cancelled`.
+    const cancel = args?.cancel;
     const cancelledResult = { cancelled: true, groups: [], total: 0 };
     while (true) {
       const data = await absApi(baseUrl, token, `/api/libraries/${libraryId}/items?limit=${limit}&page=${page}&expanded=1`);
-      if (isCancelled()) return cancelledResult;
+      if (isCancelled(cancel)) return cancelledResult;
       const items = data.results || [];
       const total = data.total || 0;
       allItems.push(...items);
@@ -491,8 +494,8 @@ const HANDLERS = {
     }
 
     // Convert ABS items to book groups (shared builder, see lib/absGroup.js).
-    const groups = await absItemsToBookGroups(baseUrl, token, allItems, undefined, undefined, { shouldStop: isCancelled });
-    if (isCancelled()) return cancelledResult;
+    const groups = await absItemsToBookGroups(baseUrl, token, allItems, undefined, undefined, { shouldStop: () => isCancelled(cancel) });
+    if (isCancelled(cancel)) return cancelledResult;
     return { groups, total: groups.length };
   },
 
@@ -515,9 +518,11 @@ const HANDLERS = {
     const request = args.request || {};
     const books = request.books || [];
     const results = [];
-    let processed = 0, failed = 0;
+    let processed = 0, failed = 0, cancelled = 0;
 
     for (let i = 0; i < books.length; i++) {
+      // H-7: a Cancel (args.cancel) starts no further book; done books stay done.
+      if (isCancelled(args.cancel)) { cancelled = books.length - i; break; }
       const book = books[i];
       try {
         emitEvent('pipeline_progress', { current: i + 1, total: books.length, phase: 'classifying', message: `Classifying ${book.title}...` });
@@ -592,7 +597,7 @@ const HANDLERS = {
         failed++;
       }
     }
-    return { books: results, processed, failed };
+    return { books: results, processed, failed, ...(cancelled > 0 && { cancelled }) };
   },
 
   // === External Data Gathering ===

@@ -217,3 +217,40 @@ describe('useTagOperations.pushToAudiobookShelf (minor fix: line 114 guard)', ()
     consoleError.mockRestore();
   });
 });
+
+// Task 9 fix round 1 (H-7): a Cancel never leaks into a later local-group push.
+describe('useTagOperations.pushToAudiobookShelf cancel', () => {
+  const localGroups = [1, 2].map((n) => ({
+    id: `g${n}`, metadata: { title: `B${n}` }, files: [{ id: `f${n}`, path: `/books/${n}.m4b` }],
+  }));
+
+  it('a Cancel set beforehand (by another run) does not skip the books of a local-only push', async () => {
+    const { requestCancel, startCancellable } = await import('../lib/cancel');
+    requestCancel(startCancellable());
+    requestCancel();
+    mockGroups = localGroups;
+    mockCallBackend.mockResolvedValue({ updated: [{ id: 'g1', title: 'B1' }, { id: 'g2', title: 'B2' }], skipped: [], failed: [] });
+    const { result } = renderHook(() => useTagOperations());
+
+    let out;
+    await act(async () => { out = await result.current.pushToAudiobookShelf(new Set(['f1', 'f2']), { cancel: startCancellable() }); });
+
+    expect(mockCallBackend).toHaveBeenCalledWith('push_abs_updates', expect.objectContaining({ request: { items: expect.any(Array) } }));
+    expect(out.updated).toHaveLength(2);
+    expect(out.skipped).toEqual([]);
+  });
+
+  it('a cancelled push token sends nothing and reports the books skipped as cancelled', async () => {
+    const { requestCancel, startCancellable } = await import('../lib/cancel');
+    const cancel = startCancellable();
+    requestCancel(cancel);
+    mockGroups = localGroups;
+    const { result } = renderHook(() => useTagOperations());
+
+    let out;
+    await act(async () => { out = await result.current.pushToAudiobookShelf(new Set(['f1', 'f2']), { cancel }); });
+
+    expect(mockCallBackend).not.toHaveBeenCalled();
+    expect(out.skipped.map((x) => x.reason)).toEqual(['cancelled', 'cancelled']);
+  });
+});

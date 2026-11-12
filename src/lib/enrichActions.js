@@ -11,8 +11,9 @@
 //     (React may run an updater twice); the same applier then runs on the live
 //     groups inside the updater;
 //   - one summarizeBatch toast at the end, so total failure reads as failure;
-//   - M-6: a Cancel (lib/cancel.js) stops the loop between chunks. What was
-//     applied stays applied; the toast says how many were processed.
+//   - M-6: a Cancel (the caller's lib/cancel.js token, via shouldStop) stops
+//     the loop between chunks. What was applied stays applied; the toast says
+//     how many were processed.
 //
 // runBatchChunks is the chunk loop for the steps that send a whole selection
 // to one batch command (Resolve, Description Processing, Classify, DNA): 25
@@ -24,7 +25,6 @@ import {
 } from './applyAiResults.js';
 import { summarizeBatch, scrollToFirstErrorGroup } from './batchToast.js';
 import { errorDetailFromException } from './errorDetail.js';
-import { isCancelled } from './cancel.js';
 
 export const rejectedEntry = (err) => ({ success: false, error: String(err?.message || err) });
 
@@ -43,10 +43,11 @@ export function applyEntries(setGroups, sentGroups, entryFor, apply) {
 }
 
 // The end-of-run toast for an action. Returns the counts. `cancelled` is the
-// number of books a cancelled run never reached.
-export function reportOutcomes(toast, op, pairs, cancelled = 0) {
+// number of books a cancelled run never reached; `extra` may carry
+// { notProcessed, errorMessage } from runBatchChunks.
+export function reportOutcomes(toast, op, pairs, cancelled = 0, extra = {}) {
   const { counts, errorResults } = tallyOutcomes(pairs);
-  const summary = summarizeBatch({ op, ...counts, cancelled });
+  const summary = summarizeBatch({ op, ...counts, cancelled, ...extra });
   if (summary && toast) {
     const opts = (summary.hasWarnings || summary.hasFailures)
       ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(errorResults, summary.hasFailures ? 'error' : 'warn') } }
@@ -216,7 +217,8 @@ export const ENRICH_ACTIONS = Object.freeze({
  *   chunkSize     override the action's chunk size
  *   extraPairs    outcomes to include in the toast (e.g. smart-skipped books)
  *   onChunkStart(chunk, offset), onChunkDone(done, counts)  progress hooks
- *   shouldStop    checked before each chunk (default: the Cancel token)
+ *   shouldStop    checked before each chunk, e.g. () => token.cancelled
+ *                 (default: never stop)
  *
  * Returns { pairs, counts, cancelled } where counts is the tally of every
  * pair and cancelled is how many books a cancelled run never reached.
@@ -224,7 +226,7 @@ export const ENRICH_ACTIONS = Object.freeze({
 export async function runEnrichAction(name, groups, options = {}) {
   const action = ENRICH_ACTIONS[name];
   if (!action) throw new Error(`runEnrichAction: unknown action "${name}"`);
-  const { callBackend, setGroups, toast = null, ctx = {}, extraPairs = [], onChunkStart, onChunkDone, shouldStop = isCancelled } = options;
+  const { callBackend, setGroups, toast = null, ctx = {}, extraPairs = [], onChunkStart, onChunkDone, shouldStop = () => false } = options;
   const applyFn = options.apply || action.apply;
   const apply = (g, entry) => applyFn(g, entry, ctx);
   const chunkSize = options.chunkSize || action.chunkSize;
@@ -278,30 +280,39 @@ export const BATCH_CHUNK_SIZE = 25;
  *   applyChunk(result, chunk)  stage one chunk (calls setGroups)
  *   onChunkStart(chunk, offset)
  *   stage         errorDetail stage for a chunk whose call throws
- *   shouldStop    checked before each chunk (default: the Cancel token)
+ *   shouldStop    checked before each chunk, e.g. () => token.cancelled
+ *                 (default: never stop)
  *
  * A chunk whose call throws counts each of its books as failed (with the
- * error on the book) and the next chunk still runs.
+ * error on the book) and the next chunk still runs, unless two consecutive
+ * chunks have thrown the same error: that cause (a bad key, no provider)
+ * will fail every chunk, so the run stops and the remaining books are left
+ * not processed (not failed).
  *
- * Returns { results, processed, failed, cancelled } summed over the chunks;
- * cancelled is how many books a cancelled run never reached.
+ * Returns { results, processed, failed, cancelled, notProcessed, firstError }
+ * summed over the chunks. cancelled is how many books a cancelled run never
+ * reached; notProcessed how many an early stop left; firstError the message
+ * of the first chunk that threw (null if none did).
  */
 export async function runBatchChunks(items, options = {}) {
-  const { chunkSize = BATCH_CHUNK_SIZE, callChunk, applyChunk, onChunkStart, stage, shouldStop = isCancelled } = options;
-  const out = { results: [], processed: 0, failed: 0, cancelled: 0 };
+  const { chunkSize = BATCH_CHUNK_SIZE, callChunk, applyChunk, onChunkStart, stage, shouldStop = () => false } = options;
+  const out = { results: [], processed: 0, failed: 0, cancelled: 0, notProcessed: 0, firstError: null };
+  let lastThrown = null; // message of the previous chunk if it threw
   for (let i = 0; i < items.length; i += chunkSize) {
     if (shouldStop()) { out.cancelled = items.length - i; break; }
     const chunk = items.slice(i, i + chunkSize);
     onChunkStart?.(chunk, i);
     let result;
+    let thrown = null;
     try {
       result = await callChunk(chunk, i);
     } catch (err) {
       console.error(`Batch of ${chunk.length} failed:`, err);
-      const error = String(err?.message || err);
+      thrown = String(err?.message || err);
+      if (out.firstError == null) out.firstError = thrown;
       const errorDetail = errorDetailFromException(err, { stage });
       result = {
-        results: chunk.map((g) => ({ id: g.id, success: false, error, errorDetail })),
+        results: chunk.map((g) => ({ id: g.id, success: false, error: thrown, errorDetail })),
         total_processed: 0,
         total_failed: chunk.length,
       };
@@ -310,6 +321,11 @@ export async function runBatchChunks(items, options = {}) {
     out.results.push(...(Array.isArray(result?.results) ? result.results : []));
     out.processed += result?.total_processed || 0;
     out.failed += result?.total_failed || 0;
+    if (thrown != null && thrown === lastThrown) {
+      out.notProcessed = items.length - (i + chunk.length);
+      break;
+    }
+    lastThrown = thrown;
   }
   return out;
 }

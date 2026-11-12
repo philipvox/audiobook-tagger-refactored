@@ -1,11 +1,15 @@
 import { useState, useMemo } from 'react';
 import { X, UploadCloud, AlertTriangle, CheckCircle, BookOpen, User, Mic2, Tag, Image } from 'lucide-react';
 
-export function ABSPushModal({ isOpen, onClose, onConfirm, groups, pushing }) {
+// H-7: while a push runs this modal covers the progress bar, so its own
+// Cancel becomes "Cancel push" and calls onCancelPush (books in flight finish,
+// the rest are skipped). The modal closes when the push settles.
+export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups, pushing }) {
   const [confirmText, setConfirmText] = useState('');
   // H-7: disabled from the first click until the push settles, so a second
   // click before the parent reports `pushing` cannot start a second push.
   const [submitting, setSubmitting] = useState(false);
+  const [cancelRequested, setCancelRequested] = useState(false);
   const busy = pushing || submitting;
 
   // Calculate summary of changes
@@ -68,12 +72,19 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, groups, pushing }) {
   const handleConfirm = async () => {
     if (!confirmationValid || busy) return;
     setSubmitting(true);
+    setCancelRequested(false);
     setConfirmText('');
     try {
       await onConfirm();
     } finally {
       setSubmitting(false);
+      setCancelRequested(false);
     }
+  };
+
+  const handleCancelPush = () => {
+    setCancelRequested(true);
+    onCancelPush?.();
   };
 
   return (
@@ -199,13 +210,22 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, groups, pushing }) {
 
         {/* Footer */}
         <div className="px-6 py-4 border-t border-neutral-800 bg-neutral-950 flex items-center justify-end gap-3">
-          <button
-            onClick={onClose}
-            disabled={busy}
-            className="px-4 py-2 text-gray-300 hover:bg-neutral-800 rounded-lg transition-colors font-medium"
-          >
-            Cancel
-          </button>
+          {busy ? (
+            <button
+              onClick={handleCancelPush}
+              disabled={cancelRequested || !onCancelPush}
+              className="px-4 py-2 text-red-300 hover:bg-red-500/10 rounded-lg transition-colors font-medium disabled:opacity-60"
+            >
+              {cancelRequested ? 'Cancelling...' : 'Cancel push'}
+            </button>
+          ) : (
+            <button
+              onClick={onClose}
+              className="px-4 py-2 text-gray-300 hover:bg-neutral-800 rounded-lg transition-colors font-medium"
+            >
+              Cancel
+            </button>
+          )}
           <button
             onClick={handleConfirm}
             disabled={busy || !confirmationValid}

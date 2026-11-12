@@ -520,3 +520,14 @@ describe('Task 5 fix round 1', () => {
     expect(absApi.mock.calls[1][3].body.tags).toEqual(['Sci Fi', 'sci-fi', 'x', 'new-tag']);
   });
 });
+
+describe('runPush forwards the push cancel token (Task 9 fix round 1)', () => {
+  it('passes { cancel } to both branches', async () => {
+    const cancel = { cancelled: false };
+    const pushById = vi.fn(async () => ({ updated: [], skipped: [], failed: [] }));
+    const pushByFileIds = vi.fn(async () => ({ updated: [], skipped: [], failed: [] }));
+    await runPush([absGroupWithFiles, localGroup], { pushById, pushByFileIds, cancel });
+    expect(pushById).toHaveBeenCalledWith([absGroupWithFiles], { cancel });
+    expect(pushByFileIds).toHaveBeenCalledWith(new Set(['f-local']), { cancel });
+  });
+});

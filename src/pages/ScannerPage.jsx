@@ -35,7 +35,7 @@ import { applyClassifyResult } from '../lib/applyClassifyResult';
 import { applyTagsResultToGroup, applyDnaResultToGroup, normalizeResults } from '../lib/applyTagResults';
 import { applyDescriptionProcessResult, applyFixDescriptionResult, tallyOutcomes } from '../lib/applyAiResults';
 import { runEnrichAction, applyEntries, reportOutcomes, runBatchChunks } from '../lib/enrichActions';
-import { requestCancel, resetCancel, isCancelled } from '../lib/cancel';
+import { requestCancel, startCancellable, finishCancellable } from '../lib/cancel';
 import { syncAllSeries } from '../lib/absPayload';
 import { applyMetadataToGroup, readFileField, setYear } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
@@ -67,6 +67,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   // H-7: an ABS push is running (the modal's Confirm stays disabled).
   const [absPushing, setAbsPushing] = useState(false);
   const absPushingRef = useRef(false);
+  // H-7: the running push's cancel token (the modal's "Cancel push").
+  const pushCancelRef = useRef(null);
 
   // H3 (Run All stale groups): keep a live ref to `groups` so Run All's
   // sequential enrichment steps read each prior step's merged results instead
@@ -279,7 +281,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     handlePushAbsImports,
     handleCleanupGenres,
     handleRescan,
-    cancelScan
+    cancelScan,
+    scanCancellable,
   } = useScan();
 
   // H-4/H-9/H-7: tell the user how an import ended: refreshed books, a
@@ -855,19 +858,34 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
   // H-3/M-7: the per-book Enrich actions share one body (src/lib/enrichActions.js):
   // chunk loop, per-book failure, counting outside the updater, end toast.
-  const runAction = (name, sentGroups, options = {}) =>
-    runEnrichAction(name, sentGroups, { callBackend, setGroups, toast, ...options });
+  // `cancel` is the action's token from beginCancellable (M-6).
+  const runAction = (name, sentGroups, { cancel, ...options } = {}) =>
+    runEnrichAction(name, sentGroups, {
+      callBackend, setGroups, toast,
+      ...(cancel && { shouldStop: () => cancel.cancelled }),
+      ...options,
+    });
 
-  // H-7/M-6: every Enrich action starts with a fresh cancel token, so a stale
-  // Cancel from an earlier run never stops it. A Run All step keeps Run All's
-  // token, so a Cancel during one step also stops the steps after it.
-  const beginCancellable = () => {
-    if (!runAllActiveRef.current) resetCancel();
+  // H-7/M-6: every Enrich action takes its own cancel token (lib/cancel.js),
+  // keyed by its batch op so its progress bar's Cancel stops it and nothing
+  // else. A new action can never clear another's pending Cancel, and a stale
+  // Cancel never stops a new run. A Run All step uses Run All's token, so a
+  // Cancel during one step also stops the steps after it.
+  const opCancelRef = useRef({});
+  const runAllCancelRef = useRef(null);
+  const beginCancellable = (op) => {
+    const previous = opCancelRef.current[op];
+    if (previous && previous !== runAllCancelRef.current) finishCancellable(previous);
+    const token = (runAllActiveRef.current && runAllCancelRef.current) || startCancellable();
+    opCancelRef.current[op] = token;
+    return token;
   };
-  // The progress bar's Cancel: chunked actions stop before their next chunk;
+  // A progress bar's Cancel: chunked actions stop before their next chunk;
   // what was already applied stays applied.
-  const handleCancelBatch = () => {
-    requestCancel();
+  const handleCancelBatch = (op) => {
+    const token = opCancelRef.current[op];
+    if (!token || token.cancelled) return;
+    requestCancel(token);
     toast.info('Cancelling', 'Stopping once the books in progress finish.');
   };
 
@@ -891,7 +909,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-    beginCancellable();
+    const cancel = beginCancellable('genres');
     batch.start('genres', { total: selectedGroups.length, cleaned: 0, unchanged: 0 });
     logBatchStart('genres', selectedGroups.length);
 
@@ -906,6 +924,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // Chunks of 25. The applier keeps any genre from the import snapshot that
     // the answer has no replacement for.
     const { counts } = await runAction('genres', selectedGroups, {
+      cancel,
       ctx: { config },
       onChunkStart: (chunk, offset) => {
         chunkOffset = offset;
@@ -957,7 +976,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-    beginCancellable();
+    const cancel = beginCancellable('titles');
     batch.start('titles', { total: selectedGroups.length });
     logBatchStart('titles', selectedGroups.length);
 
@@ -965,6 +984,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // Chunks of 25 in parallel. resolve_title returns { success, result }; the
     // applier sets only title/author/subtitle (series is Fix Series' job).
     const { counts } = await runAction('titles', selectedGroups, {
+      cancel,
       onChunkStart: (chunk, offset) => batch.update('titles', { current: offset, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') }),
       onChunkDone: (done, c) => batch.update('titles', { current: done, success: c.succeeded + c.skipped + c.warnings, failed: c.failed }),
     });
@@ -983,7 +1003,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-    beginCancellable();
+    const cancel = beginCancellable('subtitles');
     batch.start('subtitles', { total: selectedGroups.length, fixed: 0, skipped: 0 });
     logBatchStart('subtitles', selectedGroups.length);
 
@@ -997,6 +1017,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Chunks of 10 (Audible rate limits). Failed books get lastError.
     const { counts } = await runAction('subtitles', selectedGroups, {
+      cancel,
       ctx: { config, force: forceFresh },
       onChunkStart: (chunk, offset) => {
         subtitleChunkOffset = offset;
@@ -1023,7 +1044,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-    beginCancellable();
+    const cancel = beginCancellable('authors');
     batch.start('authors', { total: selectedGroups.length, fixed: 0, skipped: 0 });
     logBatchStart('authors', selectedGroups.length);
 
@@ -1048,7 +1069,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     let authorsCancelled = 0;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
       // M-6: Cancel stops between batches; finished batches stay applied.
-      if (isCancelled()) { authorsCancelled = selectedGroups.length - i; break; }
+      if (cancel.cancelled) { authorsCancelled = selectedGroups.length - i; break; }
       const chunk = selectedGroups.slice(i, i + batchSize);
       authorChunkOffset = i;
 
@@ -1152,7 +1173,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // H3: read live groups so a Run All chain sees prior steps' merges.
     const currentGroups = groupsRef.current;
     const selectedGroups = allSelected ? currentGroups : currentGroups.filter(g => selectedGroupIds.has(g.id));
-    beginCancellable();
+    const cancel = beginCancellable('years');
     batch.start('years', { total: selectedGroups.length, fixed: 0, skipped: 0 });
     logBatchStart('years', selectedGroups.length);
 
@@ -1176,7 +1197,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     let yearsCancelled = 0;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
       // M-6: Cancel stops between batches; finished batches stay applied.
-      if (isCancelled()) { yearsCancelled = selectedGroups.length - i; break; }
+      if (cancel.cancelled) { yearsCancelled = selectedGroups.length - i; break; }
       const chunk = selectedGroups.slice(i, i + batchSize);
       yearChunkOffset = i;
 
@@ -1330,7 +1351,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       return;
     }
 
-    beginCancellable();
+    const cancel = beginCancellable('audio_check');
 
     batch.start('audio_check', { total: needsProcessing.length });
     logBatchStart('audio_check', needsProcessing.length);
@@ -1358,6 +1379,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       // per-book failure. Placeholder values ("Unknown") count as missing,
       // same as the skip gate above.
       const { counts } = await runAction('audio_check', needsProcessing, {
+      cancel,
         ctx: { config, force: forceFresh, field },
       });
       logBatchEnd('audio_check', { books: needsProcessing.length, field, updated: counts.succeeded, failed: counts.failed });
@@ -1376,7 +1398,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-    beginCancellable();
+    const cancel = beginCancellable('series');
     batch.start('series', { total: selectedGroups.length });
     logBatchStart('series', selectedGroups.length);
 
@@ -1385,6 +1407,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // (all_series keeps one entry per series); a book whose series list is
     // unknown is skipped without an AI call.
     const { counts } = await runAction('series', selectedGroups, {
+      cancel,
       onChunkStart: (chunk, offset) => batch.update('series', { current: offset, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') }),
       onChunkDone: (done, c) => batch.update('series', { current: done, success: c.succeeded + c.skipped + c.warnings, failed: c.failed }),
     });
@@ -1405,7 +1428,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-    beginCancellable();
+    const cancel = beginCancellable('age');
     batch.start('age', { total: selectedGroups.length });
     logBatchStart('age', selectedGroups.length);
 
@@ -1413,6 +1436,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // Chunks of 2 (web search is slow). Age tags go in through mergeClassifyTags
     // (snapshot age tags kept), the age genre through mergeGenres.
     const { counts } = await runAction('age', selectedGroups, {
+      cancel,
       onChunkStart: (chunk, offset) => batch.update('age', { current: offset, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') }),
       onChunkDone: (done, c) => batch.update('age', { current: done, success: c.succeeded + c.skipped, failed: c.failed + c.warnings }),
     });
@@ -1431,7 +1455,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
-    beginCancellable();
+    const cancel = beginCancellable('isbn');
 
     batch.start('isbn', {});
     // H3: read live groups so a Run All chain sees prior steps' merges.
@@ -1463,6 +1487,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // errors become per-book lastError and failures, separate from "not found".
     // Books the smart skip left out count as "already had ISBN".
     const { pairs } = await runAction('isbn', booksToProcess, {
+      cancel,
       ctx: { gathered: gatheredDataRef.current },
       extraPairs: Array.from({ length: skippedIsbn }, () => ({ id: null, outcome: 'unchanged' })),
       onChunkStart: (chunk, offset) => batch.update('isbn', { current: offset, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') }),
@@ -1524,7 +1549,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       return;
     }
 
-    beginCancellable();
+    const cancel = beginCancellable('metadata');
 
     batch.start('metadata', { total: booksToProcess.length, currentBook: 'Resolving metadata via ABS + GPT...' });
     logBatchStart('resolve', booksToProcess.length);
@@ -1594,6 +1619,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     try {
       // M-6: chunks of 25, each staged as it lands; Cancel stops between chunks.
       const run = await runBatchChunks(books, {
+        shouldStop: () => cancel.cancelled,
         stage: 'resolve',
         onChunkStart: (chunk, offset) => {
           metaChunkOffset = offset;
@@ -1615,8 +1641,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       const warnings = (result.results || []).filter(r =>
         r.errorDetail && !r.error && r.success !== false && severityForKind(r.errorDetail.kind) === 'warn'
       ).length;
-      batch.update('metadata', { current: booksToProcess.length - run.cancelled, success: processed, failed, currentBook: 'Complete' });
-      const summary = summarizeBatch({ op: 'resolve', succeeded: processed, skipped, warnings, failed, cancelled: run.cancelled });
+      batch.update('metadata', { current: booksToProcess.length - run.cancelled - run.notProcessed, success: processed, failed, currentBook: 'Complete' });
+      const summary = summarizeBatch({ op: 'resolve', succeeded: processed, skipped, warnings, failed, cancelled: run.cancelled, notProcessed: run.notProcessed, errorMessage: run.firstError });
       if (summary) {
         const errResults = result.results || [];
         const opts = (summary.hasWarnings || summary.hasFailures)
@@ -1683,7 +1709,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       return;
     }
 
-    beginCancellable();
+    const cancel = beginCancellable('descriptionProcessing');
 
     batch.start('descriptionProcessing', { total: booksToProcess.length, currentBook: 'Processing descriptions...' });
     logBatchStart('description', booksToProcess.length);
@@ -1709,6 +1735,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     try {
       // M-6: chunks of 25, each staged as it lands; Cancel stops between chunks.
       const run = await runBatchChunks(books, {
+        shouldStop: () => cancel.cancelled,
         stage: 'description',
         onChunkStart: (chunk, offset) => {
           descProcChunkOffset = offset;
@@ -1743,11 +1770,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       const processed = result.total_processed || 0;
       const failed = result.total_failed || 0;
       unlisten();
-      batch.update('descriptionProcessing', { current: booksToProcess.length - run.cancelled, success: processed, failed, currentBook: 'Complete' });
+      batch.update('descriptionProcessing', { current: booksToProcess.length - run.cancelled - run.notProcessed, success: processed, failed, currentBook: 'Complete' });
       const descWarnings = (result.results || []).filter(r =>
         r.errorDetail && !r.error && r.success !== false && severityForKind(r.errorDetail.kind) === 'warn'
       ).length;
-      const descSummary = summarizeBatch({ op: 'description', succeeded: processed, skipped: skippedDesc, warnings: descWarnings, failed, cancelled: run.cancelled });
+      const descSummary = summarizeBatch({ op: 'description', succeeded: processed, skipped: skippedDesc, warnings: descWarnings, failed, cancelled: run.cancelled, notProcessed: run.notProcessed, errorMessage: run.firstError });
       if (descSummary) {
         const errResults = result.results || [];
         const opts = (descSummary.hasWarnings || descSummary.hasFailures)
@@ -1781,8 +1808,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // the step handlers no-op and don't wipe the shared gather hints out from
     // under a later step. Reset in the finally no matter how we exit.
     runAllActiveRef.current = true;
-    // H-7/M-6: one cancel token for the whole chain (the steps keep it).
-    resetCancel();
+    // H-7/M-6: one cancel token for the whole chain (the steps use it).
+    const cancel = startCancellable();
+    runAllCancelRef.current = cancel;
+    opCancelRef.current.enrichment = cancel;
 
     // Phase 1: Gather all external API data upfront
     const totalSteps = 6; // gather + 5 enrichment steps
@@ -1846,7 +1875,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
       for (let i = 0; i < steps.length; i++) {
         // M-6: a Cancel stops the chain; finished steps stay applied.
-        if (isCancelled()) {
+        if (cancel.cancelled) {
           const left = steps.length - i;
           logEvent('enrichment', 'cancelled', { stepsLeft: left });
           toast.warning('Run All cancelled', `${stepSucceeded + stepFailed} of ${totalSteps} steps ran; the remaining ${left} ${left === 1 ? 'was' : 'were'} cancelled.`);
@@ -1885,6 +1914,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       // future standalone flow starts clean and its M2 clear works again.
       gatheredDataRef.current = null;
       runAllActiveRef.current = false;
+      runAllCancelRef.current = null;
+      finishCancellable(cancel);
       logBatchEnd('enrichment', {
         books: enrichmentBooks,
         steps: totalSteps,
@@ -1901,7 +1932,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-    beginCancellable();
+    const cancel = beginCancellable('tags');
     batch.start('tags', { total: selectedGroups.length });
     logBatchStart('tags', selectedGroups.length);
 
@@ -1922,7 +1953,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     let tagsCancelled = 0;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
       // M-6: Cancel stops between batches; finished batches stay applied.
-      if (isCancelled()) { tagsCancelled = selectedGroups.length - i; break; }
+      if (cancel.cancelled) { tagsCancelled = selectedGroups.length - i; break; }
       const chunk = selectedGroups.slice(i, i + batchSize);
       tagChunkOffset = i;
 
@@ -1978,6 +2009,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // cancelled; a Cancel also stops the age step between its chunks).
     const taggedGroups = tagsCancelled > 0 ? selectedGroups.slice(0, selectedGroups.length - tagsCancelled) : selectedGroups;
     const { counts: ageCounts } = await runAction('age_tags', taggedGroups, {
+      cancel,
       toast: null,
       onChunkStart: (chunk) => batch.update('tags', { currentBook: `Age: ${chunk.map(g => g.metadata?.title || g.group_name).join(', ')}` }),
     });
@@ -2011,7 +2043,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-    beginCancellable();
+    const cancel = beginCancellable('dna');
     batch.start('dna', { total: selectedGroups.length });
     logBatchStart('dna', selectedGroups.length);
 
@@ -2059,6 +2091,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       // chunks. Merge new dna: tags into existing tags (audit C-2). A failed
       // or empty answer leaves tags untouched and shows a per-book error.
       const run = await runBatchChunks(items, {
+        shouldStop: () => cancel.cancelled,
         stage: 'dna',
         onChunkStart: (chunk, offset) => { dnaChunkOffset = offset; },
         callChunk: async (chunk) => {
@@ -2079,9 +2112,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       const failedCount = dnaResults.filter(r => !r.success).length;
 
       // Show toast
-      if (run.cancelled > 0) {
-        const done = items.length - run.cancelled;
-        toast.warning('DNA Generation cancelled', `${done} of ${items.length} processed (${successCount} generated${failedCount ? `, ${failedCount} failed` : ''}); the remaining ${run.cancelled} ${run.cancelled === 1 ? 'was' : 'were'} cancelled.`);
+      // A cancelled run, a run stopped after repeated errors, or a thrown batch
+      // gets the shared summary (with the first error); otherwise the usual toasts.
+      const dnaUnusual = run.cancelled > 0 || run.notProcessed > 0 || run.firstError;
+      if (dnaUnusual) {
+        const dnaSummary = summarizeBatch({ op: 'dna', succeeded: successCount, failed: failedCount, cancelled: run.cancelled, notProcessed: run.notProcessed, errorMessage: run.firstError });
+        if (dnaSummary) toast[dnaSummary.type](dnaSummary.title, dnaSummary.message);
       } else if (successCount > 0) {
         toast.success('BookDNA Generated', `Generated DNA fingerprints for ${successCount} book${successCount > 1 ? 's' : ''}`);
       }
@@ -2091,7 +2127,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         { books: selectedGroups.length, succeeded: successCount, failed: failedCount, cancelled: run.cancelled },
         dnaResults
       );
-      if (failedCount > 0 && run.cancelled === 0) {
+      if (failedCount > 0 && !dnaUnusual) {
         toast.error('Some DNA not generated', `${failedCount} book${failedCount > 1 ? 's' : ''} kept their existing tags`);
       }
     } catch (error) {
@@ -2147,7 +2183,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // We record the ids to reset and apply the reset inside the success branch.
     const idsToForceReset = forceFresh ? new Set(booksToProcess.map(g => g.id)) : null;
 
-    beginCancellable();
+    const cancel = beginCancellable('classify');
 
     batch.start('classify', { total: booksToProcess.length, currentBook: 'Starting classification...' });
     logBatchStart('classify', booksToProcess.length);
@@ -2182,6 +2218,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       // M-6: chunks of 25, each staged as it lands; Cancel stops between
       // chunks. Local AI still batches 5 books per prompt inside each call.
       const run = await runBatchChunks(books, {
+        shouldStop: () => cancel.cancelled,
         stage: 'classify',
         onChunkStart: (chunk, offset) => {
           classifyChunkOffset = offset;
@@ -2277,12 +2314,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       const successCount = result.total_processed || 0;
       const failedCount = result.total_failed || 0;
 
-      batch.update('classify', { current: booksToProcess.length - run.cancelled, success: successCount, failed: failedCount, currentBook: 'Complete!' });
+      batch.update('classify', { current: booksToProcess.length - run.cancelled - run.notProcessed, success: successCount, failed: failedCount, currentBook: 'Complete!' });
 
       const classifyWarnings = (result.results || []).filter(r =>
         r.errorDetail && !r.error && r.success !== false && severityForKind(r.errorDetail.kind) === 'warn'
       ).length;
-      const classifySummary = summarizeBatch({ op: 'classify', succeeded: successCount, skipped: skippedClassify, warnings: classifyWarnings, failed: failedCount, cancelled: run.cancelled });
+      const classifySummary = summarizeBatch({ op: 'classify', succeeded: successCount, skipped: skippedClassify, warnings: classifyWarnings, failed: failedCount, cancelled: run.cancelled, notProcessed: run.notProcessed, errorMessage: run.firstError });
       if (classifySummary) {
         const errResults = result.results || [];
         const opts = (classifySummary.hasWarnings || classifySummary.hasFailures)
@@ -2319,7 +2356,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-    beginCancellable();
+    const cancel = beginCancellable('descriptions');
     batch.start('descriptions', { total: selectedGroups.length, fixed: 0, skipped: 0 });
     logBatchStart('descriptions', selectedGroups.length);
 
@@ -2336,6 +2373,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // the failure count.
     const pairs = [];
     const run = await runBatchChunks(selectedGroups, {
+      shouldStop: () => cancel.cancelled,
       stage: 'description',
       onChunkStart: (chunk, offset) => {
         descChunkOffset = offset;
@@ -2360,7 +2398,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       },
     });
     unlistenDescs();
-    const counts = reportOutcomes(toast, 'fix_descriptions', pairs, run.cancelled);
+    const counts = reportOutcomes(toast, 'fix_descriptions', pairs, run.cancelled, { notProcessed: run.notProcessed, errorMessage: run.firstError });
     logBatchEnd('descriptions', {
       books: selectedGroups.length,
       fixed: counts.succeeded,
@@ -2765,6 +2803,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     try {
       const result = await handlePipelineRescan(absImports);
+      if (result?.cancelled > 0) {
+        toast.warning('Pipeline cancelled', `${result.count || 0} processed; the remaining ${result.cancelled} ${result.cancelled === 1 ? 'was' : 'were'} cancelled.`);
+      }
       reportAutoPush(result);
       handleClearSelection();
     } catch (error) {
@@ -2835,6 +2876,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (absPushingRef.current) return;
     absPushingRef.current = true;
     setAbsPushing(true);
+    // H-7: this push's own token; a Cancel left over from anything else
+    // can never skip its books.
+    const cancel = startCancellable();
+    pushCancelRef.current = cancel;
 
     // #60: route by ABS item id, not by files.length - ABS-imported books
     // carry their audio files too, and the path-based branch cannot push them.
@@ -2844,6 +2889,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       const outcome = await runPush(pushGroups, {
         pushById: handlePushAbsImports,
         pushByFileIds: pushToAudiobookShelf,
+        cancel,
       });
       const { summary } = outcome;
       (toast[summary.type] || toast.info)(summary.title, summary.message);
@@ -2863,6 +2909,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     } finally {
       absPushingRef.current = false;
       setAbsPushing(false);
+      pushCancelRef.current = null;
+      finishCancellable(cancel);
       modals.close('push');
     }
   };
@@ -3018,7 +3066,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           key={scanProgress.startTime} 
           type="scan"
           progress={scanProgress}
-          onCancel={cancelScan}
+          // H-7: only operations that stop on a Cancel offer one.
+          onCancel={scanCancellable ? cancelScan : undefined}
           calculateETA={calculateETA}
         />
       )}
@@ -3034,7 +3083,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="tags"
           progress={tagProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('tags')}
         />
       )}
 
@@ -3042,7 +3091,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="descriptions"
           progress={descProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('descriptions')}
         />
       )}
 
@@ -3050,7 +3099,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="titles"
           progress={titleProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('titles')}
         />
       )}
 
@@ -3058,7 +3107,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="subtitles"
           progress={subtitleProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('subtitles')}
         />
       )}
 
@@ -3066,7 +3115,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="authors"
           progress={authorProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('authors')}
         />
       )}
 
@@ -3074,7 +3123,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="years"
           progress={yearProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('years')}
         />
       )}
 
@@ -3082,7 +3131,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="series"
           progress={seriesProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('series')}
         />
       )}
 
@@ -3090,7 +3139,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="age"
           progress={ageProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('age')}
         />
       )}
 
@@ -3098,7 +3147,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="isbn"
           progress={isbnProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('isbn')}
         />
       )}
 
@@ -3106,7 +3155,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="enrichment"
           progress={runAllProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('enrichment')}
         />
       )}
 
@@ -3114,7 +3163,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="dna"
           progress={dnaProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('dna')}
         />
       )}
 
@@ -3122,7 +3171,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="genres"
           progress={genreProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('genres')}
         />
       )}
 
@@ -3130,7 +3179,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="metadata"
           progress={metadataProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('metadata')}
         />
       )}
 
@@ -3138,7 +3187,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="classify"
           progress={classifyProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('classify')}
         />
       )}
 
@@ -3146,7 +3195,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="descriptionProcessing"
           progress={descriptionProgress}
-          onCancel={handleCancelBatch}
+          onCancel={() => handleCancelBatch('descriptionProcessing')}
         />
       )}
 
@@ -3157,7 +3206,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           onCancel={async () => {
             // The Rust side has its own cancel flag for the audio check; the
             // JS token stops anything still queued behind it.
-            requestCancel();
+            requestCancel(opCancelRef.current.audio_check);
             try {
               await callBackend('cancel_audio_extraction');
               toast.info('Cancelling audio extraction...');
@@ -3303,6 +3352,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         isOpen={modals.isOpen('push')}
         onClose={() => modals.close('push')}
         onConfirm={handleConfirmPush}
+        onCancelPush={() => { if (pushCancelRef.current) requestCancel(pushCancelRef.current); }}
         groups={modals.data.push?.groups || []}
         pushing={pushing || absPushing}
       />

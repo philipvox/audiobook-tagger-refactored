@@ -2,7 +2,8 @@ import { useState, useCallback } from 'react';
 import { callBackend } from '../api';
 import { useApp } from '../context/AppContext';
 import { buildWritePayload } from '../lib/writePayload';
-import { getAbsId, normalizePushResult, mergePushResults } from '../lib/absPush';
+import { getAbsId, normalizePushResult, mergePushResults, CANCELLED_REASON } from '../lib/absPush';
+import { isCancelled } from '../lib/cancel';
 
 export function useTagOperations() {
   const { config, groups, updateFileStatuses, setWriteProgress } = useApp();
@@ -117,7 +118,9 @@ function chunkArray(array, chunkSize) {
 // src/hooks/useTagOperations.js - OPTIMIZED VERSION
 // Only send ONE file per book group
 
-const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
+// H-7: `cancel` is this push's token (lib/cancel.js). With no token the push
+// cannot be cancelled, so a Cancel left over from another run never touches it.
+const pushToAudiobookShelf = useCallback(async (selectedFiles, { cancel = null } = {}) => {
   try {
     setPushing(true);
     
@@ -163,10 +166,19 @@ const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
     for (let i = 0; i < allItems.length; i += CHUNK_SIZE) {
       const chunk = allItems.slice(i, i + CHUNK_SIZE);
       const chunkNum = Math.floor(i / CHUNK_SIZE) + 1;
+
+      // H-7: after a Cancel no further chunk is sent; its books are skipped.
+      if (isCancelled(cancel)) {
+        totals = mergePushResults(totals, {
+          skipped: chunk.map(item => ({ id: item.group_id, title: item.metadata?.title || '', reason: CANCELLED_REASON })),
+        });
+        continue;
+      }
       
       try {
         const result = await callBackend('push_abs_updates', { 
-          request: { items: chunk } 
+          request: { items: chunk },
+          ...(cancel && { cancel }),
         });
         
         totals = mergePushResults(totals, normalizePushResult(result));

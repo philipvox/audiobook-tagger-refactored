@@ -126,3 +126,22 @@ describe('summarizeBatch cancelled runs (M-6)', () => {
     expect(s.message).toBe('0 of 10 processed; the remaining 10 were cancelled.');
   });
 });
+
+describe('summarizeBatch with a batch error or an early stop (Task 9 fix round 1)', () => {
+  it('names the first error when every chunk failed', () => {
+    const s = summarizeBatch({ op: 'classify', failed: 60, errorMessage: 'Invalid API key' });
+    expect(s.type).toBe('error');
+    expect(s.title).toBe('Classification: 60 failed');
+    expect(s.message).toBe('First error: Invalid API key');
+  });
+
+  it('says how many were not processed after an early stop', () => {
+    const s = summarizeBatch({ op: 'resolve', failed: 50, notProcessed: 50, errorMessage: 'Invalid API key' });
+    expect(s.message).toBe('Stopped after repeated errors; 50 not processed. First error: Invalid API key');
+  });
+
+  it('keeps the existing message ahead of the extras', () => {
+    const s = summarizeBatch({ op: 'description', succeeded: 5, skipped: 2, failed: 25, errorMessage: 'HTTP 500' });
+    expect(s.message).toBe('2 already ok. First error: HTTP 500');
+  });
+});

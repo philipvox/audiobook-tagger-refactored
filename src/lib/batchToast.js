@@ -19,6 +19,7 @@ const OPS = Object.freeze({
   series:      { v1Title: 'Fix Series Complete',          v2v3Title: 'Fix Series',          verb: 'fixed', skippedLabel: 'unchanged or skipped' },
   subtitles:   { v1Title: 'Fix Subtitles Complete',       v2v3Title: 'Fix Subtitles',       verb: 'fixed' },
   fix_descriptions: { v1Title: 'Fix Descriptions Complete', v2v3Title: 'Fix Descriptions', verb: 'fixed' },
+  dna:         { v1Title: 'BookDNA Generated',            v2v3Title: 'DNA Generation',      verb: 'generated' },
   genres:      { v1Title: 'Genre Cleanup Complete',       v2v3Title: 'Genre Cleanup',       verb: 'cleaned' },
   age:         { v1Title: 'Age Lookup Complete',          v2v3Title: 'Age Lookup',          verb: 'rated' },
   audio_check: { v1Title: 'Audio Check Complete',         v2v3Title: 'Audio Check',         verb: 'updated', skippedLabel: 'nothing new' },
@@ -37,7 +38,26 @@ const warningText = (meta, n) => `${n} ${meta.warningLabel || 'warnings'}`;
 // M-6: `cancelled` is the number of books a cancelled run never reached. When
 // it is set the toast says how many were processed and that the rest were
 // cancelled (what was already applied stays applied).
-export function summarizeBatch({ op, succeeded = 0, skipped = 0, warnings = 0, failed = 0, cancelled = 0 }) {
+//
+// `notProcessed` is how many books a run stopped early (repeated errors) left
+// untouched; `errorMessage` is the first batch error, shown so the cause (a
+// bad key, no provider) is in the toast and not only on the book pills.
+export function summarizeBatch({ op, succeeded = 0, skipped = 0, warnings = 0, failed = 0, cancelled = 0, notProcessed = 0, errorMessage = null }) {
+  const summary = summarizeCounts({ op, succeeded, skipped, warnings, failed, cancelled });
+  const extra = [];
+  if (notProcessed > 0) extra.push(`Stopped after repeated errors; ${notProcessed} not processed.`);
+  if (errorMessage) extra.push(`First error: ${errorMessage}`);
+  if (extra.length === 0) return summary;
+  const meta = OPS[op];
+  const base = summary || {
+    type: 'error', title: `${meta.v2v3Title} stopped`, message: undefined, hasWarnings: false, hasFailures: true,
+  };
+  const type = base.type === 'success' ? 'error' : base.type;
+  const head = base.message ? (/[.!?]$/.test(base.message) ? base.message : `${base.message}.`) : '';
+  return { ...base, type, message: [head, ...extra].filter(Boolean).join(' ') };
+}
+
+function summarizeCounts({ op, succeeded, skipped, warnings, failed, cancelled }) {
   const meta = OPS[op];
   if (!meta) throw new Error(`summarizeBatch: unknown op "${op}"`);
 

@@ -458,46 +458,92 @@ describe('useScan import and push cancel (H-7)', () => {
     mockSetGroups.mockReset();
     const { absApi } = await import('../lib/proxy');
     absApi.mockReset();
-    const { resetCancel } = await import('../lib/cancel');
-    resetCancel();
   });
 
-  it('a cancelled import resolves cancelled and leaves the workspace alone', async () => {
+  const fullPage = () => ({ results: Array.from({ length: 100 }, (_, i) => ({ id: `b${i}`, media: { metadata: { title: `B${i}` } } })) });
+  const pushGroups = [1, 2].map((n) => ({ id: `g${n}`, abs_id: `li-${n}`, metadata: { title: `B${n}` }, abs_original: { title: 'old' } }));
+  const serveLive = (absApi) => absApi.mockImplementation(async (_b, _t, _p, opts) => (opts?.method === 'PATCH' ? {} : { media: { tags: [], metadata: { genres: [] } } }));
+
+  it('Cancel on the bar during an import resolves cancelled and leaves the workspace alone', async () => {
     const { absApi } = await import('../lib/proxy');
-    const { requestCancel } = await import('../lib/cancel');
-    absApi.mockImplementation(async () => {
-      requestCancel();
-      return { results: Array.from({ length: 100 }, (_, i) => ({ id: `b${i}`, media: { metadata: { title: `B${i}` } } })) };
-    });
     const { result } = renderHook(() => useScan());
+    absApi.mockImplementation(async () => {
+      await result.current.cancelScan(); // the user clicks Cancel while page 1 loads
+      return fullPage();
+    });
 
     let out;
     await act(async () => { out = await result.current.handleImportFromAbs(); });
 
     expect(out).toMatchObject({ success: false, cancelled: true });
     expect(mockSetGroups).not.toHaveBeenCalled();
+    expect(result.current.scanCancellable).toBe(false);
+  });
+
+  it('a new operation does not wipe the pending Cancel of an import still running', async () => {
+    const { absApi } = await import('../lib/proxy');
+    const importHook = renderHook(() => useScan());
+    const pushHook = renderHook(() => useScan());
+    let releasePage;
+    absApi.mockImplementation(async (_b, _t, path, opts) => {
+      if (path.includes('/libraries/')) { await new Promise((r) => { releasePage = r; }); return fullPage(); }
+      return opts?.method === 'PATCH' ? {} : { media: { tags: [], metadata: { genres: [] } } };
+    });
+
+    let importPromise;
+    await act(async () => { importPromise = importHook.result.current.handleImportFromAbs(); await Promise.resolve(); });
+    await act(async () => { await importHook.result.current.cancelScan(); });
+    let pushOut;
+    await act(async () => { pushOut = await pushHook.result.current.handlePushAbsImports(pushGroups); });
+    let importOut;
+    await act(async () => { releasePage(); importOut = await importPromise; });
+
+    expect(pushOut.updated).toHaveLength(2);
+    expect(importOut).toMatchObject({ cancelled: true });
+  });
+
+  it('an import reports its book count from `total`', async () => {
+    const { absApi } = await import('../lib/proxy');
+    absApi.mockResolvedValueOnce({ results: [{ id: 'a', media: { metadata: { title: 'A' } } }, { id: 'b', media: { metadata: { title: 'B' } } }], total: 2 });
+    const { result } = renderHook(() => useScan());
+    let out;
+    await act(async () => { out = await result.current.handleImportFromAbs(); });
+    expect(out).toMatchObject({ success: true, count: 2 });
   });
 
   it('a cancel left over from an earlier run does not stop the next push', async () => {
     const { absApi } = await import('../lib/proxy');
-    const { requestCancel } = await import('../lib/cancel');
-    absApi.mockImplementation(async (_b, _t, _p, opts) => (opts?.method === 'PATCH' ? {} : { media: { tags: [], metadata: { genres: [] } } }));
+    const { requestCancel, startCancellable } = await import('../lib/cancel');
+    serveLive(absApi);
+    requestCancel(startCancellable());
     requestCancel();
     const { result } = renderHook(() => useScan());
-    const groups = [1, 2].map((n) => ({ id: `g${n}`, abs_id: `li-${n}`, metadata: { title: `B${n}` }, abs_original: { title: 'old' } }));
 
     let out;
-    await act(async () => { out = await result.current.handlePushAbsImports(groups); });
+    await act(async () => { out = await result.current.handlePushAbsImports(pushGroups); });
 
     expect(out.updated).toHaveLength(2);
     expect(out.skipped).toEqual([]);
   });
 
-  it('cancelScan requests a cancel and keeps the progress bar until the work stops', async () => {
-    const { isCancelled } = await import('../lib/cancel');
+  it('a push given a cancelled parent token skips its books as cancelled', async () => {
+    const { absApi } = await import('../lib/proxy');
+    const { requestCancel, startCancellable } = await import('../lib/cancel');
+    serveLive(absApi);
+    const parent = startCancellable();
+    requestCancel(parent);
     const { result } = renderHook(() => useScan());
+    let out;
+    await act(async () => { out = await result.current.handlePushAbsImports(pushGroups, { cancel: parent }); });
+    expect(out.updated).toEqual([]);
+    expect(out.skipped.map((x) => x.reason)).toEqual(['cancelled', 'cancelled']);
+  });
+
+  it('with nothing cancellable running, cancelScan shows no "Cancelling..."', async () => {
+    const { result } = renderHook(() => useScan());
+    expect(result.current.scanCancellable).toBe(false);
     await act(async () => { await result.current.cancelScan(); });
-    expect(isCancelled()).toBe(true);
+    expect(result.current.scanProgress.currentFile).toBe('');
   });
 });
 

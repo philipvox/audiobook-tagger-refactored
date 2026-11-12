@@ -1,21 +1,43 @@
-// cancel.js - the one cancel token for long-running operations (audit H-7, M-6).
+// cancel.js - cancel tokens for long-running operations (audit H-7, M-6).
 //
-// The progress bar's Cancel calls requestCancel(). Import and push loops check
-// isCancelled() between items; the chunked Enrich actions check it between
-// chunks. Work already done stays done: a cancel only stops what has not
-// started. Every operation calls resetCancel() when it starts, so a stale
-// cancel from an earlier run never stops the next one.
+// Each operation takes its own token when it starts (startCancellable) and
+// checks `token.cancelled` between items or chunks. A Cancel button calls
+// requestCancel(token) for the operation it belongs to. Work already done
+// stays done: a cancel only stops what has not started.
+//
+// Per-operation tokens mean starting a new operation can never clear a Cancel
+// the user asked for on one that is still running, and a Cancel left over
+// from an earlier run can never stop the next one (it gets a fresh token).
 
-export const cancelToken = { cancelled: false };
+const active = new Set();
 
-export function requestCancel() {
-  cancelToken.cancelled = true;
+/** A fresh, not-cancelled token for one operation. */
+export function startCancellable() {
+  const token = { cancelled: false };
+  active.add(token);
+  return token;
 }
 
-export function resetCancel() {
-  cancelToken.cancelled = false;
+/** The operation has settled; its token no longer needs tracking. */
+export function finishCancellable(token) {
+  if (token) active.delete(token);
 }
 
-export function isCancelled() {
-  return cancelToken.cancelled === true;
+/**
+ * Cancel one operation (`token`), or with no argument every operation still
+ * running.
+ */
+export function requestCancel(token) {
+  if (token) {
+    token.cancelled = true;
+    active.delete(token);
+    return;
+  }
+  for (const t of active) t.cancelled = true;
+  active.clear();
+}
+
+/** True once `token` was cancelled. A missing token is never cancelled. */
+export function isCancelled(token) {
+  return token?.cancelled === true;
 }
