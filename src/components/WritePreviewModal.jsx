@@ -1,12 +1,12 @@
-import { useState, useMemo, useCallback } from 'react';
-import { X, FileAudio, AlertTriangle, CheckCircle, Zap, Check, Square, CheckSquare } from 'lucide-react';
+import { useState } from 'react';
+import { X, FileAudio, AlertTriangle, CheckCircle, Zap, Square, CheckSquare } from 'lucide-react';
+import { splitFileChanges } from '../lib/writePayload';
+import { fileNameOf } from '../lib/localWrite';
 
-// Fields that live only in AudiobookShelf and are NOT embeddable in the audio
-// file's tags (the Rust writer reports these as skipped_fields). They still push
-// to ABS, but the file-write preview must not over-promise that they land in the
-// file. Note the singular `genre` IS written (ID3 TCON / MP4 gnre); only the
-// plural ABS-only collections below are unwritable.
-const ABS_ONLY_FIELDS = new Set(['tags', 'genres', 'dna_tags', 'dna', 'age_tags', 'age']);
+// #62: the preview lists only what the Rust writer will write. A staged change
+// the writer cannot embed (app-only fields such as tags, DNA and age rating,
+// or a field this file's format has no tag for) is shown separately with the
+// reason and is never sent; buildWritePayload applies the same split.
 
 export function WritePreviewModal({
   isOpen,
@@ -22,22 +22,26 @@ export function WritePreviewModal({
 
   if (!isOpen) return null;
 
-  // Build preview data with file IDs for tracking
+  // Build preview data with file IDs for tracking. `changes` holds only the
+  // fields that will be written; `notWritten` the staged ones that will not.
   const previewData = [];
   groups.forEach(group => {
     (group.files || []).forEach(file => {
       // Guard files with no `changes` object (e.g. freshly ABS-imported files),
       // matching the L-12 convention elsewhere in the app.
-      if (selectedFiles.has(file.id) && Object.keys(file.changes || {}).length > 0) {
-        previewData.push({
-          fileId: file.id,
-          filename: file.filename,
-          path: file.path,
-          changes: file.changes
-        });
-      }
+      if (!selectedFiles.has(file.id) || Object.keys(file.changes || {}).length === 0) return;
+      const { writable, notWritten } = splitFileChanges(file);
+      previewData.push({
+        fileId: file.id,
+        filename: file.filename || fileNameOf(file.path),
+        path: file.path,
+        changes: Object.fromEntries(writable),
+        notWritten,
+      });
     });
   });
+  const filesToWrite = previewData.filter(file => Object.keys(file.changes).length > 0).length;
+  const appOnlyCount = previewData.reduce((sum, file) => sum + file.notWritten.length, 0);
 
   // Calculate totals considering exclusions
   const totalChanges = previewData.reduce((sum, file) => sum + Object.keys(file.changes).length, 0);
@@ -80,7 +84,8 @@ export function WritePreviewModal({
 
   // Check if all changes for a file are excluded
   const isFileFullyExcluded = (fileId, changes) => {
-    return Object.keys(changes).every(field => excludedChanges.has(`${fileId}:${field}`));
+    const fields = Object.keys(changes);
+    return fields.length > 0 && fields.every(field => excludedChanges.has(`${fileId}:${field}`));
   };
 
   // Handle confirm with filtered changes
@@ -117,9 +122,14 @@ export function WritePreviewModal({
                 Write Tags Preview
               </h3>
               <p className="text-gray-400 text-sm">
-                Review the changes that will be written to {previewData.length} file{previewData.length === 1 ? '' : 's'} 
-                ({totalChanges} total changes)
+                Review the changes that will be written to {filesToWrite} file{filesToWrite === 1 ? '' : 's'}{' '}
+                ({totalChanges} change{totalChanges === 1 ? '' : 's'}).
               </p>
+              {appOnlyCount > 0 && (
+                <p className="text-amber-500 text-sm mt-1">
+                  {appOnlyCount} staged change{appOnlyCount === 1 ? ' stays' : 's stay'} in the app only and will not be written to the files. Each one is listed under its file with the reason.
+                </p>
+              )}
               
               {/* ✅ NEW: Backup Options */}
               <div className="mt-4 space-y-2">
@@ -217,12 +227,6 @@ export function WritePreviewModal({
                               </div>
                             </div>
 
-                            {ABS_ONLY_FIELDS.has(field) && (
-                              <div className="text-xs text-amber-500 italic">
-                                ABS only - not written to file
-                              </div>
-                            )}
-
                             {isExcluded && (
                               <div className="text-xs text-gray-400 italic">This change will be skipped</div>
                             )}
@@ -232,6 +236,21 @@ export function WritePreviewModal({
                     );
                   })}
                 </div>
+
+                {file.notWritten.length > 0 && (
+                  <div className="px-4 py-3 bg-neutral-950 border-t border-neutral-800">
+                    <div className="text-xs font-medium text-amber-500 mb-1">Not written to this file:</div>
+                    <ul className="space-y-1">
+                      {file.notWritten.map(({ field, change, reason }) => (
+                        <li key={field} className="text-xs text-gray-400">
+                          <span className="font-medium text-gray-300">{field.charAt(0).toUpperCase() + field.slice(1)}</span>
+                          {change?.new ? <span className="font-mono"> ({String(change.new)})</span> : null}
+                          {': '}{reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             ))}
           </div>

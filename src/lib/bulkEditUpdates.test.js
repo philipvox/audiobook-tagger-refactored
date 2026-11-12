@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeBulkUpdates } from './bulkEditUpdates';
+import { computeBulkUpdates, bulkFileChanges } from './bulkEditUpdates';
 
 describe('computeBulkUpdates (H1/M10 bulk-edit precedence)', () => {
   it('does not manufacture a change for a checked field left at its prefilled common value', () => {
@@ -82,5 +82,30 @@ describe('computeBulkUpdates (H1/M10 bulk-edit precedence)', () => {
       commonValues: {},
     });
     expect(updates).toEqual({});
+  });
+});
+
+describe('bulkFileChanges (W-8: handleBulkSave)', () => {
+  it('a file with no changes object does not throw and gets the staged changes', () => {
+    const file = { id: 'f', path: '/a.m4b' };
+    const changes = bulkFileChanges(file, { author: 'New', narrator: 'Reader', genres: ['Fantasy'], year: '2001' });
+    expect(changes).toEqual({
+      author: { old: '', new: 'New' },
+      narrator: { old: '', new: 'Narrated by Reader' },
+      genre: { old: '', new: 'Fantasy' },
+      year: { old: '', new: '2001' },
+    });
+  });
+
+  it('keeps unrelated staged changes and the original old value', () => {
+    const file = { changes: { title: { old: 'T', new: 'T2' }, author: { old: 'Orig', new: 'Mid' } } };
+    expect(bulkFileChanges(file, { author: 'Final' })).toEqual({
+      title: { old: 'T', new: 'T2' },
+      author: { old: 'Orig', new: 'Final' },
+    });
+  });
+
+  it('a present null clears the field', () => {
+    expect(bulkFileChanges({ changes: {} }, { publisher: null }).publisher).toEqual({ old: '', new: '' });
   });
 });

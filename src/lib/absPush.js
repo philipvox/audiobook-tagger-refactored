@@ -16,6 +16,9 @@ const s = (v) => (v == null ? '' : String(v).trim());
 /** H-7: the skip reason for a book a cancelled push never started. */
 export const CANCELLED_REASON = 'cancelled';
 
+/** #62: the skip reason (and Push tooltip) for a locally scanned book. */
+export const LOCAL_PUSH_REASON = 'Local folders have no ABS item to push to';
+
 /** The ABS library item id for a group, or null if it is not ABS-backed. */
 export function getAbsId(group) {
   if (!group) return null;
@@ -201,18 +204,20 @@ export function failedPushResult(groups, error) {
 /**
  * Orchestrate a push for the confirmed groups (#60).
  *
- *   pushById(groups, { cancel })       -> handlePushAbsImports; used for
- *                              every ABS-backed group, files or not.
- *   pushByFileIds(Set<id>, { cancel }) -> pushToAudiobookShelf; only for
- *                              local groups.
+ *   pushById(groups, { cancel }) -> handlePushAbsImports; used for every
+ *                                   ABS-backed group, files or not.
  *
- * H-7: `cancel` is this push's token (lib/cancel.js); both branches stop on it.
+ * #62: a book that is not in ABS has no item to PATCH, so it is never sent:
+ * it lands in `skipped` with LOCAL_PUSH_REASON. (The old path-based branch
+ * sent such books to push_abs_updates without an item id, where every one
+ * failed "Missing item ID".) Local books are written with Write Tags instead.
  *
- * A branch that throws is recorded as all of its books failing, so one
- * branch's failure never hides the other's outcome. Never throws.
+ * H-7: `cancel` is this push's token (lib/cancel.js).
+ *
+ * A push that throws is recorded as all of its books failing. Never throws.
  * Returns { attempted, absCount, localCount, updated, skipped, failed, summary }.
  */
-export async function runPush(groups, { pushById, pushByFileIds, cancel = null }) {
+export async function runPush(groups, { pushById, cancel = null }) {
   const { absGroups, localGroups } = partitionPushGroups(groups);
   const parts = [];
 
@@ -225,16 +230,11 @@ export async function runPush(groups, { pushById, pushByFileIds, cancel = null }
   }
 
   if (localGroups.length > 0) {
-    // M15: build the file-id set from the snapshot taken at modal open.
-    const fileIds = new Set();
-    localGroups.forEach(g =>
-      (g.files || []).forEach(f => { if (f.id != null) fileIds.add(f.id); })
-    );
-    try {
-      parts.push(await (cancel ? pushByFileIds(fileIds, { cancel }) : pushByFileIds(fileIds)));
-    } catch (error) {
-      parts.push(failedPushResult(localGroups, error));
-    }
+    parts.push({
+      updated: [],
+      skipped: localGroups.map((g) => ({ id: g?.id ?? null, title: g?.metadata?.title || '', reason: LOCAL_PUSH_REASON })),
+      failed: [],
+    });
   }
 
   const merged = mergePushResults(...parts);

@@ -254,3 +254,51 @@ describe('useTagOperations.pushToAudiobookShelf cancel', () => {
     expect(out.skipped.map((x) => x.reason)).toEqual(['cancelled', 'cancelled']);
   });
 });
+
+describe('useTagOperations.writeSelectedTags request (#62)', () => {
+  it('sends group_size and only the fields the writer writes, and returns what it sent', async () => {
+    mockGroups = [{
+      id: 'g1',
+      metadata: { title: 'Book' },
+      files: [
+        { id: 'f1', path: '/a/1.mp3', changes: { title: { old: '', new: 'T' }, tags: { old: '', new: 'x' } } },
+        { id: 'f2', path: '/a/2.mp3', changes: { title: { old: '', new: 'T' } } },
+      ],
+    }];
+    mockCallBackend.mockResolvedValue({
+      success: 2, failed: 0, errors: [],
+      results: [{ file_id: 'f1', status: 'success', skipped_fields: [] }, { file_id: 'f2', status: 'success', skipped_fields: [] }],
+    });
+    const { result } = renderHook(() => useTagOperations());
+    let out;
+    await act(async () => { out = await result.current.writeSelectedTags(new Set(['f1', 'f2']), { backup: true }); });
+    expect(mockCallBackend).toHaveBeenCalledWith('write_tags', {
+      request: {
+        file_ids: ['f1', 'f2'],
+        files: {
+          f1: { path: '/a/1.mp3', changes: { title: { old: '', new: 'T' } }, group_size: 2 },
+          f2: { path: '/a/2.mp3', changes: { title: { old: '', new: 'T' } }, group_size: 2 },
+        },
+        backup: true,
+      },
+    });
+    expect(out.sent.f1.changes).toEqual({ title: { old: '', new: 'T' } });
+  });
+
+  it('with nothing writable, does not call the writer', async () => {
+    mockGroups = [{ id: 'g1', metadata: {}, files: [{ id: 'f1', path: '/a/1.m4b', changes: { tags: { old: '', new: 'x' } } }] }];
+    const { result } = renderHook(() => useTagOperations());
+    let out;
+    await act(async () => { out = await result.current.writeSelectedTags(new Set(['f1'])); });
+    expect(mockCallBackend).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ success: 0, failed: 0, results: [], sent: {} });
+  });
+
+  it('a crashed background task (rejected command) rejects to the caller', async () => {
+    mockGroups = [{ id: 'g1', metadata: {}, files: [{ id: 'f1', path: '/a/1.m4b', changes: { title: { old: '', new: 'T' } } }] }];
+    mockCallBackend.mockRejectedValue('File task failed: panicked');
+    const { result } = renderHook(() => useTagOperations());
+    await expect(act(async () => { await result.current.writeSelectedTags(new Set(['f1'])); })).rejects.toBe('File task failed: panicked');
+    expect(mockUpdateFileStatuses).not.toHaveBeenCalled();
+  });
+});

@@ -1,6 +1,8 @@
 import { useState, useMemo } from 'react';
-import { Download, Upload, Tag, CheckCircle, Sparkles, FileText, Type, Library, X, Zap, RefreshCw, AlertTriangle, User, Search, Wrench, BookOpen, Users, Hash, Dna, ChevronDown, MoreHorizontal, Calendar, Settings, Mic, FolderOpen } from 'lucide-react';
+import { Download, Upload, Tag, CheckCircle, Sparkles, FileText, Type, Library, X, Zap, RefreshCw, AlertTriangle, User, Search, Wrench, BookOpen, Users, Hash, Dna, ChevronDown, MoreHorizontal, Calendar, Settings, Mic, FolderOpen, Save, Edit3, Undo2 } from 'lucide-react';
 import { isTauri } from '../../lib/platform';
+import { isLocalGroup } from '../../lib/applyMetadata';
+import { LOCAL_PUSH_REASON } from '../../lib/absPush';
 
 // Per-book cost estimate (input ~2000 tokens, output ~1000 tokens)
 const MODEL_PRICES = {
@@ -43,6 +45,10 @@ export function ActionBar({
   onPipelineRescan,
   onWrite,
   onRename,
+  onUndo,
+  undoAvailable = false, // #62: get_undo_status reports a journal for the last tag write
+  undoing = false,
+  selectedGroups = null, // #62: the selected books (to tell local folders from ABS books)
   onPush,
   onPull,
   onFullSync,
@@ -114,6 +120,10 @@ export function ActionBar({
   const totalGroupCount = groups.length;
   const selectedCount = allSelected ? totalGroupCount : selectedGroupCount;
   const hasSelection = selectedCount > 0;
+  // #62: Write Tags and Rename act on locally scanned books only; Push only on
+  // ABS books, so a selection of local folders alone cannot push.
+  const localSelectedCount = (selectedGroups || []).filter(isLocalGroup).length;
+  const onlyLocalSelected = localSelectedCount > 0 && localSelectedCount === (selectedGroups || []).length;
   const [showAdvanced, setShowAdvanced] = useState(false);
   const isProcessing = scanning || cleaningGenres || assigningTags || fixingDescriptions || fixingTitles || fixingSubtitles || fixingAuthors || fixingYears || fixingSeries || lookingUpAge || lookingUpISBN || runningAll || generatingDna || classifying || resolvingMetadata || processingDescriptions || pushing || validating || analyzingSeries || extractingByAudio;
 
@@ -193,7 +203,7 @@ export function ActionBar({
     (seriesAnalysis && seriesAnalysis.total_issues > 0);
 
   // Pill button component — icon + label
-  const PillBtn = ({ onClick, disabled, active, icon: Icon, label, variant = 'default', badge = null }) => {
+  const PillBtn = ({ onClick, disabled, active, icon: Icon, label, title = label, variant = 'default', badge = null }) => {
     const baseStyles = "relative flex items-center gap-2 px-4 py-2 rounded-full transition-all text-sm font-medium whitespace-nowrap";
     const variants = {
       default: `${disabled ? 'text-gray-600' : 'text-gray-400 hover:text-white hover:bg-neutral-800'}`,
@@ -205,7 +215,7 @@ export function ActionBar({
       <button
         onClick={onClick}
         disabled={disabled}
-        title={label}
+        title={title}
         className={`${baseStyles} ${active ? variants.active : variants[variant]} ${disabled ? 'cursor-not-allowed' : ''}`}
       >
         <Icon className={`w-5 h-5 ${active ? 'animate-pulse' : ''}`} />
@@ -455,11 +465,44 @@ export function ActionBar({
             {/* Push */}
             <PillBtn
               onClick={onPush}
-              disabled={isProcessing || !hasSelection}
+              disabled={isProcessing || !hasSelection || onlyLocalSelected}
               active={pushing}
               icon={Upload}
               label="Push"
+              title={onlyLocalSelected ? LOCAL_PUSH_REASON : 'Push'}
             />
+
+            {/* #62: Write Tags / Rename for locally scanned books (desktop only,
+                like Scan Folder: the browser build cannot touch local files). */}
+            {isTauri() && localSelectedCount > 0 && onWrite && (
+              <PillBtn
+                onClick={onWrite}
+                disabled={isProcessing || writing}
+                active={writing}
+                icon={Save}
+                label="Write Tags"
+                title="Write the staged changes into the selected local files"
+              />
+            )}
+            {isTauri() && localSelectedCount > 0 && onRename && (
+              <PillBtn
+                onClick={onRename}
+                disabled={isProcessing || writing}
+                icon={Edit3}
+                label="Rename"
+                title="Rename the selected local files from a template"
+              />
+            )}
+            {isTauri() && undoAvailable && onUndo && (
+              <PillBtn
+                onClick={onUndo}
+                disabled={isProcessing || writing || undoing}
+                active={undoing}
+                icon={Undo2}
+                label="Undo last write"
+                title="Restore the files changed by the last tag write from their backups"
+              />
+            )}
 
             {/* Divider */}
             <div className="w-px h-6 bg-neutral-800 mx-1" />

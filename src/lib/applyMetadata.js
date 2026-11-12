@@ -66,6 +66,18 @@ export function setYear(metadata, value) {
   return { ...(metadata || {}), year: v, published_year: v };
 }
 
+/**
+ * #62: the single test for "this book is a locally scanned folder": it did not
+ * come from AudiobookShelf and at least one of its files has a path on disk.
+ * ABS books carry their server file paths too, so a path alone is not enough.
+ * Only local books can have tags written into their files or be renamed, and
+ * only ABS books can be pushed.
+ */
+export function isLocalGroup(group) {
+  if (!group || group.source === 'abs' || group.abs_id) return false;
+  return (group.files || []).some((f) => typeof f?.path === 'string' && f.path.trim() !== '');
+}
+
 export function readFileField(metadata, field) {
   const reader = READERS[field];
   return reader ? reader(metadata || {}) : str((metadata || {})[field]);

@@ -10,6 +10,8 @@ export function useTagOperations() {
   const [writing, setWriting] = useState(false);
   const [pushing, setPushing] = useState(false);
   // writeSelectedTags(selectedFiles, { backup, excludedChanges })
+  //   Resolves with the write_tags result plus `sent` (the filesMap written);
+  //   rejects when the command rejects (e.g. its background task crashed).
   //   backup           default true now (data-preservation: backups ON by default).
   //   excludedChanges  optional Set of "fileId:field" keys to drop from the
   //                    payload, so what gets written equals exactly what the
@@ -27,6 +29,14 @@ export function useTagOperations() {
         selectedFiles,
         excludedChanges
       );
+
+      // #62: nothing the writer would write (only app-only or excluded
+      // changes): never call it, so an empty batch cannot reset the undo
+      // journal of the previous write.
+      if (idsToWrite.length === 0) {
+        setWriting(false);
+        return { success: 0, failed: 0, errors: [], results: [], sent: {} };
+      }
 
       // ✅ Set initial progress to the count we will actually write
       setWriteProgress({ current: 0, total: idsToWrite.length });
@@ -61,8 +71,10 @@ export function useTagOperations() {
         setWriteProgress({ current: 0, total: 0 });
         setWriting(false);
       }, 1000);
-      
-      return result;
+
+      // `sent` is the payload actually written, so the caller clears exactly
+      // the staged changes that reached the files (lib/localWrite.js).
+      return { ...result, sent: filesMap };
     } catch (error) {
       console.error('Write failed:', error);
       setWriteProgress({ current: 0, total: 0 });

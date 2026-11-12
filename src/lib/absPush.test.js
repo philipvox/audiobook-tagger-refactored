@@ -13,7 +13,7 @@ const { absApi } = await import('./proxy');
 const { liveItem, mockAbs } = await import('../test/absLive.js');
 const {
   getAbsId, isAbsBacked, fileIdsInGroups, partitionPushGroups, normalizePushResult, mergePushResults,
-  summarizePush, runPush,
+  summarizePush, runPush, LOCAL_PUSH_REASON,
 } = await import('./absPush.js');
 
 // Shape produced by absItemToBookGroup (src/api.js / src/lib/abs-client.js).
@@ -74,12 +74,27 @@ describe('routing (#60)', () => {
     expect(out.summary.type).toBe('success');
   });
 
-  it('keeps genuinely local groups on the file-id branch', async () => {
+  // #62: was "keeps genuinely local groups on the file-id branch". That branch
+  // sent local books to push_abs_updates with no item id, where every one
+  // failed "Missing item ID". A local folder is now skipped with the reason.
+  it('skips a local folder: it has no ABS item to push to', async () => {
     const pushById = vi.fn();
-    const pushByFileIds = vi.fn().mockResolvedValue({ updated: 1, failed: 0, errors: [] });
-    await runPush([localGroup], { pushById, pushByFileIds });
+    const pushByFileIds = vi.fn();
+    const out = await runPush([localGroup], { pushById, pushByFileIds });
     expect(pushById).not.toHaveBeenCalled();
-    expect(pushByFileIds).toHaveBeenCalledWith(new Set(['f-local']));
+    expect(pushByFileIds).not.toHaveBeenCalled();
+    expect(out.skipped).toEqual([{ id: 'local-uuid', title: 'Local Book', reason: LOCAL_PUSH_REASON }]);
+    expect(out.updated).toEqual([]);
+    expect(out.failed).toEqual([]);
+  });
+
+  it('in a mixed selection, ABS books are pushed and local folders land in skipped', async () => {
+    const pushById = vi.fn().mockResolvedValue({ updated: [{ id: 'li-123', title: 'Imported Book' }], skipped: [], failed: [] });
+    const out = await runPush([absGroupWithFiles, localGroup], { pushById });
+    expect(pushById).toHaveBeenCalledWith([absGroupWithFiles]);
+    expect(out.updated).toEqual([{ id: 'li-123', title: 'Imported Book' }]);
+    expect(out.skipped).toEqual([{ id: 'local-uuid', title: 'Local Book', reason: LOCAL_PUSH_REASON }]);
+    expect(out.summary.message).toContain(LOCAL_PUSH_REASON);
   });
 });
 
@@ -111,15 +126,17 @@ describe('result accounting and reporting (#60)', () => {
     expect(out.summary.message).toMatch(/HTTP 404/);
   });
 
-  it('records a throwing branch as failed instead of losing it', async () => {
+  // #62: the local book used to be "updated" through the path branch; it is
+  // now skipped, so the throwing ABS push is the whole outcome.
+  it('records a throwing push as failed instead of losing it', async () => {
     const out = await runPush([absGroupWithFiles, localGroup], {
       pushById: vi.fn().mockRejectedValue(new Error('network down')),
-      pushByFileIds: vi.fn().mockResolvedValue({ updated: [{ id: 'local-uuid', title: 'Local Book' }], skipped: [], failed: [] }),
     });
-    expect(out.updated).toHaveLength(1);
+    expect(out.updated).toEqual([]);
     expect(out.failed).toEqual([{ id: 'li-123', title: 'Imported Book', error: 'network down' }]);
-    expect(out.summary.type).toBe('warning');
-    expect(out.summary.message).toMatch(/Updated 1, failed 1.*network down/);
+    expect(out.skipped).toEqual([{ id: 'local-uuid', title: 'Local Book', reason: LOCAL_PUSH_REASON }]);
+    expect(out.summary.type).toBe('error');
+    expect(out.summary.message).toMatch(/network down/);
   });
 
   it('summarises a partial push and an empty push', () => {
@@ -522,12 +539,11 @@ describe('Task 5 fix round 1', () => {
 });
 
 describe('runPush forwards the push cancel token (Task 9 fix round 1)', () => {
-  it('passes { cancel } to both branches', async () => {
+  // #62: there is no longer a local branch to forward it to.
+  it('passes { cancel } to the ABS push', async () => {
     const cancel = { cancelled: false };
     const pushById = vi.fn(async () => ({ updated: [], skipped: [], failed: [] }));
-    const pushByFileIds = vi.fn(async () => ({ updated: [], skipped: [], failed: [] }));
-    await runPush([absGroupWithFiles, localGroup], { pushById, pushByFileIds, cancel });
+    await runPush([absGroupWithFiles, localGroup], { pushById, cancel });
     expect(pushById).toHaveBeenCalledWith([absGroupWithFiles], { cancel });
-    expect(pushByFileIds).toHaveBeenCalledWith(new Set(['f-local']), { cancel });
   });
 });

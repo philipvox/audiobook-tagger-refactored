@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applyMetadataToGroup, readFileField, setYear } from './applyMetadata';
+import { applyMetadataToGroup, readFileField, setYear, isLocalGroup } from './applyMetadata';
 
 const mkGroup = (metadata, fileCount = 1, extra = {}) => ({
   id: 'g1',
@@ -145,5 +145,24 @@ describe('setYear (H-2)', () => {
 
   it('clears both on an empty value', () => {
     expect(setYear({ year: '1', published_year: '1' }, '')).toMatchObject({ year: null, published_year: null });
+  });
+});
+
+describe('isLocalGroup (#62)', () => {
+  it('is true for a scanned folder: not from ABS and at least one file with a path', () => {
+    expect(isLocalGroup({ id: 'l', files: [{ id: 'f', path: '/books/a.m4b' }] })).toBe(true);
+    expect(isLocalGroup({ id: 'l', source: 'local', files: [{ id: 'f', path: '' }, { id: 'g', path: 'C:\\b\\a.mp3' }] })).toBe(true);
+  });
+
+  it('is false for an ABS book, even one that carries its server file paths', () => {
+    expect(isLocalGroup({ id: 'li', source: 'abs', files: [{ id: 'f', path: '/audiobooks/a.m4b' }] })).toBe(false);
+    expect(isLocalGroup({ id: 'li', abs_id: 'li', files: [{ id: 'f', path: '/audiobooks/a.m4b' }] })).toBe(false);
+  });
+
+  it('is false for a group with no file paths', () => {
+    expect(isLocalGroup({ id: 'x', files: [] })).toBe(false);
+    expect(isLocalGroup({ id: 'x', files: [{ id: 'f', path: '' }] })).toBe(false);
+    expect(isLocalGroup({ id: 'x' })).toBe(false);
+    expect(isLocalGroup(null)).toBe(false);
   });
 });

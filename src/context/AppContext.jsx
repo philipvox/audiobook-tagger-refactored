@@ -2,6 +2,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { callBackend, ollamaCall, subscribe } from '../api';
 import { isTauri } from '../lib/platform.js';
+import { applyFieldFixes } from '../lib/applyValidationFixes.js';
 import {
   AUTOSAVE_DEBOUNCE_MS,
   autosaveDelay,
@@ -548,68 +549,13 @@ export function AppProvider({ children }) {
         return group;
       }
 
-      // Apply each fix
-      const newMetadata = { ...group.metadata };
-      for (const issue of fixableIssues) {
-        const field = issue.field;
-        const suggestedValue = issue.suggested_value;
-
-        // Map validation field names to metadata field names
-        switch (field) {
-          case 'author':
-            newMetadata.author = suggestedValue;
-            // Also update authors array to keep UI in sync
-            newMetadata.authors = [suggestedValue, ...(newMetadata.authors || []).slice(1)];
-            break;
-          case 'title':
-            newMetadata.title = suggestedValue;
-            break;
-          case 'series':
-            newMetadata.series = suggestedValue;
-            // Also update all_series array to keep UI in sync
-            if (newMetadata.all_series?.length > 0) {
-              newMetadata.all_series = [{ ...newMetadata.all_series[0], name: suggestedValue }, ...newMetadata.all_series.slice(1)];
-            } else {
-              newMetadata.all_series = [{ name: suggestedValue, sequence: newMetadata.sequence }];
-            }
-            break;
-          case 'sequence':
-            newMetadata.sequence = suggestedValue;
-            // Also update all_series array to keep UI in sync
-            if (newMetadata.all_series?.length > 0) {
-              newMetadata.all_series = [{ ...newMetadata.all_series[0], sequence: suggestedValue }, ...newMetadata.all_series.slice(1)];
-            }
-            break;
-          case 'narrator':
-            newMetadata.narrator = suggestedValue;
-            // Also update narrators array to keep UI in sync
-            newMetadata.narrators = [suggestedValue, ...(newMetadata.narrators || []).slice(1)];
-            break;
-          case 'description':
-            newMetadata.description = suggestedValue;
-            break;
-          case 'genres':
-            // Suggested genres might be a comma-separated string
-            if (typeof suggestedValue === 'string') {
-              newMetadata.genres = suggestedValue.split(',').map(g => g.trim()).filter(Boolean);
-            } else if (Array.isArray(suggestedValue)) {
-              newMetadata.genres = suggestedValue;
-            }
-            break;
-          default:
-            // For any other field, try direct assignment
-            if (field in newMetadata) {
-              newMetadata[field] = suggestedValue;
-            }
-        }
-        fixCount++;
-      }
-
-      return {
-        ...group,
-        metadata: newMetadata,
-        total_changes: (group.total_changes || 0) + fixableIssues.length,
-      };
+      // Apply each fix. W-8: stamps file.changes (lib/applyValidationFixes.js)
+      // so Write Tags writes the fix.
+      fixCount += fixableIssues.length;
+      return applyFieldFixes(
+        group,
+        fixableIssues.map(issue => ({ field: issue.field, value: issue.suggested_value }))
+      );
     });
 
     return { updatedGroups, fixCount };
@@ -654,20 +600,10 @@ export function AppProvider({ children }) {
       }
 
       fixCount++;
-      return {
-        ...group,
-        metadata: {
-          ...group.metadata,
-          author: canonical,
-          // Also update authors array to keep UI in sync
-          authors: [canonical, ...(group.metadata.authors || []).slice(1)],
-          sources: {
-            ...group.metadata.sources,
-            author: 'normalized',
-          },
-        },
-        total_changes: (group.total_changes || 0) + 1,
-      };
+      // W-8: stamps file.changes so Write Tags writes the normalized author.
+      return applyFieldFixes(group, [{ field: 'author', value: canonical }], {
+        sources: { ...group.metadata.sources, author: 'normalized' },
+      });
     });
 
     return { updatedGroups, fixCount };

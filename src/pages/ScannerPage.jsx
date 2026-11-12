@@ -31,6 +31,7 @@ import { keepCurrentBooksToast } from '../lib/session.js';
 import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
 import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePush } from '../lib/absPush';
 import { userClearedPatch } from '../lib/userCleared';
+import { bulkFileChanges } from '../lib/bulkEditUpdates';
 import { applyClassifyResult } from '../lib/applyClassifyResult';
 import { applyTagsResultToGroup, applyDnaResultToGroup, normalizeResults } from '../lib/applyTagResults';
 import { applyResolveResult, applyDescriptionProcessResult, applyFixDescriptionResult, tallyOutcomes } from '../lib/applyAiResults';
@@ -38,6 +39,12 @@ import { runEnrichAction, applyEntries, reportOutcomes, runBatchChunks } from '.
 import { requestCancel, startCancellable, finishCancellable, finishAfter } from '../lib/cancel';
 import { syncAllSeries } from '../lib/absPayload';
 import { applyMetadataToGroup, readFileField, setYear } from '../lib/applyMetadata';
+import { applyFieldFixes } from '../lib/applyValidationFixes';
+import {
+  selectedGroupsFrom, selectionForSelectAll, localWriteTargets,
+  summarizeWriteResult, applyWriteResult, summarizeRenameResult, applyRenameResult,
+} from '../lib/localWrite';
+import { isLocalGroup } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
 import { isPlaceholderAuthor, isPlaceholderTitle } from '../lib/normalize';
 import { WritePreviewModal } from '../components/WritePreviewModal';
@@ -98,18 +105,20 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const [undoing, setUndoing] = useState(false);
   const [showUndoToast, setShowUndoToast] = useState(false);
 
-  // Check undo status
-  const checkUndoStatus = useCallback(async () => {
+  // Check undo status. #62: re-checked on mount and after every write,
+  // rename and undo, so "Undo last write" shows exactly when a journal exists.
+  // `showToast` pops the UndoToast (only right after a write).
+  const checkUndoStatus = useCallback(async ({ showToast = false } = {}) => {
     try {
       const status = await callBackend('get_undo_status');
       setUndoStatus(status);
-      if (status.available) {
-        setShowUndoToast(true);
-      }
+      if (!status?.available) setShowUndoToast(false);
+      else if (showToast) setShowUndoToast(true);
     } catch (error) {
       console.error('Failed to check undo status:', error);
     }
   }, []);
+  useEffect(() => { checkUndoStatus(); }, [checkUndoStatus]);
 
   // Handle undo
   const handleUndo = useCallback(async () => {
@@ -158,29 +167,22 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         toast.success('Changes Reverted', 'Restored the files from the last write. Rescan to refresh the on-screen tags.');
       }
     } catch (error) {
+      // #62: undo_last_write rejects when its background task crashes.
       console.error('Undo failed:', error);
       toast.error('Undo Failed', String(error?.message || error));
     } finally {
       setUndoing(false);
+      // A partial undo keeps its failed entries in the journal.
+      await checkUndoStatus();
     }
-  }, [undoStatus, undoing, toast, setGroups, clearFileStatuses]);
+  }, [undoStatus, undoing, toast, setGroups, clearFileStatuses, checkUndoStatus]);
 
-  // Dismiss undo toast
-  const dismissUndo = useCallback(async () => {
+  // Dismiss undo toast. #62: hiding the toast (by hand or after its 30 s
+  // countdown) keeps the undo journal, so "Undo last write" in the action bar
+  // still works; the next write replaces the journal.
+  const dismissUndo = useCallback(() => {
     setShowUndoToast(false);
-    try {
-      const result = await callBackend('clear_undo_state');
-      // v2.2.3: the backend reports a failed journal clear instead of hiding it.
-      if (result && result.cleared === false) {
-        toast.error('Could Not Clear Undo', String(result.error || 'The undo record could not be removed.'));
-        return;
-      }
-      setUndoStatus(null);
-    } catch (error) {
-      console.error('Failed to clear undo state:', error);
-      toast.error('Could Not Clear Undo', String(error?.message || error));
-    }
-  }, [toast]);
+  }, []);
 
   // #58 restore prompt. Restore drops the saved work back into the workspace;
   // Discard is the only path that deletes a snapshot the user has not replaced,
@@ -322,7 +324,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     pushing,
     writeSelectedTags,
     renameFiles,
-    pushToAudiobookShelf
   } = useTagOperations();
 
   // FIXED: Prevent text selection on Shift+Click and properly handle range selection
@@ -417,7 +418,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
   // Optimized: use allSelected flag instead of building huge Sets.
   // H-8: with a filter active the action bar passes the filtered books, and
-  // only those are selected.
+  // only those are selected (lib/localWrite.js selectionForSelectAll).
   const handleSelectAll = (filteredGroups) => {
     if (Array.isArray(filteredGroups)) {
       handleSelectFiltered(filteredGroups);
@@ -430,22 +431,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   // Select only the filtered groups (from search results)
   const handleSelectFiltered = (filteredGroups) => {
     if (!filteredGroups || filteredGroups.length === 0) return;
-
-    // If filtered groups equals all groups, use allSelected flag
-    if (filteredGroups.length === groups.length) {
+    const selection = selectionForSelectAll(groups, filteredGroups);
+    if (selection.allSelected) {
+      // The filter shows every book: use the allSelected flag.
       selectAll(groups);
       setSelectedGroupIds(new Set());
     } else {
-      // Otherwise, select only the filtered group IDs AND their file ids.
-      // H4: without the file ids, getSelectedFileIds returns an empty set and
-      // Write / Rename / Rescan silently do nothing on a filtered selection.
+      // Only the filtered group ids AND their file ids. H4: without the file
+      // ids, getSelectedFileIds returns an empty set and Rescan silently does
+      // nothing on a filtered selection.
       clearSelection();
-      const fileIds = new Set();
-      filteredGroups.forEach(g =>
-        (g.files || []).forEach(f => { if (f.id != null) fileIds.add(f.id); })
-      );
-      setSelectedFiles(fileIds);
-      setSelectedGroupIds(new Set(filteredGroups.map(g => g.id)));
+      setSelectedFiles(selection.fileIds);
+      setSelectedGroupIds(selection.groupIds);
     }
   };
 
@@ -506,10 +503,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   };
 
   // Get selected groups for bulk edit
-  const getSelectedGroups = () => {
-    if (allSelected) return groups;
-    return groups.filter(g => selectedGroupIds.has(g.id));
-  };
+  const getSelectedGroups = () => selectedGroupsFrom(groups, { allSelected, selectedGroupIds });
 
   // Handle bulk edit save
   const handleBulkSave = (updates) => {
@@ -543,52 +537,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           },
         });
 
-        // Update file changes. H1: an update KEY being present drives the change
-        // (a present null == intentional clear -> stamp an empty new value);
-        // absent keys are left untouched.
+        // Update file changes (lib/bulkEditUpdates.js). H1: a present key drives
+        // the change, a present null clears it; W-8: no `changes` object is fine.
         const updatedFiles = (group.files || []).map(file => {
-          const changes = { ...file.changes };
-
-          if ('author' in updates) {
-            const oldAuthor = file.changes.author?.old || '';
-            const newAuthor = updates.author || '';
-            if (oldAuthor !== newAuthor) {
-              changes.author = { old: oldAuthor, new: newAuthor };
-            }
-          }
-
-          if ('narrator' in updates) {
-            const oldNarrator = file.changes.narrator?.old || '';
-            const newNarratorValue = updates.narrator ? `Narrated by ${updates.narrator}` : '';
-            if (oldNarrator !== newNarratorValue) {
-              changes.narrator = { old: oldNarrator, new: newNarratorValue };
-            }
-          }
-
-          if ('genres' in updates) {
-            const oldGenre = file.changes.genre?.old || '';
-            const newGenre = (updates.genres || []).join(', ');
-            if (oldGenre !== newGenre) {
-              changes.genre = { old: oldGenre, new: newGenre };
-            }
-          }
-
-          if ('series' in updates) {
-            changes.series = { old: '', new: updates.series || '' };
-          }
-
-          if ('sequence' in updates) {
-            changes.sequence = { old: '', new: updates.sequence || '' };
-          }
-
-          if ('year' in updates) {
-            changes.year = { old: file.changes.year?.old || '', new: updates.year || '' };
-          }
-
-          if ('publisher' in updates) {
-            changes.publisher = { old: '', new: updates.publisher || '' };
-          }
-
+          const changes = bulkFileChanges(file, updates);
           return {
             ...file,
             changes,
@@ -708,26 +660,37 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   // changes, can exclude individual rows, and chooses backup (ON by default)
   // before anything is written. Snapshot the selected file ids at open so the
   // write targets what was selected when the modal opened.
+  // #62: only the selected locally scanned books are written (ABS books are
+  // updated with Push), with the same selection the Enrich actions use.
   const handleWriteClick = () => {
-    const selectedCount = getSelectedCount(groups, selectedGroupIds);
-    if (selectedCount === 0 && !allSelected) {
-      toast.warning('No Selection', 'Select files before writing.');
+    const selected = getSelectedGroups();
+    if (selected.length === 0) {
+      toast.warning('No Selection', 'Select books before writing.');
       return;
     }
-
-    const filesWithChanges = getFilesWithChanges(groups);
-    if (filesWithChanges.length === 0) {
-      toast.info('No Changes', 'Selected books have no pending changes to write.');
+    const { localGroups, fileIds, writableCount } = localWriteTargets(selected);
+    if (localGroups.length === 0) {
+      toast.info('No Local Books', 'Write Tags works on locally scanned folders. Use Push for AudiobookShelf books.');
       return;
     }
-
-    const fileIds = Array.from(getSelectedFileIds(groups));
+    if (writableCount === 0) {
+      toast.info(
+        'No Changes',
+        fileIds.length > 0
+          ? 'The selected books only have changes that stay in the app (such as tags or DNA); none can be written to the files.'
+          : 'The selected books have no pending changes to write.'
+      );
+      return;
+    }
     modals.open('write', { fileIds });
   };
 
   // H3: actually write after the preview is confirmed. `skipBackup` and
   // `excludedChanges` come from the modal; the payload equals exactly what the
   // preview showed minus the excluded rows.
+  // #62: one write_tags call, so there is no mid-batch cancel. Every per-file
+  // refusal reaches the user in the toast and as the book's lastError; only
+  // the changes that reached a file are cleared from staging.
   const handleConfirmWrite = async (skipBackup, excludedChanges) => {
     const fileIds = modals.data.write?.fileIds || [];
     if (fileIds.length === 0) return;
@@ -737,69 +700,58 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         backup: !skipBackup,
         excludedChanges,
       });
-
-      if (result.success > 0) {
-        toast.success('Write Complete', `Successfully wrote ${result.success} file${result.success > 1 ? 's' : ''}.`);
-
-        // Post-write staging: clear the file.changes entries that were actually
-        // written so the same edits are not re-offered on the next write (and undo
-        // journals are not overwritten by a no-op re-write). Only files reported
-        // `success` are cleared; excluded `fileId:field` pairs stay staged, and
-        // group.metadata / changedFields are left intact (they drive the ABS push).
-        const excluded = excludedChanges instanceof Set ? excludedChanges : new Set();
-        const writtenFileIds = new Set(
-          (result.results || [])
-            .filter(r => r.status === 'success' && r.file_id != null)
-            .map(r => r.file_id)
-        );
-        if (writtenFileIds.size > 0) {
-          setGroups(prev => prev.map(g => {
-            if (!(g.files || []).some(f => writtenFileIds.has(f.id))) return g;
-            return {
-              ...g,
-              files: g.files.map(f => {
-                if (!writtenFileIds.has(f.id) || !f.changes) return f;
-                const kept = {};
-                for (const [field, change] of Object.entries(f.changes)) {
-                  // A field the user unchecked in the preview was NOT written, so
-                  // it stays staged; everything else was written and is cleared.
-                  if (excluded.has(`${f.id}:${field}`)) kept[field] = change;
-                }
-                return { ...f, changes: kept };
-              }),
-            };
-          }));
-        }
-
-        handleClearSelection();
-        // Check undo status after successful write
-        await checkUndoStatus();
-      }
-      if (result.failed > 0) {
-        toast.error('Write Errors', `Failed to write ${result.failed} file${result.failed > 1 ? 's' : ''}. Check console for details.`);
-      }
-      // Close the honesty loop: warn (not error) when the backend could not embed
-      // some requested fields (format-unsupported or ABS-only) in one or more files.
-      const skippedCount = (result.results || []).filter(
-        r => Array.isArray(r.skipped_fields) && r.skipped_fields.length > 0
-      ).length;
-      if (skippedCount > 0) {
-        toast.warning(
-          'Some Fields Not Written',
-          `Some fields are not supported by this file format and were not written (${skippedCount} file${skippedCount === 1 ? '' : 's'} affected).`
-        );
-      }
+      const summary = summarizeWriteResult(result, groupsRef.current);
+      setGroups(prev => applyWriteResult(prev, result));
+      (toast[summary.toast.type] || toast.info)(summary.toast.title, summary.toast.message);
+      if (summary.written > 0 && summary.failures.length === 0) handleClearSelection();
+      logEvent('write', 'write tags complete', {
+        files: fileIds.length,
+        written: summary.written,
+        failed: summary.failures.length,
+        failedFiles: summary.failures.slice(0, 5).map(f => `${f.name}: ${f.error}`),
+      });
     } catch (error) {
+      // write_tags rejects when its background task crashes: nothing reported
+      // per file, so say the whole write failed.
       console.error('Write failed:', error);
-      toast.error('Write Failed', error.toString());
+      toast.error('Write Failed', String(error?.message || error));
+    } finally {
+      await checkUndoStatus({ showToast: true });
     }
   };
 
-  // ✅ SIMPLIFIED - No popup
+  // #62: Rename the selected locally scanned books' files from a template.
   const handleRenameClick = () => {
-    const selectedCount = getSelectedCount(groups, selectedGroupIds);
-    if (selectedCount === 0 && !allSelected) return;
+    const selected = getSelectedGroups();
+    if (selected.length === 0) return;
+    if (!selected.some(isLocalGroup)) {
+      toast.info('No Local Books', 'Rename works on locally scanned folders only.');
+      return;
+    }
     modals.open('rename');
+  };
+
+  // #62: apply a confirmed rename. Rename has no undo; the modal says so.
+  const handleConfirmRename = async (pairs) => {
+    try {
+      // CR-6a: rename by the explicit old->new pairs the modal computed
+      // from its previews (with the chosen template).
+      const result = await renameFiles(pairs);
+      const summary = summarizeRenameResult(result, groupsRef.current);
+      // M6: do NOT call handleScan() here (it would drop the session); patch
+      // each renamed file's path and filename in place.
+      setGroups(prev => applyRenameResult(prev, result));
+      (toast[summary.toast.type] || toast.info)(summary.toast.title, summary.toast.message);
+      // Nothing renamed: keep the modal open so the user can change the template.
+      if (summary.renamed > 0) modals.close('rename');
+    } catch (error) {
+      // rename_files rejects when its background task crashes.
+      console.error('Rename failed:', error);
+      toast.error('Rename Failed', String(error?.message || error));
+    } finally {
+      // A rename retargets the undo journal to the new paths.
+      await checkUndoStatus();
+    }
   };
 
   // #60: toast the outcome of an auto-push that ran after an ABS rescan.
@@ -2411,67 +2363,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     batch.end('descriptions', 1500);
   });
 
-  // ✅ Fix a single issue on a single book
+  // ✅ Fix a single issue on a single book. W-8: stamps file.changes
+  // (lib/applyValidationFixes.js) so Write Tags writes the fix.
   const handleFixSingleIssue = useCallback((groupId, field, suggestedValue) => {
-    setGroups(prevGroups => prevGroups.map(group => {
-      if (group.id !== groupId) return group;
-
-      const newMetadata = { ...group.metadata };
-
-      // Apply the fix based on field
-      switch (field) {
-        case 'author':
-          newMetadata.author = suggestedValue;
-          // Also update authors array to keep UI in sync
-          newMetadata.authors = [suggestedValue, ...(newMetadata.authors || []).slice(1)];
-          break;
-        case 'title':
-          newMetadata.title = suggestedValue;
-          break;
-        case 'series':
-          newMetadata.series = suggestedValue;
-          // Also update all_series array to keep UI in sync
-          if (newMetadata.all_series?.length > 0) {
-            newMetadata.all_series = [{ ...newMetadata.all_series[0], name: suggestedValue }, ...newMetadata.all_series.slice(1)];
-          } else {
-            newMetadata.all_series = [{ name: suggestedValue, sequence: newMetadata.sequence }];
-          }
-          break;
-        case 'sequence':
-          newMetadata.sequence = suggestedValue;
-          // Also update all_series array to keep UI in sync
-          if (newMetadata.all_series?.length > 0) {
-            newMetadata.all_series = [{ ...newMetadata.all_series[0], sequence: suggestedValue }, ...newMetadata.all_series.slice(1)];
-          }
-          break;
-        case 'narrator':
-          newMetadata.narrator = suggestedValue;
-          // Also update narrators array to keep UI in sync
-          newMetadata.narrators = [suggestedValue, ...(newMetadata.narrators || []).slice(1)];
-          break;
-        case 'description':
-          newMetadata.description = suggestedValue;
-          break;
-        case 'genres':
-          if (typeof suggestedValue === 'string') {
-            newMetadata.genres = suggestedValue.split(',').map(g => g.trim()).filter(Boolean);
-          } else if (Array.isArray(suggestedValue)) {
-            newMetadata.genres = suggestedValue;
-          }
-          break;
-        default:
-          if (field in newMetadata) {
-            newMetadata[field] = suggestedValue;
-          }
-      }
-
-      return {
-        ...group,
-        metadata: newMetadata,
-        total_changes: (group.total_changes || 0) + 1,
-      };
-    }));
-
+    setGroups(prevGroups => prevGroups.map(group => (
+      group.id === groupId ? applyFieldFixes(group, [{ field, value: suggestedValue }]) : group
+    )));
   }, [setGroups]);
 
   // ✅ Run author analysis and show review modal when complete
@@ -2494,20 +2391,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       return prevGroups.map(group => {
         const canonicalAuthor = fixesByBook[group.id];
         if (!canonicalAuthor) return group;
-
-        return {
-          ...group,
-          metadata: {
-            ...group.metadata,
-            author: canonicalAuthor,
-            authors: [canonicalAuthor, ...(group.metadata.authors || []).slice(1)],
-            sources: {
-              ...group.metadata.sources,
-              author: 'normalized',
-            },
-          },
-          total_changes: (group.total_changes || 0) + 1,
-        };
+        return applyFieldFixes(group, [{ field: 'author', value: canonicalAuthor }], {
+          sources: { ...group.metadata?.sources, author: 'normalized' },
+        });
       });
     });
 
@@ -2539,58 +2425,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       return prevGroups.map(group => {
         const bookFixes = fixesByBook[group.id];
         if (!bookFixes) return group;
-
-        const newMetadata = { ...group.metadata };
-
-        for (const fix of bookFixes) {
-          switch (fix.field) {
-            case 'author':
-              newMetadata.author = fix.suggestedValue;
-              newMetadata.authors = [fix.suggestedValue, ...(newMetadata.authors || []).slice(1)];
-              break;
-            case 'title':
-              newMetadata.title = fix.suggestedValue;
-              break;
-            case 'series':
-              newMetadata.series = fix.suggestedValue;
-              if (newMetadata.all_series?.length > 0) {
-                newMetadata.all_series = [{ ...newMetadata.all_series[0], name: fix.suggestedValue }, ...newMetadata.all_series.slice(1)];
-              } else {
-                newMetadata.all_series = [{ name: fix.suggestedValue, sequence: newMetadata.sequence }];
-              }
-              break;
-            case 'sequence':
-              newMetadata.sequence = fix.suggestedValue;
-              if (newMetadata.all_series?.length > 0) {
-                newMetadata.all_series = [{ ...newMetadata.all_series[0], sequence: fix.suggestedValue }, ...newMetadata.all_series.slice(1)];
-              }
-              break;
-            case 'narrator':
-              newMetadata.narrator = fix.suggestedValue;
-              newMetadata.narrators = [fix.suggestedValue, ...(newMetadata.narrators || []).slice(1)];
-              break;
-            case 'description':
-              newMetadata.description = fix.suggestedValue;
-              break;
-            case 'genres':
-              if (typeof fix.suggestedValue === 'string') {
-                newMetadata.genres = fix.suggestedValue.split(',').map(g => g.trim()).filter(Boolean);
-              } else if (Array.isArray(fix.suggestedValue)) {
-                newMetadata.genres = fix.suggestedValue;
-              }
-              break;
-            default:
-              if (fix.field in newMetadata) {
-                newMetadata[fix.field] = fix.suggestedValue;
-              }
-          }
-        }
-
-        return {
-          ...group,
-          metadata: newMetadata,
-          total_changes: (group.total_changes || 0) + bookFixes.length,
-        };
+        return applyFieldFixes(group, bookFixes.map(fix => ({ field: fix.field, value: fix.suggestedValue })));
       });
     });
 
@@ -2886,9 +2721,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // Outcomes are surfaced via toast and the session log instead of console.
     try {
       logEvent('push', 'ABS push start', { books: pushGroups.length });
+      // #62: local folders have no ABS item; runPush skips them with the reason.
       const outcome = await runPush(pushGroups, {
         pushById: handlePushAbsImports,
-        pushByFileIds: pushToAudiobookShelf,
         cancel,
       });
       const { summary } = outcome;
@@ -2933,6 +2768,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         onPipelineRescan={handlePipelineClick}
         onWrite={handleWriteClick}
         onRename={handleRenameClick}
+        onUndo={handleUndo}
+        undoAvailable={!!undoStatus?.available}
+        undoing={undoing}
+        selectedGroups={getSelectedGroups()}
         onPush={handlePushClick}
         onPull={handleImportFromAbsNotify}
         onBulkEdit={() => modals.open('bulkEdit')}
@@ -3260,79 +3099,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       {modals.isOpen('rename') && (
         <RenamePreviewModal
           // CR-6b: each file carries its OWN group's metadata so previews are
-          // per-book, not all rendered against a single selected group's data.
-          files={(() => {
-            const fileIds = getSelectedFileIds(groups);
-            const out = [];
-            for (const group of groups) {
-              const groupFiles = group.files || [];
-              groupFiles.forEach((file, index) => {
-                if (file.id != null && fileIds.has(file.id)) {
-                  out.push({
-                    fileId: file.id, path: file.path, metadata: group.metadata,
-                    part: index + 1, totalParts: groupFiles.length,
-                  });
-                }
-              });
-            }
-            return out;
-          })()}
-          onConfirm={async (pairs, _template) => {
-            try {
-              // CR-6a: rename by the explicit old->new pairs the modal computed
-              // from its previews (with the chosen template).
-              const renameResult = await renameFiles(pairs);
-
-              // M6: do NOT call handleScan() here - it opens a folder picker and,
-              // on cancel, drops the entire in-memory session (every curated
-              // edit). Instead patch each renamed file's path/filename in place.
-              const renamed = renameResult?.renamed || renameResult?.results || [];
-              const pathMap = new Map();
-              for (const r of renamed) {
-                const oldPath = r?.old_path ?? r?.oldPath;
-                const newPath = r?.new_path ?? r?.newPath;
-                if (oldPath && newPath) pathMap.set(oldPath, newPath);
-              }
-
-              // Visible-failure guard (Tasks 5-6 pattern): the Rust rename_files
-              // is a stub until Task 9b. If nothing came back applied, surface
-              // it and keep the modal open rather than silently "succeeding".
-              if (pathMap.size === 0) {
-                toast.error(
-                  'Rename Failed',
-                  'The rename backend applied no changes (not yet implemented). Your files were not renamed.'
-                );
-                return;
-              }
-
-              setGroups(prev => prev.map(g => {
-                if (!(g.files || []).some(f => pathMap.has(f.path))) return g;
-                return {
-                  ...g,
-                  files: g.files.map(f => {
-                    const np = pathMap.get(f.path);
-                    if (!np) return f;
-                    return { ...f, path: np, filename: np.split('/').pop() };
-                  }),
-                };
-              }));
-              modals.close('rename');
-              toast.success('Files Renamed', `Renamed ${pathMap.size} file${pathMap.size === 1 ? '' : 's'}.`);
-              // Truthful partial-failure: some pairs applied, others did not.
-              // Surface the failed count alongside the success toast (not gated
-              // behind the all-failed early return above).
-              const renameFailed = renameResult?.failed || 0;
-              if (renameFailed > 0) {
-                toast.error(
-                  'Some Renames Failed',
-                  `${renameFailed} file${renameFailed === 1 ? '' : 's'} could not be renamed. Check console for details.`
-                );
-              }
-            } catch (error) {
-              console.error('Rename failed:', error);
-              toast.error('Rename Failed', error?.message || String(error));
-            }
-          }}
+          // per-book. #62: only the selected local books' files.
+          files={getSelectedGroups().filter(isLocalGroup).flatMap(group => {
+            const groupFiles = group.files || [];
+            return groupFiles
+              .map((file, index) => ({
+                fileId: file.id, path: file.path, metadata: group.metadata,
+                part: index + 1, totalParts: groupFiles.length,
+              }))
+              .filter(f => f.fileId != null && f.path);
+          })}
+          onConfirm={handleConfirmRename}
           onCancel={() => modals.close('rename')}
         />
       )}

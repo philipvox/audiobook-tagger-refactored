@@ -47,3 +47,24 @@ export function computeBulkUpdates({ fieldsToEdit = {}, clearFields = {}, values
 
   return updates;
 }
+
+// The file.changes a bulk edit stages on one file (handleBulkSave). An update
+// KEY being present drives the change (a present null is an intentional clear
+// and stamps an empty new value); absent keys are left untouched, as are
+// unrelated staged changes. W-8: a file with no `changes` object is fine.
+export function bulkFileChanges(file, updates) {
+  const staged = file?.changes || {};
+  const changes = { ...staged };
+  const stamp = (field, next) => {
+    const old = staged[field]?.old || '';
+    if (old !== next) changes[field] = { old, new: next };
+  };
+  if ('author' in updates) stamp('author', updates.author || '');
+  if ('narrator' in updates) stamp('narrator', updates.narrator ? `Narrated by ${updates.narrator}` : '');
+  if ('genres' in updates) stamp('genre', (updates.genres || []).join(', '));
+  if ('series' in updates) changes.series = { old: '', new: updates.series || '' };
+  if ('sequence' in updates) changes.sequence = { old: '', new: updates.sequence || '' };
+  if ('year' in updates) changes.year = { old: staged.year?.old || '', new: updates.year || '' };
+  if ('publisher' in updates) changes.publisher = { old: '', new: updates.publisher || '' };
+  return changes;
+}
