@@ -101,8 +101,12 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups,
               </div>
             </div>
             <button
-              onClick={onClose}
-              className="p-2 hover:bg-neutral-800 rounded-lg transition-colors"
+              // H-7: while a push runs the X asks for the cancel like the
+              // footer button; the modal stays until the push settles.
+              onClick={busy ? handleCancelPush : onClose}
+              disabled={busy && (cancelRequested || !onCancelPush)}
+              aria-label={busy ? 'Stop push' : 'Close'}
+              className="p-2 hover:bg-neutral-800 rounded-lg transition-colors disabled:opacity-50"
             >
               <X className="w-5 h-5 text-gray-400" />
             </button>

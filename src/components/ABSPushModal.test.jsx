@@ -96,4 +96,21 @@ describe('ABSPushModal copy and counts (M-10)', () => {
     expect(screen.getByText('1 title update')).toBeInTheDocument();
     expect(screen.queryByText(/12 title/)).not.toBeInTheDocument();
   });
+
+  it('while a push runs the header X requests the cancel and keeps the modal open', () => {
+    const onClose = vi.fn();
+    const onCancelPush = vi.fn();
+    render(<ABSPushModal isOpen groups={groups} pushing onClose={onClose} onConfirm={vi.fn()} onCancelPush={onCancelPush} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Stop push' }));
+    expect(onCancelPush).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Stop push' })).toBeDisabled();
+  });
+
+  it('with no push running the header X closes the modal', () => {
+    const onClose = vi.fn();
+    render(<ABSPushModal isOpen groups={groups} pushing={false} onClose={onClose} onConfirm={vi.fn()} onCancelPush={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 });

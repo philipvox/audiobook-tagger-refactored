@@ -10,7 +10,7 @@ vi.mock('./lib/proxy', async (importOriginal) => {
 const { callBackend } = await import('./api.js');
 const { absApi, callAI } = await import('./lib/proxy');
 const { liveItem } = await import('./test/absLive.js');
-const { requestCancel, startCancellable } = await import('./lib/cancel.js');
+const { requestCancel, startCancellable, cancelAll } = await import('./lib/cancel.js');
 const { summarizePush } = await import('./lib/absPush.js');
 
 const setConfig = (extra = {}) => localStorage.setItem('audiobook_tagger_config', JSON.stringify({
@@ -121,7 +121,7 @@ describe('tokens are per operation (Task 9 fix round 1)', () => {
     absApi.mockImplementation(async (_b, _t, _path, opts) => (opts?.method === 'PATCH' ? {} : liveItem([], [])));
     const old = startCancellable();
     requestCancel(old);
-    requestCancel(); // and a cancel-everything with nothing else running
+    cancelAll(); // and a cancel-everything with nothing else running
     const items = [1, 2, 3].map((n) => ({ group_id: `g${n}`, abs_id: `li-${n}`, path: `/x/${n}.m4b`, metadata: { title: `B${n}` }, original: { title: 'old' } }));
     const out = await callBackend('push_abs_updates', { request: { items } });
     expect(out.updated).toHaveLength(3);
@@ -145,5 +145,18 @@ describe('pipeline rescan cancel', () => {
     const out = await callBackend('process_with_pipeline', { request, cancel: token });
     expect(out.books).toHaveLength(1);
     expect(out.cancelled).toBe(3);
+  });
+});
+
+describe('requestCancel needs a token (Task 9 fix round 2)', () => {
+  it('requestCancel() with no token cancels nothing; cancelAll() cancels every running operation', () => {
+    const a = startCancellable();
+    const b = startCancellable();
+    requestCancel(undefined);
+    expect(a.cancelled).toBe(false);
+    expect(b.cancelled).toBe(false);
+    cancelAll();
+    expect(a.cancelled).toBe(true);
+    expect(b.cancelled).toBe(true);
   });
 });

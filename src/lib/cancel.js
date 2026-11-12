@@ -24,20 +24,44 @@ export function finishCancellable(token) {
 }
 
 /**
- * Cancel one operation (`token`), or with no argument every operation still
- * running.
+ * Cancel one operation. Without a token this does nothing: a missing token
+ * must never turn one Cancel into "cancel everything" (that is cancelAll).
  */
 export function requestCancel(token) {
-  if (token) {
-    token.cancelled = true;
-    active.delete(token);
-    return;
-  }
+  if (!token) return;
+  token.cancelled = true;
+  active.delete(token);
+}
+
+/** Cancel every operation still running. */
+export function cancelAll() {
   for (const t of active) t.cancelled = true;
   active.clear();
+}
+
+/** How many operations hold a token that has not been finished (for tests). */
+export function activeCancellableCount() {
+  return active.size;
 }
 
 /** True once `token` was cancelled. A missing token is never cancelled. */
 export function isCancelled(token) {
   return token?.cancelled === true;
+}
+
+/**
+ * Wrap an operation so the token it took is finished when it ends, however
+ * it ends (resolve or throw). `takeToken()` runs in the finally and returns
+ * the token to finish, or null to keep it (e.g. a token shared with an
+ * enclosing operation that is still running).
+ */
+export function finishAfter(fn, takeToken) {
+  return async (...args) => {
+    try {
+      return await fn(...args);
+    } finally {
+      const token = takeToken();
+      if (token) finishCancellable(token);
+    }
+  };
 }

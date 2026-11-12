@@ -225,9 +225,9 @@ describe('useTagOperations.pushToAudiobookShelf cancel', () => {
   }));
 
   it('a Cancel set beforehand (by another run) does not skip the books of a local-only push', async () => {
-    const { requestCancel, startCancellable } = await import('../lib/cancel');
+    const { requestCancel, startCancellable, cancelAll } = await import('../lib/cancel');
     requestCancel(startCancellable());
-    requestCancel();
+    cancelAll();
     mockGroups = localGroups;
     mockCallBackend.mockResolvedValue({ updated: [{ id: 'g1', title: 'B1' }, { id: 'g2', title: 'B2' }], skipped: [], failed: [] });
     const { result } = renderHook(() => useTagOperations());

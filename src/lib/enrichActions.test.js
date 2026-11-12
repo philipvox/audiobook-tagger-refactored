@@ -241,8 +241,8 @@ describe('runBatchChunks (M-6)', () => {
 
   it('with no shouldStop the run is never stopped (no shared token to go stale)', async () => {
     const { runBatchChunks } = await import('./enrichActions');
-    const { requestCancel } = await import('./cancel');
-    requestCancel(); // cancels every running operation; this run has none
+    const { cancelAll } = await import('./cancel');
+    cancelAll(); // cancels every running operation; this run has none
     const groups = Array.from({ length: 30 }, (_, i) => book(`b${i}`));
     const out = await runBatchChunks(groups, {
       callChunk: async (chunk) => ({ results: chunk.map((g) => ({ id: g.id, success: true })), total_processed: chunk.length, total_failed: 0 }),
@@ -308,5 +308,38 @@ describe('ScannerPage batch handler wiring', () => {
 
   it('the inline narrator regex is gone', () => {
     expect(source).not.toContain('narratorMatch');
+  });
+});
+
+// Task 9 fix round 2: an Enrich action's token leaves the active set when the
+// action ends, however it ends.
+describe('Enrich tokens are released when the action ends', () => {
+  it('finishAfter finishes the token on success and on a throw', async () => {
+    const { startCancellable, finishAfter, activeCancellableCount } = await import('./cancel');
+    const base = activeCancellableCount();
+    let token;
+    const ok = finishAfter(async () => { token = startCancellable(); return 'done'; }, () => token);
+    expect(await ok()).toBe('done');
+    expect(activeCancellableCount()).toBe(base);
+
+    const bad = finishAfter(async () => { token = startCancellable(); throw new Error('boom'); }, () => token);
+    await expect(bad()).rejects.toThrow('boom');
+    expect(activeCancellableCount()).toBe(base);
+  });
+
+  it('finishAfter keeps a token when takeToken returns null (shared with Run All)', async () => {
+    const { startCancellable, finishAfter, activeCancellableCount } = await import('./cancel');
+    const shared = startCancellable();
+    const base = activeCancellableCount();
+    await finishAfter(async () => {}, () => null)();
+    expect(activeCancellableCount()).toBe(base);
+    expect(shared.cancelled).toBe(false);
+  });
+
+  it('every ScannerPage handler that takes a token is wrapped so it releases it', () => {
+    const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'pages', 'ScannerPage.jsx'), 'utf8');
+    const ops = [...source.matchAll(/beginCancellable\('(\w+)'\)/g)].map((m) => m[1]);
+    expect(ops.length).toBeGreaterThan(10);
+    for (const op of ops) expect(source).toContain(`cancellable('${op}', async`);
   });
 });

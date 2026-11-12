@@ -35,7 +35,7 @@ import { applyClassifyResult } from '../lib/applyClassifyResult';
 import { applyTagsResultToGroup, applyDnaResultToGroup, normalizeResults } from '../lib/applyTagResults';
 import { applyResolveResult, applyDescriptionProcessResult, applyFixDescriptionResult, tallyOutcomes } from '../lib/applyAiResults';
 import { runEnrichAction, applyEntries, reportOutcomes, runBatchChunks } from '../lib/enrichActions';
-import { requestCancel, startCancellable, finishCancellable } from '../lib/cancel';
+import { requestCancel, startCancellable, finishCancellable, finishAfter } from '../lib/cancel';
 import { syncAllSeries } from '../lib/absPayload';
 import { applyMetadataToGroup, readFileField, setYear } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
@@ -880,6 +880,14 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     opCancelRef.current[op] = token;
     return token;
   };
+  // Wrap an Enrich handler so the token its run took is released when the run
+  // ends, however it ends (Run All's shared token is released by Run All).
+  const cancellable = (op, fn) => finishAfter(fn, () => {
+    const token = opCancelRef.current[op];
+    if (!token || token === runAllCancelRef.current) return null;
+    delete opCancelRef.current[op];
+    return token;
+  });
   // A progress bar's Cancel: chunked actions stop before their next chunk;
   // what was already applied stays applied.
   const handleCancelBatch = (op) => {
@@ -890,7 +898,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   };
 
   // ✅ GPT-powered genre cleanup for selected books (with progress)
-  const handleGenreCleanup = async () => {
+  const handleGenreCleanup = cancellable('genres', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0 && !allSelected) return;
 
@@ -943,7 +951,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Clear progress after a short delay
     batch.end('genres', 1500);
-  };
+  });
 
   const assigningTags = batch.isActive('tags');
   const tagProgress = batch.getProgress('tags');
@@ -971,7 +979,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const dnaEnabled = batch.dnaEnabled;
 
   // ✅ GPT-powered title/author/subtitle fixing for selected books (NO series)
-  const handleFixTitles = async () => {
+  const handleFixTitles = cancellable('titles', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
@@ -995,10 +1003,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       failed: counts.failed,
     });
     batch.end('titles');
-  };
+  });
 
   // ✅ Subtitle fixing via Audible + GPT for selected books
-  const handleFixSubtitles = async () => {
+  const handleFixSubtitles = cancellable('subtitles', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
@@ -1036,10 +1044,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Clear progress after a short delay
     batch.end('subtitles', 1500);
-  };
+  });
 
   // ✅ Author fixing via ABS + GPT for selected books
-  const handleFixAuthors = async () => {
+  const handleFixAuthors = cancellable('authors', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
@@ -1163,10 +1171,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Clear progress after a short delay
     batch.end('authors', 1500);
-  };
+  });
 
   // ✅ Year fixing (original publication year) via ABS + GPT for selected books
-  const handleFixYears = async () => {
+  const handleFixYears = cancellable('years', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
@@ -1318,11 +1326,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Clear progress after a short delay
     batch.end('years', 1500);
-  };
+  });
 
   // ✅ Check by Audio - extract metadata from audio intros via Whisper
   const extractingByAudio = batch.isActive('audio_check');
-  const handleExtractByAudio = async (field = 'all') => {
+  const handleExtractByAudio = cancellable('audio_check', async (field = 'all') => {
     const fieldLabels = { all: 'All Fields', narrator: 'Narrator', author: 'Author', title: 'Title', publisher: 'Publisher', language: 'Language' };
     const label = fieldLabels[field] || field;
 
@@ -1390,10 +1398,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       if (tauriUnlisten) tauriUnlisten();
       batch.end('audio_check', 1500);
     }
-  };
+  });
 
   // ✅ Series fixing via Audible + GPT for selected books
-  const handleFixSeries = async () => {
+  const handleFixSeries = cancellable('series', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
@@ -1420,10 +1428,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       failed: counts.failed,
     });
     batch.end('series');
-  };
+  });
 
   // ✅ Age rating lookup via web search (Goodreads, etc.)
-  const handleLookupAge = async () => {
+  const handleLookupAge = cancellable('age', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
@@ -1448,10 +1456,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       failed: counts.failed,
     });
     batch.end('age');
-  };
+  });
 
   // ✅ ISBN/ASIN lookup for selected books
-  const handleLookupISBN = async () => {
+  const handleLookupISBN = cancellable('isbn', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
@@ -1510,12 +1518,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (!runAllActiveRef.current) gatheredDataRef.current = null;
 
     batch.end('isbn');
-  };
+  });
 
   // ✅ CALL A: METADATA RESOLUTION, title + subtitle + author + series in ONE GPT call per book
   const resolvingMetadata = batch.isActive('metadata');
   const metadataProgress = batch.getProgress('metadata');
-  const handleMetadataResolution = async () => {
+  const handleMetadataResolution = cancellable('metadata', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
     // H3: read the LIVE groups (via ref) so that when Run All chains this step
@@ -1676,12 +1684,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // a Run All step never nulls the shared ref mid-sequence.
     if (!runAllActiveRef.current) gatheredDataRef.current = null;
     batch.end('metadata', 2000);
-  };
+  });
 
   // ✅ CALL C: DESCRIPTION PROCESSING, validate + clean/generate in ONE GPT call per book
   const processingDescriptions = batch.isActive('descriptionProcessing');
   const descriptionProgress = batch.getProgress('descriptionProcessing');
-  const handleDescriptionProcessing = async () => {
+  const handleDescriptionProcessing = cancellable('descriptionProcessing', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
     // H3: read live groups so a Run All chain sees prior steps' merges.
@@ -1775,7 +1783,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       toast.error('Description Processing Failed', e.toString());
     }
     batch.end('descriptionProcessing', 2000);
-  };
+  });
 
   // ✅ RUN ALL - Sequential enrichment: title -> description -> tags -> age -> isbn -> dna
   // Ref to hold pre-fetched data from gather phase (used by handleRunAll)
@@ -1908,7 +1916,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   };
 
   // ✅ GPT-powered tag assignment for selected books (with progress)
-  const handleAssignTagsGpt = async () => {
+  const handleAssignTagsGpt = cancellable('tags', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
@@ -2016,10 +2024,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Clear progress after a short delay
     batch.end('tags', 1500);
-  };
+  });
 
   // ✅ BookDNA generation - creates structured fingerprint tags (dna:*)
-  const handleGenerateDna = async () => {
+  const handleGenerateDna = cancellable('dna', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
@@ -2122,13 +2130,13 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Clear progress after a short delay
     batch.end('dna', 1500);
-  };
+  });
 
   // ✅ CONSOLIDATED CLASSIFY, replaces genres + tags + age + DNA + description in ONE GPT call per book
   const classifying = batch.isActive('classify');
   const classifyProgress = batch.getProgress('classify');
 
-  const handleClassifyAll = async (includeDescription = true) => {
+  const handleClassifyAll = cancellable('classify', async (includeDescription = true) => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
@@ -2329,10 +2337,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     batch.end('classify', 1500);
-  };
+  });
 
   // ✅ GPT-powered description fixing for selected books (with progress)
-  const handleFixDescriptionsGpt = async () => {
+  const handleFixDescriptionsGpt = cancellable('descriptions', async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
 
@@ -2390,7 +2398,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Clear progress after a short delay
     batch.end('descriptions', 1500);
-  };
+  });
 
   // ✅ Fix a single issue on a single book
   const handleFixSingleIssue = useCallback((groupId, field, suggestedValue) => {

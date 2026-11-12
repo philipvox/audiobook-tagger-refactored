@@ -444,7 +444,7 @@ describe.skip('useScan hook', () => {
 
 vi.mock('../lib/proxy', async (importOriginal) => {
   const actual = await importOriginal();
-  return { ...actual, absApi: vi.fn() };
+  return { ...actual, absApi: vi.fn(), callAI: vi.fn() };
 });
 
 describe('useScan import and push cancel (H-7)', () => {
@@ -513,10 +513,10 @@ describe('useScan import and push cancel (H-7)', () => {
 
   it('a cancel left over from an earlier run does not stop the next push', async () => {
     const { absApi } = await import('../lib/proxy');
-    const { requestCancel, startCancellable } = await import('../lib/cancel');
+    const { requestCancel, startCancellable, cancelAll } = await import('../lib/cancel');
     serveLive(absApi);
     requestCancel(startCancellable());
-    requestCancel();
+    cancelAll();
     const { result } = renderHook(() => useScan());
 
     let out;
@@ -572,5 +572,80 @@ describe('ABS import errors are visible (H-9)', () => {
     expect(hasAbsConnection({ abs_base_url: 'http://abs.local', abs_api_token: 't' })).toBe(false);
     expect(hasAbsConnection({ abs_base_url: 'http://abs.local', abs_api_token: 't', abs_library_id: 'lib-1' })).toBe(true);
     expect(hasAbsConnection(null)).toBe(false);
+  });
+});
+
+describe('scan bar Cancel after a modal push (Task 9 fix round 2)', () => {
+  const pushGroups = [1, 2].map((n) => ({ id: `g${n}`, abs_id: `li-${n}`, metadata: { title: `B${n}` }, abs_original: { title: 'old' } }));
+
+  beforeEach(async () => {
+    localStorage.clear();
+    localStorage.setItem('audiobook_tagger_config', JSON.stringify({
+      abs_base_url: 'http://abs.local', abs_api_token: 'token', abs_library_id: 'lib-1', openai_api_key: 'k',
+    }));
+    const { absApi, callAI } = await import('../lib/proxy');
+    absApi.mockReset();
+    callAI.mockReset();
+    absApi.mockImplementation(async (_b, _t, _p, opts) => (opts?.method === 'PATCH' ? {} : { media: { tags: [], metadata: { genres: [] } } }));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  // Every render's { scanning, scanCancellable }, so a test can see what the
+  // bar offered while an operation was running.
+  const recordRenders = () => {
+    const renders = [];
+    const hook = renderHook(() => {
+      const scan = useScan();
+      renders.push({ scanning: scan.scanning, cancellable: scan.scanCancellable });
+      return scan;
+    });
+    return { hook, renders };
+  };
+
+  it('after a push with the caller\'s token settles, the bar is not cancellable, and a later operation without cancel support offers no Cancel', async () => {
+    const { absApi } = await import('../lib/proxy');
+    const { startCancellable, finishCancellable } = await import('../lib/cancel');
+    let release;
+    absApi.mockImplementation(async (_b, _t, _p, opts) => {
+      if (opts?.method === 'PATCH') return {};
+      if (!release) await new Promise((r) => { release = r; });
+      return { media: { tags: [], metadata: { genres: [] } } };
+    });
+    const { hook, renders } = recordRenders();
+    const cancel = startCancellable(); // as ScannerPage.handleConfirmPush / runPush do
+
+    let pushPromise;
+    await act(async () => { pushPromise = hook.result.current.handlePushAbsImports(pushGroups, { cancel }); await Promise.resolve(); });
+    expect(hook.result.current.scanCancellable).toBe(true); // Cancel offered while the push runs
+    await act(async () => { release(); await pushPromise; });
+    finishCancellable(cancel);
+    expect(hook.result.current.scanCancellable).toBe(false);
+
+    // An ABS rescan (no cancel support) runs on the same bar.
+    const from = renders.length;
+    await act(async () => {
+      await hook.result.current.handleRescanAbsImports(pushGroups).catch(() => {});
+    });
+    expect(renders.slice(from).every((r) => !r.cancellable)).toBe(true);
+    // Clicking the bar's Cancel now does nothing (no "Cancelling..." for a dead token).
+    await act(async () => { await hook.result.current.cancelScan(); });
+    expect(hook.result.current.scanProgress.currentFile).not.toBe('Cancelling...');
+    expect(cancel.cancelled).toBe(false);
+  });
+
+  it('a pipeline\'s auto-push keeps the pipeline\'s Cancel on the bar and releases it when the pipeline ends', async () => {
+    const { callAI } = await import('../lib/proxy');
+    callAI.mockResolvedValue('{"genres":["Fantasy"],"tags":["cozy"]}');
+    const { hook } = recordRenders();
+    // Imported books carry the ABS item id as their group id.
+    const absGroups = [1, 2].map((n) => ({ id: `li-${n}`, abs_id: `li-${n}`, metadata: { title: `B${n}` }, abs_original: { title: 'old' } }));
+
+    let out;
+    await act(async () => { out = await hook.result.current.handlePipelineRescan(absGroups, true); });
+
+    expect(out.push).toBeTruthy();
+    expect(out.push.updated).toHaveLength(2);
+    expect(hook.result.current.scanCancellable).toBe(false);
   });
 });

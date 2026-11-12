@@ -148,20 +148,36 @@ export function useScan() {
   // operation cannot be cancelled, so the bar offers no Cancel for it.
   const scanCancelRef = useRef(null);
   const [scanCancellable, setScanCancellable] = useState(false);
-  // Take a token for a bar operation (or adopt `parent`, the token of the
-  // operation it runs inside, e.g. a pipeline's auto-push).
-  const beginScanCancel = (parent = null) => {
-    const token = parent || startCancellable();
+  // Show an operation's token on the bar while it runs. `given` is a token
+  // the caller owns (a pipeline's auto-push, a push from the confirm modal);
+  // without one the operation takes, and later finishes, its own. release()
+  // gives the bar back to whatever it showed before (null, or an enclosing
+  // operation still running), so a settled operation never leaves its dead
+  // token, and a Cancel that does nothing, on the bar.
+  const liveBarTokensRef = useRef(new Set());
+  const beginScanCancel = (given = null) => {
+    const token = given || startCancellable();
+    const previous = scanCancelRef.current;
+    const live = liveBarTokensRef.current;
+    live.add(token);
     scanCancelRef.current = token;
     setScanCancellable(true);
-    return token;
-  };
-  const endScanCancel = (token) => {
-    finishCancellable(token);
-    if (scanCancelRef.current === token) {
-      scanCancelRef.current = null;
-      setScanCancellable(false);
-    }
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (!given) finishCancellable(token);
+      // Nested under the same token (a pipeline's auto-push): the enclosing
+      // operation still owns the bar.
+      if (previous === token) return;
+      live.delete(token);
+      if (scanCancelRef.current === token) {
+        const restore = previous && live.has(previous) ? previous : null;
+        scanCancelRef.current = restore;
+        setScanCancellable(restore != null);
+      }
+    };
+    return { token, release };
   };
   const [scanProgress, setScanProgress] = useState({
     current: 0,
@@ -557,7 +573,8 @@ export function useScan() {
     }
 
     let unlisten = null;
-    const cancel = beginScanCancel();
+    const bar = beginScanCancel();
+    const cancel = bar.token;
     try {
       setScanning(true);
       const startTime = Date.now();
@@ -608,7 +625,7 @@ export function useScan() {
 
       } finally {
         if (unlisten) unlisten();
-        endScanCancel(cancel);
+        bar.release();
         setScanning(false);
 
         resetTimeoutRef.current = setTimeout(() => {
@@ -626,22 +643,24 @@ export function useScan() {
     } catch (error) {
       console.error('ABS import failed:', error);
       if (unlisten) unlisten();
-      endScanCancel(cancel);
+      bar.release();
       setScanning(false);
       throw error;
     }
   }, [setGroups]);
 
   // Push ABS-imported books back to ABS library
-  // H-7: `cancel` (optional) is the token of an operation this push runs
-  // inside (a pipeline auto-push); without it the push takes its own.
+  // H-7: `cancel` (optional) is a token the caller owns (a pipeline auto-push,
+  // a push from the confirm modal); the push stops on it and shows it on the
+  // bar while it runs. Without it the push takes its own.
   const handlePushAbsImports = useCallback(async (groupsToPush, { cancel: parentCancel = null } = {}) => {
     if (!groupsToPush || groupsToPush.length === 0) {
       return { success: false, attempted: 0, updated: [], skipped: [], failed: [] };
     }
 
     let unlisten = null;
-    const cancel = beginScanCancel(parentCancel);
+    const bar = beginScanCancel(parentCancel);
+    const cancel = bar.token;
     try {
 
       // Set up progress listener
@@ -710,7 +729,7 @@ export function useScan() {
       throw error;
     } finally {
       if (unlisten) unlisten();
-      if (!parentCancel) endScanCancel(cancel);
+      bar.release();
       setScanning(false);
     }
   }, [setGroups]);
@@ -836,7 +855,8 @@ export function useScan() {
 
     let unlisten = null;
     let pushOutcome = null; // #60: auto-push result, returned to the caller
-    const cancel = beginScanCancel();
+    const bar = beginScanCancel();
+    const cancel = bar.token;
     try {
       setScanning(true);
       const startTime = Date.now();
@@ -936,7 +956,7 @@ export function useScan() {
       // L-10: unlisten belongs in finally (matching the other handlers) so a
       // thrown callBackend/setGroups error doesn't leak the subscription.
       if (unlisten) unlisten();
-      endScanCancel(cancel);
+      bar.release();
       setScanning(false);
       setScanProgress({
         current: 0,
