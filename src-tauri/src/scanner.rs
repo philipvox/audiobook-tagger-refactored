@@ -62,6 +62,8 @@ struct EmbeddedTags {
     series_number: Option<String>,
     year: Option<String>,
     genre: Option<String>,
+    /// Track number tag; one of the two signals for a numbered track set.
+    track: Option<u32>,
 }
 
 pub(crate) struct RawFile {
@@ -96,6 +98,7 @@ fn read_embedded_tags(path: &Path) -> EmbeddedTags {
     out.album = tag.album().and_then(|c| non_empty(c.into_owned()));
     out.year = tag.year().map(|y| y.to_string());
     out.genre = tag.genre().and_then(|c| non_empty(c.into_owned()));
+    out.track = tag.track();
 
     // Author: prefer AlbumArtist, fall back to TrackArtist
     out.author = tag
@@ -176,7 +179,9 @@ pub(crate) fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
             .follow_links(false)
             .into_iter()
             .filter_entry(|e| {
-                if e.file_type().is_dir() {
+                // Folder-name rules apply only BELOW the root: a root the user
+                // picked that happens to be named ".books" must still scan.
+                if e.depth() > 0 && e.file_type().is_dir() {
                     if let Some(name) = e.path().file_name().and_then(|n| n.to_str()) {
                         if name.starts_with("backup_")
                             || name == "backups"
@@ -757,29 +762,128 @@ fn is_single_file_book_format(f: &RawFile) -> bool {
     ext == "m4b" || ext == "m4a"
 }
 
-/// Which book a file belongs to within its folder. m4b/m4a are usually whole
-/// books, so their title (else album, else filename) identifies the book;
-/// track-based formats (mp3, flac, ...) share an album across chapters, so only
-/// the album separates them. "" = no identity (joins the folder's main book).
-fn file_book_key(f: &RawFile) -> String {
-    let nonempty = |o: &Option<String>| o.as_deref().map(book_key).filter(|k| !k.is_empty());
+/// The track number a filename carries: the first run of 1-3 digits, with the
+/// text before it (`prefix`) and the whole stem with that run masked as "#"
+/// (`pattern`), all lowercased. "01 - Chapter" -> (1, "", "# - chapter");
+/// "track07" -> (7, "track", "track#"). Four-digit runs are years or titles
+/// ("1984"), never track numbers.
+struct StemNumber {
+    number: u32,
+    prefix: String,
+    pattern: String,
+}
+
+fn stem_number(stem: &str) -> Option<StemNumber> {
+    let lower = stem.trim().to_lowercase();
+    let start = lower.find(|c: char| c.is_ascii_digit())?;
+    let len = lower[start..].find(|c: char| !c.is_ascii_digit()).unwrap_or(lower.len() - start);
+    if len > 3 {
+        return None;
+    }
+    Some(StemNumber {
+        number: lower[start..start + len].parse().ok()?,
+        prefix: lower[..start].trim().to_string(),
+        pattern: format!("{}#{}", &lower[..start], &lower[start + len..]),
+    })
+}
+
+/// True when, within each directory, `numbers` are distinct and (when
+/// `consecutive`) each one is exactly one more than the previous. Per
+/// directory, so Disc 1/track01-02 + Disc 2/track01 still counts.
+fn numbered_per_dir(files: &[RawFile], numbers: &[u32], consecutive: bool) -> bool {
+    let mut by_dir: HashMap<&str, Vec<u32>> = HashMap::new();
+    for (f, n) in files.iter().zip(numbers) {
+        by_dir.entry(f.parent_dir.as_str()).or_default().push(*n);
+    }
+    by_dir.into_values().all(|mut nums| {
+        nums.sort_unstable();
+        nums.windows(2).all(|w| if consecutive { w[1] == w[0] + 1 } else { w[1] != w[0] })
+    })
+}
+
+/// Whether a folder's files are ONE book's numbered tracks.
+///
+/// Rule: the folder is one numbered track set only when there is positive
+/// evidence of numbering, never merely because the files lack an album tag:
+///   1. every file carries a track-number tag and, per directory, those
+///      numbers are consecutive (1, 2, 3 ...); or
+///   2. every filename carries a track number (1-3 digits) after the same
+///      leading text, and per directory those numbers are consecutive
+///      ("00 intro", "01", "02") or the names are otherwise identical
+///      ("01 - Chapter", "02 - Chapter", gaps allowed).
+/// Anything else is treated as possibly several books, and its files are told
+/// apart by title or filename: a wrong split is recoverable, a wrong merge
+/// writes one book's tags over another's files.
+fn is_numbered_track_set(files: &[RawFile]) -> bool {
+    if files.len() < 2 {
+        return false;
+    }
+    if let Some(tracks) = files.iter().map(|f| f.tags.track).collect::<Option<Vec<u32>>>() {
+        if numbered_per_dir(files, &tracks, true) {
+            return true;
+        }
+    }
+    let Some(parsed) = files.iter().map(|f| stem_number(&file_stem(f))).collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    if parsed.iter().any(|p| p.prefix != parsed[0].prefix) {
+        return false;
+    }
+    let numbers: Vec<u32> = parsed.iter().map(|p| p.number).collect();
+    let same_pattern = parsed.iter().all(|p| p.pattern == parsed[0].pattern);
+    numbered_per_dir(files, &numbers, true) || (same_pattern && numbered_per_dir(files, &numbers, false))
+}
+
+/// Which book a file belongs to within its folder. "" = no identity of its
+/// own (joins the folder's single keyed book, if there is one).
+///
+/// - mp3/flac/...: the album; without one, a file in a numbered track set has
+///   no identity (it is a chapter), otherwise its title, else its filename.
+/// - m4b/m4a are usually whole books: title, else album, else filename. In a
+///   numbered track set they are per-track files, so a shared album wins over
+///   their differing track titles, and an untagged one keys by its filename
+///   with the number masked ("01.m4a" and "02.m4a" are the same book).
+/// - A purely numeric title or filename ("1984") is still an identity: it
+///   falls back to the filename, never to "".
+fn file_book_key(f: &RawFile, track_set: bool) -> String {
+    let tag_key = |o: &Option<String>| o.as_deref().map(book_key).filter(|k| !k.is_empty());
+    let stem = file_stem(f);
+    let stem_key = || {
+        let k = book_key(&stem);
+        if k.is_empty() { stem.trim().to_lowercase() } else { k }
+    };
     if is_single_file_book_format(f) {
-        nonempty(&f.tags.title)
-            .or_else(|| nonempty(&f.tags.album))
-            .unwrap_or_else(|| book_key(&file_stem(f)))
+        if track_set {
+            if let Some(album) = tag_key(&f.tags.album) {
+                return album;
+            }
+        }
+        tag_key(&f.tags.title).or_else(|| tag_key(&f.tags.album)).unwrap_or_else(|| {
+            match stem_number(&stem) {
+                Some(n) if track_set => book_key(&n.pattern),
+                _ => stem_key(),
+            }
+        })
     } else {
-        nonempty(&f.tags.album).unwrap_or_default()
+        if let Some(album) = tag_key(&f.tags.album) {
+            return album;
+        }
+        if track_set {
+            return String::new();
+        }
+        tag_key(&f.tags.title).unwrap_or_else(stem_key)
     }
 }
 
-/// Split one folder's files into books. Keyless files join the single keyed
-/// book when there is exactly one (an untagged intro track), else form their
-/// own group, so a folder of one book's tracks never splits.
+/// Split one folder's files into books. Keyless files (album-less tracks of a
+/// numbered set) join the single keyed book when there is exactly one (an
+/// untagged intro track), else form their own group.
 fn split_folder_into_books(raw_files: Vec<RawFile>) -> Vec<(String, Vec<RawFile>)> {
+    let track_set = is_numbered_track_set(&raw_files);
     let mut order: Vec<String> = Vec::new();
     let mut buckets: HashMap<String, Vec<RawFile>> = HashMap::new();
     for f in raw_files {
-        let key = file_book_key(&f);
+        let key = file_book_key(&f, track_set);
         if !buckets.contains_key(&key) {
             order.push(key.clone());
         }
@@ -1234,6 +1338,104 @@ mod tests {
             raw(d, "02.m4b", EmbeddedTags::default()),
         ]);
         assert_eq!(groups.len(), 1);
+    }
+
+    // ---- Task 13: unrelated books sharing a folder (audit W-1, W-4) ----
+
+    fn titled(title: &str) -> EmbeddedTags {
+        EmbeddedTags { title: Some(title.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn numeric_title_is_its_own_book() {
+        let d = "/audiobooks/George Orwell";
+        let groups = group_files(vec![
+            raw(d, "1984.m4b", EmbeddedTags::default()),
+            raw(d, "Animal Farm.m4b", EmbeddedTags::default()),
+        ]);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!(names(&groups), vec!["1984", "Animal Farm"]);
+        // The same holds when the numeric title is in the tag.
+        let groups = group_files(vec![
+            raw(d, "1984.m4b", titled("1984")),
+            raw(d, "Animal Farm.m4b", titled("Animal Farm")),
+        ]);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        for g in &groups {
+            assert_eq!(g.files.len(), 1);
+        }
+    }
+
+    #[test]
+    fn albumless_mp3s_with_distinct_titles_split() {
+        let d = "/audiobooks/Stephen King";
+        let groups = group_files(vec![
+            raw(d, "Carrie.mp3", titled("Carrie")),
+            raw(d, "Misery.mp3", titled("Misery")),
+        ]);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!(names(&groups), vec!["Carrie", "Misery"]);
+    }
+
+    #[test]
+    fn stray_file_does_not_join_keyed_book() {
+        let d = "/audiobooks/Mixed";
+        let groups = group_files(vec![
+            raw(d, "Dune.m4b", EmbeddedTags::default()),
+            raw(d, "Emma.mp3", EmbeddedTags::default()),
+        ]);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!(names(&groups), vec!["Dune", "Emma"]);
+    }
+
+    #[test]
+    fn per_track_m4a_with_shared_album_is_one_book() {
+        let d = "/audiobooks/Dune";
+        let t = |title: &str| EmbeddedTags { album: Some("Dune".into()), title: Some(title.into()), ..Default::default() };
+        let groups = group_files(vec![
+            raw(d, "01.m4a", t("The Spice")),
+            raw(d, "02.m4a", t("Arrakis")),
+            raw(d, "03.m4a", t("Muad'Dib")),
+        ]);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].files.len(), 3);
+        assert_eq!(groups[0].metadata.title, "Dune");
+        assert_ne!(groups[0].metadata.author, "Dune", "folder name must not become the author");
+    }
+
+    #[test]
+    fn numbered_track_set_stays_one_book() {
+        let d = "/audiobooks/Some Author/Some Book";
+        let files: Vec<RawFile> = (1..=30)
+            .map(|n| raw(d, &format!("{:02} - Chapter.mp3", n), EmbeddedTags::default()))
+            .collect();
+        let groups = group_files(files);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].files.len(), 30);
+        // Per-track titles that differ do not split a numbered set either.
+        let files: Vec<RawFile> = (1..=30)
+            .map(|n| raw(d, &format!("{:02} - Chapter.mp3", n), titled(&format!("Chapter {n}"))))
+            .collect();
+        assert_eq!(group_files(files).len(), 1);
+    }
+
+    #[test]
+    fn dot_named_root_scans() {
+        let tmp = tempfile::Builder::new().prefix("tagger-test-").tempdir().unwrap();
+        let root = tmp.path().join(".books");
+        let book = root.join("Frank Herbert").join("Dune");
+        std::fs::create_dir_all(&book).unwrap();
+        std::fs::write(book.join("Dune.m4b"), b"").unwrap();
+        // Hidden folders BELOW the root are still skipped.
+        let hidden = root.join(".hidden");
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::write(hidden.join("Secret.m4b"), b"").unwrap();
+        let found = collect_audio_files(&[root.to_string_lossy().to_string()]);
+        assert_eq!(found.len(), 1, "only the visible book is found");
+        let groups = group_files(found);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].metadata.title, "Dune");
+        assert_eq!(groups[0].metadata.author, "Frank Herbert");
     }
 
     // ---- Container folders / scan root never become the author ----
