@@ -1247,6 +1247,7 @@ Return ONLY valid JSON:
 
         // --- STEP 2: Generate DNA tags (skip if disabled) ---
         let dnaTags = [];
+        let dnaError;
         if (dnaEnabled) {
           try {
             emitEvent('batch-progress', { call_type: 'tags', current: completed + 0.5, total: books.length, title: `DNA: ${book.title}` });
@@ -1254,8 +1255,10 @@ Return ONLY valid JSON:
             const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, 1500);
             const dna = parseAIJson(dnaResponse);
             dnaTags = convertDnaToTags(dna);
+            if (dnaTags.length === 0) dnaError = 'The AI returned no DNA tags.';
           } catch (dnaErr) {
             console.warn(`DNA generation failed for ${book.title}:`, dnaErr.message);
+            dnaError = dnaErr.message || 'DNA generation failed.';
           }
         }
 
@@ -1263,7 +1266,7 @@ Return ONLY valid JSON:
         const allTags = [...standardTags, ...dnaTags];
         completed++;
         emitEvent('batch-progress', { call_type: 'tags', current: completed, total: books.length, title: book.title });
-        results.push({ id: book.id, success: true, tags: standardTags, suggested_tags: allTags, dna_tags: dnaTags });
+        results.push({ id: book.id, success: true, tags: standardTags, suggested_tags: allTags, dna_tags: dnaTags, ...(dnaError ? { dna_error: dnaError } : {}) });
       } catch (err) {
         completed++;
         emitEvent('batch-progress', { call_type: 'tags', current: completed, total: books.length, title: book.title });
@@ -1520,9 +1523,11 @@ Return JSON: {"year":"2005"}`;
         const response = await callAI(config, getDnaSystemPrompt(config), prompt, 1500);
         const parsed = parseAIJson(response);
         const dnaTags = convertDnaToTags(parsed);
+        if (dnaTags.length === 0) throw new Error('The AI returned no DNA tags, so existing DNA tags were kept.');
 
-        // Merge with existing tags (preserve non-DNA tags, replace DNA ones)
-        const existingNonDna = (item.tags || []).filter(t => !t.startsWith('dna:'));
+        // Merge with existing tags (preserve non-DNA tags, replace DNA ones only
+        // because at least one new dna: tag came back)
+        const existingNonDna = (item.tags || []).filter(t => !String(t).startsWith('dna:'));
         const mergedTags = [...existingNonDna, ...dnaTags];
 
         completed++;

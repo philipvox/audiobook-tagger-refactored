@@ -32,6 +32,7 @@ import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
 import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePush } from '../lib/absPush';
 import { userClearedPatch } from '../lib/userCleared';
 import { applyClassifyResult } from '../lib/applyClassifyResult';
+import { mergeClassifyTags } from '../lib/mergeClassifyTags';
 import { syncAllSeries } from '../lib/absPayload';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
@@ -2378,14 +2379,29 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           setGroups(prevGroups => {
             return prevGroups.map(g => {
               const tagResult = result.results.find(r => r.id === g.id);
-              if (tagResult && tagResult.suggested_tags && tagResult.suggested_tags.length > 0) {
+              if (tagResult && tagResult.success && ((tagResult.tags || []).length > 0 || (tagResult.dna_tags || []).length > 0)) {
+                // Merge, never replace (audit C-2): curated ABS tags survive.
+                const existing = g.metadata?.tags || [];
+                const merged = mergeClassifyTags(
+                  existing,
+                  { tags: tagResult.tags, dna_tags: tagResult.dna_tags },
+                  g.abs_original?.tags ?? existing
+                );
+                let next = merged.changed
+                  ? applyMetadataToGroup(g, { tags: merged.tags }, ['tags'])
+                  : g;
+                if (tagResult.dna_error) {
+                  next = {
+                    ...next,
+                    lastError: { stage: 'tags', kind: 'dna', message: `DNA tags were not updated: ${tagResult.dna_error}`, severity: 'error' },
+                  };
+                }
+                return next;
+              }
+              if (tagResult && tagResult.success === false && tagResult.error) {
                 return {
                   ...g,
-                  metadata: {
-                    ...g.metadata,
-                    tags: tagResult.suggested_tags,
-                  },
-                  total_changes: (g.total_changes || 0) + 1,
+                  lastError: { stage: 'tags', kind: 'ai', message: tagResult.error, severity: 'error' },
                 };
               }
               return g;
@@ -2543,28 +2559,29 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         request: { items },
       });
 
-      // Update groups with merged tags
+      // Merge new dna: tags into existing tags (audit C-2). A failed or empty
+      // answer leaves tags untouched and shows a per-book error.
+      const dnaResults = Array.isArray(results) ? results : (results?.results || []);
       setGroups(prevGroups => {
         return prevGroups.map(g => {
-          const result = results.find(r => r.id === g.id);
-          if (result && result.success) {
-            return {
-              ...g,
-              metadata: {
-                ...g.metadata,
-                tags: result.merged_tags,
-              },
-              total_changes: (g.total_changes || 0) + 1,
-            };
+          const result = dnaResults.find(r => r.id === g.id);
+          if (!result) return g;
+          if (result.success) {
+            const existing = g.metadata?.tags || [];
+            const merged = mergeClassifyTags(existing, { dna_tags: result.dna_tags }, existing);
+            return merged.changed ? applyMetadataToGroup(g, { tags: merged.tags }, ['tags']) : g;
           }
-          return g;
+          return {
+            ...g,
+            lastError: { stage: 'dna', kind: 'ai', message: result.error || 'DNA generation returned nothing.', severity: 'error' },
+          };
         });
       });
 
       unlisten();
 
-      const successCount = results.filter(r => r.success).length;
-      const failedCount = results.filter(r => !r.success).length;
+      const successCount = dnaResults.filter(r => r.success).length;
+      const failedCount = dnaResults.filter(r => !r.success).length;
 
       // Show toast
       if (successCount > 0) {
@@ -2574,8 +2591,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       logBatchEnd(
         'dna',
         { books: selectedGroups.length, succeeded: successCount, failed: failedCount },
-        results
+        dnaResults
       );
+      if (failedCount > 0) {
+        toast.error('Some DNA not generated', `${failedCount} book${failedCount > 1 ? 's' : ''} kept their existing tags`);
+      }
     } catch (error) {
       console.error('BookDNA generation failed:', error);
       logEvent('batch', 'dna aborted', { error: String(error?.message || error) });
