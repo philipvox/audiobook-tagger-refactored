@@ -334,7 +334,7 @@ fn ffmpeg_download_for(os: &str, arch: &str) -> Option<&'static PinnedDownload> 
 }
 
 /// Lowercase hex of a finished SHA-256.
-fn hex_digest(digest: &[u8]) -> String {
+pub(crate) fn hex_digest(digest: &[u8]) -> String {
     digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
@@ -360,7 +360,7 @@ fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), String> {
 /// HTTP client for large downloads: no total-request timeout (a slow link
 /// must not fail a healthy download), but connect and per-read timeouts so a
 /// stalled one does fail.
-fn download_client() -> Result<reqwest::Client, String> {
+pub(crate) fn download_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .read_timeout(Duration::from_secs(60))
@@ -518,7 +518,7 @@ fn passes_executable_check(path: &std::path::Path) -> bool {
 ///
 /// On Unix, the executable bit (and other permission bits) stored in the
 /// zip's unix mode is restored on the extracted file.
-fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
+pub(crate) fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
     let file = std::fs::File::open(archive).map_err(|e| format!("Zip open error: {}", e))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("Zip read error: {}", e))?;
 
@@ -961,7 +961,7 @@ pub async fn whisper_local_download_model(
 
 /// Promote a downloaded model from `partial` to `dest` only if its SHA-256
 /// (`actual_hex`) matches the pinned one; otherwise delete it.
-fn finalize_model_download(partial: &Path, dest: &Path, actual_hex: &str, expected_hex: &str) -> Result<(), String> {
+pub(crate) fn finalize_model_download(partial: &Path, dest: &Path, actual_hex: &str, expected_hex: &str) -> Result<(), String> {
     if let Err(e) = check_sha256_hex(actual_hex, expected_hex) {
         let _ = std::fs::remove_file(partial);
         return Err(e);

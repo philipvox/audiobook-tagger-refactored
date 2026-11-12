@@ -45,10 +45,17 @@ pub fn run() {
             whisper_local::whisper_local_get_disk_usage,
             whisper_local::whisper_local_uninstall,
         ])
+        .setup(|_app| {
+            // An Ollama this app started before a crash is still running: take it
+            // back (only if it runs the app's own installed binary) so Stop works.
+            ollama::adopt_orphaned_ollama();
+            Ok(())
+        })
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 // Best-effort, synchronous, scoped kill: only the Ollama process this
-                // app spawned (if any) is signalled. No fresh Tokio runtime, no pkill.
+                // app spawned or adopted (if any) is signalled, and its PID file is
+                // removed. No fresh Tokio runtime, no pkill.
                 ollama::kill_spawned_ollama();
             }
         })
