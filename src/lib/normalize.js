@@ -362,7 +362,7 @@ export function extractSubtitle(title) {
  * cleanAuthorName("written by Stephen King")  // "Stephen King"
  * cleanAuthorName("tolkien, j.r.r.")          // "J.R.R. Tolkien"
  */
-export function cleanAuthorName(name) {
+export function cleanAuthorName(name, { commaSeparatesAuthors = false } = {}) {
   let result = name.trim();
 
   // Remove common prefixes (case-insensitive) - check longest first
@@ -386,6 +386,18 @@ export function cleanAuthorName(name) {
   const suffixes = ["jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "phd", "md", "m.d.", "ph.d."];
   const commaParts = result.split(",").map((p) => p.trim()).filter(Boolean);
   const asList = () => commaParts.map((p) => _titleCaseNameWords(p)).join(", ");
+
+  // D-5: in a value that came from ABS (or an AI answer, whose prompt asks
+  // for comma-separated co-authors) the comma separates authors: never
+  // invert or merge across it. A name suffix still joins its name.
+  if (commaSeparatesAuthors && commaParts.length >= 2) {
+    const names = [];
+    for (const part of commaParts) {
+      if (suffixes.includes(part.toLowerCase()) && names.length > 0) names[names.length - 1] = `${names[names.length - 1]} ${part}`;
+      else names.push(part);
+    }
+    return names.map((n) => _titleCaseNameWords(n)).join(", ");
+  }
 
   if (commaParts.length === 2) {
     const [first, second] = commaParts;
@@ -698,6 +710,9 @@ const AUTHOR_SUFFIXES = new Set([
  * mangled "Martin Luther King, Jr." into two authors.
  *
  * @param {string} str
+ * @param {{ commaSeparatesAuthors?: boolean }} [options] - true for a value
+ *   that came from ABS (D-5): "Homer, Virgil" is then two authors, never one
+ *   inverted name. Inversion of "Last, First" is for local file tags only.
  * @returns {string[]}
  *
  * @example
@@ -705,7 +720,7 @@ const AUTHOR_SUFFIXES = new Set([
  * splitAuthors("Stephen King, John Grisham")  // ["Stephen King", "John Grisham"]
  * splitAuthors("Stephen King & John Grisham")  // ["Stephen King", "John Grisham"]
  */
-export function splitAuthors(str) {
+export function splitAuthors(str, { commaSeparatesAuthors = false } = {}) {
   if (!str || typeof str !== "string") return [];
 
   // "&" always separates names. " and " only separates when EVERY side looks
@@ -724,7 +739,8 @@ export function splitAuthors(str) {
     // A single "Last, First" name ("King, Stephen", "Tolkien, J. R. R."): a
     // one-word surname then a one-word or initials-only given name. Not two
     // authors, and returned in "First Last" order. "Homer, Emily Wilson" is two.
-    if (commaParts.length === 2 && _isInvertedPair(commaParts[0], commaParts[1])
+    // D-5: not for a value from ABS, where the comma separates authors.
+    if (!commaSeparatesAuthors && commaParts.length === 2 && _isInvertedPair(commaParts[0], commaParts[1])
         && !AUTHOR_SUFFIXES.has(commaParts[1].toLowerCase())) {
       authors.push(`${commaParts[1]} ${commaParts[0]}`);
       continue;

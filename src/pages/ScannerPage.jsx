@@ -1050,6 +1050,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       try {
         const books = chunk.map(g => ({
           id: g.id,
+          // D-5: "Last, First" is inverted only for a locally scanned book.
+          source: isLocalGroup(g) ? 'local' : 'abs',
           title: g.metadata?.title || '',
           current_author: g.metadata?.author || '',
           subtitle: g.metadata?.subtitle || null,

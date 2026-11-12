@@ -272,7 +272,8 @@ export function buildAbsPayload(meta = {}, original = null, cfg = {}) {
 
   const author = s(m.author);
   if (author && !isPlaceholderAuthor(author) && changed(author, o && s(o.author))) {
-    const authors = splitAuthors(author)
+    // D-5: an ABS book's comma separates authors; never invert across it.
+    const authors = splitAuthors(author, { commaSeparatesAuthors: true })
       .filter((n) => !isPlaceholderAuthor(n))
       .map((name, i) => ({ id: `new-${i + 1}`, name }));
     if (authors.length > 0) metadata.authors = authors;
@@ -280,7 +281,7 @@ export function buildAbsPayload(meta = {}, original = null, cfg = {}) {
 
   const narrator = s(m.narrator);
   if (narrator && !isPlaceholderAuthor(narrator) && changed(narrator, o && s(o.narrator))) {
-    const narrators = splitAuthors(narrator);
+    const narrators = splitAuthors(narrator, { commaSeparatesAuthors: true });
     if (narrators.length > 0) metadata.narrators = narrators;
   }
 

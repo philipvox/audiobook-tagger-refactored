@@ -123,15 +123,19 @@ describe('authors and narrators', () => {
     expect(buildAbsPayload({ author: 'Unknown', title: 'X' }, null, cfg).metadata).not.toHaveProperty('authors');
   });
 
-  it('inverts a single "Last, First" name and keeps suffixed names whole', () => {
+  it('splits on the comma (ABS author separator, D-5) and keeps suffixed names whole', () => {
+    // D-5: a push is for an ABS book, where the comma separates authors.
+    // "King, Stephen" cannot be told from "Homer, Virgil", so it is not
+    // inverted into one name (was: [Stephen King]).
     expect(buildAbsPayload({ ...base, author: 'King, Stephen' }, orig(), cfg).metadata.authors)
-      .toEqual([{ id: 'new-1', name: 'Stephen King' }]);
+      .toEqual([{ id: 'new-1', name: 'King' }, { id: 'new-2', name: 'Stephen' }]);
     expect(buildAbsPayload({ ...base, author: 'Martin Luther King, Jr.' }, orig(), cfg).metadata.authors)
       .toEqual([{ id: 'new-1', name: 'Martin Luther King, Jr.' }]);
   });
 
-  it('does not split a single narrator name on its comma', () => {
-    expect(buildAbsPayload({ ...base, narrator: 'Brick, Scott' }, orig(), cfg).metadata.narrators).toEqual(['Scott Brick']);
+  it('splits narrators on the comma, as ABS does (D-5)', () => {
+    // D-5: was ['Scott Brick']; in ABS the comma separates narrators.
+    expect(buildAbsPayload({ ...base, narrator: 'Brick, Scott' }, orig(), cfg).metadata.narrators).toEqual(['Brick', 'Scott']);
     expect(buildAbsPayload({ ...base, narrator: 'Scott Brick, Euan Morton' }, orig(), cfg).metadata.narrators)
       .toEqual(['Scott Brick', 'Euan Morton']);
   });

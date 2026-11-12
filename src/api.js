@@ -1452,7 +1452,9 @@ If the book has a well-known subtitle (e.g., "Dune: The Desert Planet"), include
       const needsAi = force || isBadAuthor(current);
 
       if (!needsAi) {
-        const cleaned = cleanAuthorName(current) || current;
+        // D-5: only a locally scanned book's tag may hold "Last, First"; in an
+        // ABS value (or one of unknown source) the comma separates authors.
+        const cleaned = cleanAuthorName(current, { commaSeparatesAuthors: book.source !== 'local' }) || current;
         const fixed = cleaned !== current;
         completed++;
         emitEvent('batch-progress', { call_type: 'authors', current: completed, total: books.length, title: book.title });
@@ -1488,7 +1490,8 @@ Return JSON: {"author":"Author Name","confidence":90}`;
         const response = await callAI(config, getSystemPrompt(config), prompt, 600);
         const parsed = parseAIJson(response);
         const raw = parsed?.author ? String(parsed.author).trim() : '';
-        const author = raw && !isBadAuthor(raw) ? cleanAuthorName(raw) || raw : '';
+        // The prompt asks for comma-separated co-authors, so never invert.
+        const author = raw && !isBadAuthor(raw) ? cleanAuthorName(raw, { commaSeparatesAuthors: true }) || raw : '';
         completed++;
         emitEvent('batch-progress', { call_type: 'authors', current: completed, total: books.length, title: book.title });
         if (author && author !== current) {
