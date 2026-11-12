@@ -142,17 +142,21 @@ export function ProgressBar({ type = 'scan', operation = 'scan', progress, onCan
             <div className="flex items-center gap-2">
               <Save className="w-5 h-5 text-green-600 animate-pulse" />
               <span className="font-semibold text-gray-100">
-                Writing tags {progress.current} of {progress.total}
+                {/* write_tags is one call with no per-file progress events, so
+                    until it returns the bar says what it is doing, not "0 of N". */}
+                {progress.current > 0
+                  ? `Writing tags ${progress.current} of ${progress.total}`
+                  : `Writing tags to ${progress.total} file${progress.total === 1 ? '' : 's'}...`}
               </span>
             </div>
             <div className="text-sm text-gray-400">
-              {Math.round((progress.current / progress.total) * 100)}% complete
+              {progress.current > 0 ? `${Math.round((progress.current / progress.total) * 100)}% complete` : 'Working'}
             </div>
           </div>
           <div className="w-full bg-gray-600 rounded-full h-3">
             <div
-              className="bg-green-600 h-3 rounded-full transition-all duration-300"
-              style={{ width: `${progress.total > 0 ? (progress.current / progress.total) * 100 : 0}%` }}
+              className={`bg-green-600 h-3 rounded-full transition-all duration-300${progress.current > 0 ? '' : ' animate-pulse'}`}
+              style={{ width: `${progress.current > 0 ? (progress.current / progress.total) * 100 : 100}%` }}
             ></div>
           </div>
         </div>

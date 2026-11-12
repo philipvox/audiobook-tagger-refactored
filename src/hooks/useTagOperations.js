@@ -66,7 +66,8 @@ export function useTagOperations() {
       });
       updateFileStatuses(newStatuses);
       
-      // ✅ Keep progress visible for 1 second before clearing
+      // The write is done: show it complete for a second before clearing.
+      setWriteProgress({ current: idsToWrite.length, total: idsToWrite.length });
       setTimeout(() => {
         setWriteProgress({ current: 0, total: 0 });
         setWriting(false);
