@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applyMetadataToGroup, readFileField } from './applyMetadata';
+import { applyMetadataToGroup, readFileField, setYear } from './applyMetadata';
 
 const mkGroup = (metadata, fileCount = 1, extra = {}) => ({
   id: 'g1',
@@ -130,5 +130,20 @@ describe('v2.2.3: series edits keep all_series in sync', () => {
     // Edit modal passes the whole edited metadata, including the old all_series.
     const out = applyMetadataToGroup(group, { ...group.metadata, sequence: '2' }, ['sequence']);
     expect(out.metadata.all_series).toEqual([{ name: 'Dune', sequence: '2' }]);
+  });
+});
+
+describe('setYear (H-2)', () => {
+  it('writes year and published_year together and stamps the file change', () => {
+    const group = mkGroup({ year: '1999', published_year: '1999' });
+    const next = applyMetadataToGroup(group, setYear(group.metadata, '2005'), ['year']);
+    expect(next.metadata.year).toBe('2005');
+    expect(next.metadata.published_year).toBe('2005');
+    expect(next.files[0].changes.year).toEqual({ old: '1999', new: '2005' });
+    expect(next.changedFields).toContain('year');
+  });
+
+  it('clears both on an empty value', () => {
+    expect(setYear({ year: '1', published_year: '1' }, '')).toMatchObject({ year: null, published_year: null });
   });
 });

@@ -3,8 +3,8 @@
 // v2.2.3 push semantics (kept identical to the audiobook-tagger-web repo):
 //   - A push sends ONLY fields that differ from the metadata originally
 //     imported from ABS (`group.abs_original`, see snapshotAbsMetadata).
-//     Without a snapshot it falls back to sending what the book carries, but
-//     never through the destructive parts below.
+//     Without a snapshot nothing is sent (H-4): there is no way to tell an
+//     edit from a value that ABS already holds.
 //   - Tag/genre policy (approved list, caps, fuzzy mapping) applies ONLY to
 //     values added this session. Tags/genres that already existed in ABS are
 //     kept verbatim unless the user removed them.
@@ -30,7 +30,9 @@ const SCALARS = [
 ];
 
 const s = (v) => (v == null ? '' : String(v).trim());
-const yearOf = (m) => s(m.published_year ?? m.publishedYear ?? m.year);
+// `year` is the field every editor writes (setYear keeps `published_year` in
+// step); prefer it so an edit is never masked by a stale `published_year` (H-2).
+const yearOf = (m) => s(m.year) || s(m.published_year ?? m.publishedYear);
 const scalarOf = (m, key) => (key === 'published_year' ? yearOf(m) : s(m[key]));
 const listKey = (v) => s(v).toLowerCase().replace(/\s+/g, '-');
 
@@ -221,15 +223,17 @@ function diffTags(cur, orig, cfg, userCleared = false) {
 
 /**
  * @param {object} meta      current book metadata
- * @param {object|null} original  snapshot from import (group.abs_original), or null
+ * @param {object|null} original  snapshot from import (group.abs_original); null yields an empty payload
  * @param {object} cfg       app config (genre_enforcement, preserve_existing_*)
  * @returns {{ metadata: object, tags?: string[] }}
  */
 export function buildAbsPayload(meta = {}, original = null, cfg = {}) {
   const m = meta || {};
   const o = original || null;
+  // H-4: no snapshot, nothing to diff against, nothing is sent.
+  if (o == null) return { metadata: {} };
   const metadata = {};
-  const changed = (cur, prev) => o == null || cur !== prev;
+  const changed = (cur, prev) => cur !== prev;
 
   for (const [key, absKey] of SCALARS) {
     const cur = scalarOf(m, key);

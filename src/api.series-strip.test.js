@@ -34,7 +34,7 @@ function serveLive(live = {}) {
 // Push one book and return the series array from the PATCH payload
 async function pushAndGetSeries(meta) {
   const result = await callBackend('push_abs_updates', {
-    items: [{ abs_id: 'item-1', metadata: meta }],
+    items: [{ abs_id: 'item-1', metadata: meta, original: {} }],
   });
   expect(result.updated).toHaveLength(1);
   expect(result.failed).toEqual([]);

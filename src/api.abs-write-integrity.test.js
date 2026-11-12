@@ -33,7 +33,7 @@ function serveLive(live = {}) {
 }
 
 async function pushUpdatesAndGetPayload(meta, idField = 'abs_id') {
-  const item = { metadata: meta };
+  const item = { metadata: meta, original: {} };
   item[idField] = 'item-1';
   const result = await callBackend('push_abs_updates', { items: [item] });
   expect(result.updated).toHaveLength(1);
@@ -72,7 +72,7 @@ describe('CR-4a: buildAbsPayload omits series key when there is no series info',
 describe('J: push handlers unify on item.abs_id || item.id', () => {
   it('push_abs_updates uses abs_id when both abs_id and id are present', async () => {
     await callBackend('push_abs_updates', {
-      items: [{ abs_id: 'correct-id', id: 'wrong-id', metadata: { title: 'X' } }],
+      items: [{ abs_id: 'correct-id', id: 'wrong-id', metadata: { title: 'X' }, original: {} }],
     });
     const url = absApi.mock.calls.at(-1)[2];
     expect(url).toContain('correct-id');
@@ -81,7 +81,7 @@ describe('J: push handlers unify on item.abs_id || item.id', () => {
 
   it('push_abs_imports uses abs_id when both abs_id and id are present', async () => {
     await callBackend('push_abs_imports', {
-      items: [{ abs_id: 'correct-id', id: 'wrong-id', metadata: { title: 'X' } }],
+      items: [{ abs_id: 'correct-id', id: 'wrong-id', metadata: { title: 'X' }, original: {} }],
     });
     const url = absApi.mock.calls.at(-1)[2];
     expect(url).toContain('correct-id');
@@ -90,7 +90,7 @@ describe('J: push handlers unify on item.abs_id || item.id', () => {
 
   it('push_abs_imports falls back to id when abs_id is absent', async () => {
     await callBackend('push_abs_imports', {
-      items: [{ id: 'only-id', metadata: { title: 'X' } }],
+      items: [{ id: 'only-id', metadata: { title: 'X' }, original: {} }],
     });
     const url = absApi.mock.calls.at(-1)[2];
     expect(url).toContain('only-id');

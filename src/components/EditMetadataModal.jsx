@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { X, Save, Library, Type, Loader2, Users } from 'lucide-react';
 import { callBackend } from '../api';
 import { mapAgeCategory } from '../lib/ageCategory';
+import { setYear } from '../lib/applyMetadata';
 
 // M1: parse a comma-separated genres string into a capped, trimmed array.
 function parseGenres(str) {
@@ -360,7 +361,7 @@ export function EditMetadataModal({ isOpen, onClose, onSave, metadata, groupName
                 <input
                   type="text"
                   value={editedMetadata.year || ''}
-                  onChange={(e) => updateField('year', e.target.value || null)}
+                  onChange={(e) => setEditedMetadata(prev => setYear(prev, e.target.value || null))}
                   placeholder="YYYY"
                   className="w-full px-4 py-2 bg-neutral-800 text-gray-100 border border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder-gray-500"
                 />

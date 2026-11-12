@@ -127,7 +127,27 @@ export function parseSession(json) {
     savedAt: Number.isFinite(parsed.savedAt) ? parsed.savedAt : null,
     libraryId: typeof parsed.libraryId === 'string' ? parsed.libraryId : null,
     bookCount: parsed.groups.length,
-    groups: parsed.groups,
+    groups: parsed.groups.map(flagMissingSnapshot),
+  };
+}
+
+/**
+ * H-4: an ABS group saved without `abs_original` has no baseline to diff a
+ * push against. Flag it so the push skips it and the book list says why; a
+ * fresh import replaces the group and clears the flag.
+ */
+function flagMissingSnapshot(g) {
+  if (!g || typeof g !== 'object') return g;
+  if ((g.source !== 'abs' && !g.abs_id) || g.abs_original) return g;
+  return {
+    ...g,
+    needs_reimport: true,
+    lastError: {
+      stage: 'restore',
+      kind: 'snapshot',
+      severity: 'warn',
+      message: 'Restored from an older session. Re-import from ABS before pushing this book.',
+    },
   };
 }
 

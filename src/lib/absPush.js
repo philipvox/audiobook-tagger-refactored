@@ -273,6 +273,10 @@ export async function pushOneAbsItem(item, { request, cfg = {} }) {
   const id = item?.id ?? item?.group_id ?? absId ?? null;
   const title = s(meta.title) || s(item?.title) || String(absId || '');
   if (!absId) return { status: 'failed', entry: { id, title, error: 'Missing item ID' } };
+  // H-4: a group restored without its import snapshot cannot be diffed.
+  if (item?.needs_reimport === true) {
+    return { status: 'skipped', entry: { id, title, reason: 'Re-import from ABS before pushing' } };
+  }
 
   const first = buildAbsPayload(meta, original, cfg);
   if (isEmptyPayload(first)) return { status: 'skipped', entry: { id, title, reason: 'no changes' } };
@@ -320,6 +324,7 @@ export function buildPushItems(groups) {
     abs_id: getAbsId(g) || g.id,
     metadata: g.metadata,
     original: g.abs_original || null,
+    ...(g.needs_reimport === true && { needs_reimport: true }),
   }));
 }
 

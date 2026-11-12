@@ -55,7 +55,7 @@ describe('routing (#60)', () => {
     const pushByFileIds = vi.fn();
     // Mirror handlePushAbsImports' request shape.
     const pushById = (groups) => callBackend('push_abs_imports', {
-      request: { items: groups.map(g => ({ id: g.id, abs_id: getAbsId(g), metadata: g.metadata })) },
+      request: { items: groups.map(g => ({ id: g.id, abs_id: getAbsId(g), metadata: g.metadata, original: {} })) },
     });
 
     const out = await runPush([absGroupWithFiles], { pushById, pushByFileIds });
@@ -102,7 +102,7 @@ describe('result accounting and reporting (#60)', () => {
   it('reports a total failure as an error with the first error message', async () => {
     absApi.mockRejectedValue(new Error('HTTP 404'));
     const pushById = (groups) => callBackend('push_abs_imports', {
-      request: { items: groups.map(g => ({ abs_id: getAbsId(g), metadata: g.metadata })) },
+      request: { items: groups.map(g => ({ abs_id: getAbsId(g), metadata: g.metadata, original: {} })) },
     });
     const out = await runPush([absGroupWithFiles], { pushById, pushByFileIds: vi.fn() });
     expect(out.failed).toHaveLength(1);
@@ -153,6 +153,16 @@ describe('v2.2.3 diff push plumbing', () => {
     const g = { id: 'g1', abs_id: 'a1', metadata: { title: 'T' }, abs_original: { title: 'T0' } };
     expect(buildPushItems([g])).toEqual([{ id: 'g1', abs_id: 'a1', metadata: { title: 'T' }, original: { title: 'T0' } }]);
     expect(buildPushItems([{ id: 'g2', source: 'abs', metadata: {} }])[0].original).toBeNull();
+  });
+
+  it('skips a needs_reimport book before any network call', async () => {
+    const { buildPushItems } = await import('./absPush.js');
+    const g = { id: 'g1', abs_id: 'a1', needs_reimport: true, metadata: { title: 'T', description: 'x' } };
+    const out = await pushImports(buildPushItems([g]));
+    expect(out.skipped).toEqual([{ id: 'g1', title: 'T', reason: 'Re-import from ABS before pushing' }]);
+    expect(out.updated).toEqual([]);
+    expect(out.failed).toEqual([]);
+    expect(absApi).not.toHaveBeenCalled();
   });
 
   it('applyPushSnapshots advances abs_original only for pushed groups', async () => {
@@ -268,12 +278,12 @@ describe('push_abs_imports rebases on the live item (H-5)', () => {
     expect(body.metadata.title).toBe('New');
   });
 
-  it('without a snapshot, the push adds to the live lists and removes nothing', async () => {
+  it('without a snapshot nothing is sent and the live item is not even read (H-4)', async () => {
     mockAbs({ live: liveItem(['server-tag'], ['Mystery']) });
-    await pushImports([{ id: 'g1', abs_id: 'li-1', metadata: { title: 'Book', tags: ['local-tag'], genres: ['Fantasy'] } }]);
-    const body = absApi.mock.calls[1][3].body;
-    expect(body.tags).toEqual(['server-tag', 'local-tag']);
-    expect(body.metadata.genres).toEqual(['Mystery', 'Fantasy']);
+    const out = await pushImports([{ id: 'g1', abs_id: 'li-1', metadata: { title: 'Book', tags: ['local-tag'], genres: ['Fantasy'] } }]);
+    expect(absApi).not.toHaveBeenCalled();
+    expect(out.updated).toEqual([]);
+    expect(out.skipped).toEqual([{ id: 'g1', title: 'Book', reason: 'no changes' }]);
   });
 
   it('caps added genres against the live list; live genres are never trimmed', async () => {

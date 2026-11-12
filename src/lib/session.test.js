@@ -88,6 +88,25 @@ describe('parseSession', () => {
   });
 });
 
+describe('parseSession flags ABS groups without a snapshot (H-4)', () => {
+  const parse = (groups) => parseSession(JSON.stringify({ groups })).groups;
+
+  it('marks an ABS group lacking abs_original as needs_reimport with a visible warning', () => {
+    const [g] = parse([{ id: 'a1', source: 'abs', abs_id: 'a1', metadata: {} }]);
+    expect(g.needs_reimport).toBe(true);
+    expect(g.lastError).toMatchObject({ stage: 'restore', kind: 'snapshot', severity: 'warn' });
+    expect(g.lastError.message).toContain('Re-import from ABS');
+  });
+
+  it('leaves groups with a snapshot, and local groups, untouched', () => {
+    const withSnap = { id: 'a2', source: 'abs', abs_original: { title: 'T' }, metadata: {} };
+    const local = { id: 'l1', metadata: {} };
+    const out = parse([withSnap, local]);
+    expect(out[0]).toEqual(withSnap);
+    expect(out[1]).toEqual(local);
+  });
+});
+
 describe('formatRelativeTime', () => {
   const now = 1_000_000_000_000;
 

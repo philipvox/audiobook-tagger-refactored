@@ -860,7 +860,7 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
               {[
                 { field: 'isbn', label: 'ISBN', value: metadata.isbn, mono: true, canLookup: true },
                 { field: 'asin', label: 'ASIN', value: metadata.asin, mono: true, canLookup: true },
-                { field: 'published_year', label: 'Year', value: metadata.published_year || metadata.year },
+                { field: 'year', label: 'Year', value: metadata.year || metadata.published_year },
                 { field: 'publisher', label: 'Publisher', value: metadata.publisher },
                 { field: 'language', label: 'Language', value: metadata.language },
               ].map(({ field, label, value, mono, canLookup }) => (

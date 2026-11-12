@@ -1,7 +1,7 @@
 // #54 / v2.2.3 push boundary. Push diffs against the import snapshot
 // (item.original): genre/tag policy only touches values ADDED this session,
-// existing ones go out verbatim, and with no snapshot nothing is policy-
-// filtered at all (the old behavior wiped ABS genres like ['LitRPG']).
+// existing ones go out verbatim, and with no snapshot nothing is sent at all
+// (H-4; the old behavior wiped ABS genres like ['LitRPG']).
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 vi.mock('./lib/proxy', async (importOriginal) => {
@@ -51,9 +51,11 @@ async function pushAndGetPayload(meta, original) {
 const snap = (m) => ({ genres: [], tags: [], ...m });
 
 describe('genres at the push boundary', () => {
-  it('no snapshot: genres go out as-is, never policy-dropped', async () => {
-    const payload = await pushAndGetPayload({ genres: ['LitRPG'] });
-    expect(payload.metadata.genres).toEqual(['LitRPG']);
+  it('no snapshot: nothing is sent, so ABS genres cannot be touched (H-4)', async () => {
+    const result = await callBackend('push_abs_updates', { items: [{ abs_id: 'item-1', metadata: { genres: ['LitRPG'] } }] });
+    expect(result.updated).toEqual([]);
+    expect(result.skipped).toHaveLength(1);
+    expect(absApi).not.toHaveBeenCalled();
   });
 
   it('OFF (default): an unapproved AI-added genre is dropped by policy, existing kept', async () => {

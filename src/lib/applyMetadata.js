@@ -55,6 +55,17 @@ const READERS = {
   runtime: (m) => str(m.runtime),
 };
 
+/**
+ * H-2: the one way to change a book's year. ABS stores `published_year`, the
+ * tag writer reads `year`; both must move together or an edit is masked by the
+ * stale one. Returns a new metadata object. Callers stamp the file change with
+ * applyMetadataToGroup(group, setYear(...), ['year']).
+ */
+export function setYear(metadata, value) {
+  const v = value == null || value === '' ? null : value;
+  return { ...(metadata || {}), year: v, published_year: v };
+}
+
 export function readFileField(metadata, field) {
   const reader = READERS[field];
   return reader ? reader(metadata || {}) : str((metadata || {})[field]);

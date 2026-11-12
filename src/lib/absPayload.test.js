@@ -165,17 +165,29 @@ describe('series edits', () => {
   });
 });
 
-describe('fallback without a snapshot', () => {
-  it('sends values as-is with no destructive genre/tag policy', () => {
-    const payload = buildAbsPayload({ ...base }, null, cfg);
-    expect(payload.metadata.genres).toEqual(['LitRPG', 'Zzzz Custom Shelf']);
-    expect(payload.tags).toEqual(base.tags);
+describe('no snapshot (H-4)', () => {
+  it('sends nothing: the old send-everything fallback is gone', () => {
+    expect(buildAbsPayload({ ...base }, null, cfg)).toEqual({ metadata: {} });
+    expect(buildAbsPayload({ ...base, source: 'abs' }, null, cfg)).toEqual({ metadata: {} });
   });
 
   it('never sends empty arrays', () => {
     const payload = buildAbsPayload({ title: 'X', genres: [], tags: [] }, null, cfg);
     expect(payload.metadata).not.toHaveProperty('genres');
     expect(payload).not.toHaveProperty('tags');
+  });
+});
+
+describe('year edits (H-2)', () => {
+  it('sends an edited year even when published_year is stale', () => {
+    const o = snapshotAbsMetadata({ ...base, published_year: '1999' });
+    const payload = buildAbsPayload({ ...base, published_year: '1999', year: '2005' }, o, cfg);
+    expect(payload).toEqual({ metadata: { publishedYear: '2005' } });
+  });
+
+  it('sends nothing when year and published_year both match the snapshot', () => {
+    const o = snapshotAbsMetadata({ ...base, published_year: '1999' });
+    expect(buildAbsPayload({ ...base, published_year: '1999', year: '1999' }, o, cfg)).toEqual({ metadata: {} });
   });
 });
 

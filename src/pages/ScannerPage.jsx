@@ -34,7 +34,7 @@ import { userClearedPatch } from '../lib/userCleared';
 import { applyClassifyResult } from '../lib/applyClassifyResult';
 import { applyTagsResultToGroup, applyDnaResultToGroup, normalizeResults } from '../lib/applyTagResults';
 import { syncAllSeries } from '../lib/absPayload';
-import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
+import { applyMetadataToGroup, readFileField, setYear } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
 import { isPlaceholderAuthor, isPlaceholderTitle } from '../lib/normalize';
 import { WritePreviewModal } from '../components/WritePreviewModal';
@@ -493,6 +493,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         const newMetadata = syncAllSeries(group.metadata, {
           ...group.metadata,
           ...updates,
+          // H-2: a bulk year edit moves `year` and `published_year` together.
+          ...('year' in updates ? setYear({}, updates.year) : {}),
           ...userClearedPatch(group.metadata, updates),
           // Mark source as manual for bulk edited fields. H1: use key presence
           // (not truthiness) so an intentional clear (present null) still marks
@@ -602,7 +604,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         if (meta.sequence) newMetadata.sequence = meta.sequence;
         if (meta.genres) newMetadata.genres = meta.genres;
         if (meta.publisher) newMetadata.publisher = meta.publisher;
-        if (meta.year) newMetadata.year = meta.year;
+        if (meta.year) Object.assign(newMetadata, setYear(newMetadata, meta.year));
         if (meta.language) newMetadata.language = meta.language;
         if (meta.description) newMetadata.description = meta.description;
         if (meta.isbn) newMetadata.isbn = meta.isbn;
@@ -1388,7 +1390,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
               // H2/H6: stamp the resolved year (and any pub- tag) into file.changes.
               const changedFileFields = ['year'];
               if (yearResult.pub_tag) changedFileFields.push('tags');
-              return applyMetadataToGroup(g, { year: yearResult.year, tags: newTags }, changedFileFields);
+              return applyMetadataToGroup(g, { ...setYear({}, yearResult.year), tags: newTags }, changedFileFields);
             });
           });
 
@@ -3493,7 +3495,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
               // is a metadata field name; map the genres array to the `genre`
               // file-change field, otherwise the names match 1:1.
               const fileField = field === 'genres' ? 'genre' : field;
-              return applyMetadataToGroup(g, { [field]: value, ...userClearedPatch(g.metadata, { [field]: value }) }, [fileField]);
+              // H-2: a year edit moves `year` and `published_year` together.
+              const patch = field === 'year' || field === 'published_year'
+                ? setYear({}, value)
+                : { [field]: value };
+              return applyMetadataToGroup(
+                g,
+                { ...patch, ...userClearedPatch(g.metadata, patch) },
+                [field === 'published_year' ? 'year' : fileField]
+              );
             }));
           }}
           validationData={selectedGroup ? validationResults[selectedGroup.id] : null}
