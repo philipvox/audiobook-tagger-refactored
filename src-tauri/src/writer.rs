@@ -420,7 +420,7 @@ pub fn temp_path_for(path: &Path) -> PathBuf {
 }
 
 /// Remove temp copies a crashed write left in `dir` (not recursive). Only plain
-/// files named `.tagtmp-*` are touched. Returns how many were removed.
+/// files matching is_temp_file_name are touched. Returns how many were removed.
 pub fn sweep_temp_files(dir: &Path) -> usize {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -428,13 +428,73 @@ pub fn sweep_temp_files(dir: &Path) -> usize {
     };
     let mut removed = 0;
     for entry in entries.filter_map(|e| e.ok()) {
-        let is_temp = entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX);
+        let is_temp = is_temp_file_name(&entry.file_name().to_string_lossy());
         let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
         if is_temp && is_file && fs::remove_file(entry.path()).is_ok() {
             removed += 1;
         }
     }
     removed
+}
+
+/// True for a temp copy a tag write stages through: the current
+/// `.tagtmp-<uuid>.<ext>` form, and the older `.<name>.tagtmp-<uuid>.<ext>`
+/// form a crash before this naming change may have left behind.
+pub fn is_temp_file_name(name: &str) -> bool {
+    name.starts_with(TEMP_PREFIX) || (name.starts_with('.') && name.contains(TEMP_PREFIX))
+}
+
+const LYRICS_COLLISION: &str = "multiple lyrics frames with the same description; file not written";
+
+/// Number of USLT (ID3v2.2: ULT) frames in the ID3v2 tag at the start of `path`,
+/// counted from the raw bytes. None when the tag cannot be walked with
+/// confidence (no leading tag, tag-wide unsynchronisation, truncated data), in
+/// which case the caller must assume lyrics could be lost.
+fn raw_id3v2_lyrics_frame_count(path: &Path) -> Option<usize> {
+    use std::io::Read;
+    fn syncsafe(b: &[u8]) -> usize {
+        b.iter().fold(0usize, |acc, x| (acc << 7) | (*x as usize & 0x7f))
+    }
+    fn be(b: &[u8]) -> usize {
+        b.iter().fold(0usize, |acc, x| (acc << 8) | *x as usize)
+    }
+    let mut f = fs::File::open(path).ok()?;
+    let mut header = [0u8; 10];
+    f.read_exact(&mut header).ok()?;
+    if &header[..3] != b"ID3" {
+        return None;
+    }
+    let version = header[3];
+    let flags = header[5];
+    if flags & 0x80 != 0 || !(2..=4).contains(&version) {
+        return None;
+    }
+    let mut data = vec![0u8; syncsafe(&header[6..10])];
+    f.read_exact(&mut data).ok()?;
+
+    let mut pos = 0usize;
+    if version >= 3 && flags & 0x40 != 0 {
+        let ext = data.get(0..4)?;
+        pos = if version == 3 { 4 + be(ext) } else { syncsafe(ext) };
+    }
+    let (id_len, header_len) = if version == 2 { (3, 6) } else { (4, 10) };
+    let mut count = 0usize;
+    while pos + header_len <= data.len() {
+        let id = &data[pos..pos + id_len];
+        if id[0] == 0 {
+            break; // padding
+        }
+        let size_bytes = &data[pos + id_len..pos + id_len + if version == 2 { 3 } else { 4 }];
+        let size = if version == 4 { syncsafe(size_bytes) } else { be(size_bytes) };
+        if id == b"USLT" || id == b"ULT" {
+            count += 1;
+        }
+        pos = pos.checked_add(header_len + size)?;
+        if pos > data.len() {
+            return None;
+        }
+    }
+    Some(count)
 }
 
 /// Read, mutate, save `path` in place (only ever called on a temp copy).
@@ -502,6 +562,14 @@ fn write_tags_in_place(
             // them back after the merge.
             let lyrics: Vec<lofty::id3::v2::Frame<'static>> =
                 (&id3).into_iter().filter(|fr| fr.id_str() == "USLT").cloned().collect();
+            // lofty treats two USLT frames as equal when their descriptions
+            // match (language is ignored) and its reader already keeps only one
+            // of them, so the parsed tag can hold fewer lyrics frames than the
+            // file. Count them in the raw tag and refuse the write rather than
+            // drop lyrics.
+            if !lyrics.is_empty() && raw_id3v2_lyrics_frame_count(path) != Some(lyrics.len()) {
+                return Err(LYRICS_COLLISION.to_string());
+            }
             let (remainder, mut tag) = id3.split_tag();
             tag.remove_key(&ItemKey::Lyrics);
             let mut user_text: Vec<(String, String)> = Vec::new();
@@ -517,8 +585,16 @@ fn write_tags_in_place(
             for (desc, content) in user_text {
                 let _ = merged.insert_user_text(desc, content);
             }
+            // split_tag leaves some USLT frames (those with a description) in
+            // the remainder, so clear every USLT the merge produced and put
+            // back exactly the frames collected above. A replaced frame now
+            // means two of them collided.
+            let uslt_id = lofty::id3::v2::FrameId::Valid(std::borrow::Cow::Borrowed("USLT"));
+            let _: Vec<_> = merged.remove(&uslt_id).collect();
             for frame in lyrics {
-                let _ = merged.insert(frame);
+                if merged.insert(frame).is_some() {
+                    return Err(LYRICS_COLLISION.to_string());
+                }
             }
             // MVIN only holds whole numbers (lofty drops "1.5" on read), so a
             // decimal series position would be lost. Also store the exact value
@@ -578,18 +654,13 @@ pub async fn write_tags(request: WriteRequest) -> Result<Value, String> {
 
 /// Whether a file belongs to a multi-file book. The caller's `group_size` wins;
 /// without it, files in the same request that share a directory are taken to be
-/// one book (the scanner groups by folder).
-fn is_multi_file(file: &WriteFile, request: &WriteRequest) -> bool {
-    if let Some(n) = file.group_size {
-        return n > 1;
+/// one book (the scanner groups by folder). `files_per_dir` is the request's
+/// per-directory file count, computed once per batch.
+fn is_multi_file(file: &WriteFile, files_per_dir: &HashMap<PathBuf, usize>) -> bool {
+    match file.group_size {
+        Some(n) => n > 1,
+        None => files_per_dir.get(&parent_dir_of(Path::new(&file.path))).copied().unwrap_or(0) > 1,
     }
-    let dir = parent_dir_of(Path::new(&file.path));
-    request
-        .files
-        .values()
-        .filter(|other| parent_dir_of(Path::new(&other.path)) == dir)
-        .count()
-        > 1
 }
 
 pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
@@ -622,15 +693,15 @@ pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
         return json!({ "success": 0, "failed": ordered_ids.len(), "errors": errors, "results": results });
     }
 
-    // Clear temp copies a crashed earlier write left behind in the folders this
-    // batch touches, before any new work starts.
-    let mut swept_dirs: Vec<PathBuf> = Vec::new();
+    // Count the request's files per folder (for is_multi_file), and clear temp
+    // copies a crashed earlier write left behind in those folders before any
+    // new work starts.
+    let mut files_per_dir: HashMap<PathBuf, usize> = HashMap::new();
     for file in request.files.values() {
-        let dir = parent_dir_of(Path::new(&file.path));
-        if !swept_dirs.contains(&dir) {
-            sweep_temp_files(&dir);
-            swept_dirs.push(dir);
-        }
+        *files_per_dir.entry(parent_dir_of(Path::new(&file.path))).or_insert(0) += 1;
+    }
+    for dir in files_per_dir.keys() {
+        sweep_temp_files(dir);
     }
 
     for id in &ordered_ids {
@@ -655,7 +726,7 @@ pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
             result,
             journal,
             skipped,
-        } = write_one_file_recorded(file, request.backup, is_multi_file(file, &request), &mut record);
+        } = write_one_file_recorded(file, request.backup, is_multi_file(file, &files_per_dir), &mut record);
         if let Some(entry) = journal {
             journal_entries.push(entry);
         }
@@ -1765,7 +1836,10 @@ mod tests {
 
     #[test]
     fn multi_file_title_goes_to_album() {
-        if !have_ffmpeg() { return; }
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
         let root = scannable_tempdir();
         let book = root.path().join("Some Author").join("Old Book");
         fs::create_dir_all(&book).unwrap();
@@ -1812,7 +1886,10 @@ mod tests {
 
     #[test]
     fn mp3_with_uslt_frame_writes() {
-        if !have_ffmpeg() { return; }
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
         use lofty::config::ParseOptions;
         use lofty::id3::v2::{Frame, FrameFlags, UnsynchronizedTextFrame};
         use lofty::tag::TagExt;
@@ -1847,6 +1924,128 @@ mod tests {
         assert!(after.contains("Some sung words"), "lyrics lost:\n{after}");
     }
 
+    /// Replace `mp3`'s ID3v2 tag with a hand-built ID3v2.4 tag holding TIT2 and
+    /// the given USLT frames (language, description, text). lofty's own insert
+    /// cannot build this fixture: it merges USLT frames that share a description.
+    fn write_raw_id3_with_lyrics(mp3: &Path, lyrics: &[(&[u8; 3], &str, &str)]) {
+        fn syncsafe(n: usize) -> [u8; 4] {
+            [((n >> 21) & 0x7f) as u8, ((n >> 14) & 0x7f) as u8, ((n >> 7) & 0x7f) as u8, (n & 0x7f) as u8]
+        }
+        fn frame(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut f = id.to_vec();
+            f.extend_from_slice(&syncsafe(body.len()));
+            f.extend_from_slice(&[0, 0]);
+            f.extend_from_slice(body);
+            f
+        }
+        let mut frames = Vec::new();
+        let mut tit2 = vec![3u8];
+        tit2.extend_from_slice(b"Orig");
+        frames.extend(frame(b"TIT2", &tit2));
+        for (lang, desc, text) in lyrics {
+            let mut body = vec![3u8];
+            body.extend_from_slice(*lang);
+            body.extend_from_slice(desc.as_bytes());
+            body.push(0);
+            body.extend_from_slice(text.as_bytes());
+            frames.extend(frame(b"USLT", &body));
+        }
+        let data = fs::read(mp3).unwrap();
+        let audio = if data.starts_with(b"ID3") {
+            let size = data[6..10].iter().fold(0usize, |acc, b| (acc << 7) | (*b as usize & 0x7f));
+            &data[10 + size..]
+        } else {
+            &data[..]
+        };
+        let mut out = b"ID3\x04\x00\x00".to_vec();
+        out.extend_from_slice(&syncsafe(frames.len()));
+        out.extend(frames);
+        out.extend_from_slice(audio);
+        fs::write(mp3, out).unwrap();
+    }
+
+    #[test]
+    fn mp3_with_colliding_lyrics_frames_is_refused_untouched() {
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let mp3 = make_mp3(dir.path(), "two-lyrics.mp3");
+        write_raw_id3_with_lyrics(&mp3, &[(b"eng", "", "English words"), (b"deu", "", "German words")]);
+        let probe = ffprobe(&mp3);
+        assert!(probe.contains("English words") && probe.contains("German words"), "fixture must carry both USLT frames:\n{probe}");
+        let before = fs::read(&mp3).unwrap();
+
+        let res = write_tags_at(one_file_request(&mp3, false), &dir.path().join("undo.json"));
+        assert_eq!(res["success"], json!(0), "{res}");
+        assert_eq!(res["failed"], json!(1), "{res}");
+        let err = res["errors"][0]["error"].as_str().unwrap_or("");
+        assert!(err.contains("multiple lyrics frames with the same description"), "{res}");
+        assert_eq!(fs::read(&mp3).unwrap(), before, "file bytes changed");
+        let leftovers: Vec<_> = fs::read_dir(dir.path()).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("tagtmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp copy left behind");
+
+        // Distinct descriptions do not collide: both frames survive a write.
+        write_raw_id3_with_lyrics(&mp3, &[(b"eng", "verse", "English words"), (b"deu", "chorus", "German words")]);
+        let res = write_tags_at(one_file_request(&mp3, false), &dir.path().join("undo.json"));
+        assert_eq!(res["success"], json!(1), "{res}");
+        let after = ffprobe(&mp3);
+        assert!(after.contains("TAG:title=New"), "{after}");
+        assert!(after.contains("English words") && after.contains("German words"), "lyrics lost:\n{after}");
+    }
+
+    #[test]
+    fn multi_file_fallback_without_group_size_uses_shared_folder() {
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let tracks: Vec<PathBuf> = ["01.mp3", "02.mp3", "03.mp3"].iter().map(|n| make_mp3(dir.path(), n)).collect();
+        let mut files = HashMap::new();
+        let mut ids = Vec::new();
+        for (i, p) in tracks.iter().enumerate() {
+            let id = format!("f{i}");
+            let mut c = HashMap::new();
+            c.insert("title".to_string(), change("Orig", "Fallback Title"));
+            files.insert(id.clone(), WriteFile { path: p.to_string_lossy().to_string(), changes: c, group_size: None });
+            ids.push(id);
+        }
+        let res = write_tags_at(WriteRequest { file_ids: ids, files, backup: false }, &dir.path().join("undo.json"));
+        assert_eq!(res["success"], json!(3), "{res}");
+        for p in &tracks {
+            let tag = read_generic_tag(p);
+            assert_eq!(tag.album().as_deref(), Some("Fallback Title"), "album not written on {p:?}");
+            assert_eq!(tag.title().as_deref(), Some("Orig"), "track title overwritten on {p:?}");
+        }
+    }
+
+    #[test]
+    fn old_style_temp_names_are_skipped_and_swept() {
+        assert!(is_temp_file_name(".book.mp3.tagtmp-0123456789abcdef0123456789abcdef.mp3"));
+        assert!(is_temp_file_name(".tagtmp-0123456789abcdef0123456789abcdef.mp3"));
+        assert!(!is_temp_file_name("book.tagtmp-x.mp3"), "a visible file is never a temp copy");
+        assert!(!is_temp_file_name("book.mp3"));
+
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+        let dir = scannable_tempdir();
+        let mp3 = make_mp3(dir.path(), "book.mp3");
+        let old_style = dir.path().join(".book.mp3.tagtmp-0123456789abcdef0123456789abcdef.mp3");
+        fs::copy(&mp3, &old_style).unwrap();
+        let found = crate::scanner::collect_audio_files(&[dir.path().to_string_lossy().to_string()]);
+        assert_eq!(found.len(), 1, "scanner must skip old-style temp copies");
+        assert_eq!(sweep_temp_files(dir.path()), 1);
+        assert!(!old_style.exists());
+        assert!(mp3.exists());
+    }
+
     #[test]
     fn temp_name_is_short_and_skipped() {
         let tmp = temp_path_for(Path::new("/x/A very long name.mp3"));
@@ -1855,7 +2054,10 @@ mod tests {
         assert!(name.starts_with(".tagtmp-") && name.ends_with(".mp3"), "{name}");
         assert_eq!(name.len(), ".tagtmp-".len() + 32 + ".mp3".len(), "{name}");
 
-        if !have_ffmpeg() { return; }
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
         let dir = scannable_tempdir();
         let long = format!("{}.mp3", "a".repeat(226));
         assert_eq!(long.len(), 230);
@@ -1878,7 +2080,10 @@ mod tests {
 
     #[test]
     fn write_batch_sweeps_leftover_temp_files_first() {
-        if !have_ffmpeg() { return; }
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
         let dir = tempdir().unwrap();
         let mp3 = make_mp3(dir.path(), "a.mp3");
         let leftover = dir.path().join(".tagtmp-ffffffffffffffffffffffffffffffff.mp3");
@@ -1914,7 +2119,10 @@ mod tests {
 
     #[test]
     fn mp3_decimal_series_roundtrip() {
-        if !have_ffmpeg() { return; }
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
         let dir = scannable_tempdir();
         let mp3 = make_mp3(dir.path(), "a.mp3");
         let mut c = HashMap::new();
@@ -1948,7 +2156,10 @@ mod tests {
         assert_eq!(tag.get_string(&ItemKey::RecordingDate), Some("2020"));
         assert_eq!(tag.year(), Some(2020));
 
-        if !have_ffmpeg() { return; }
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
         let dir = tempdir().unwrap();
         let m4b = make_m4b(dir.path());
         // Seed a full date directly so the fixture carries month and day.

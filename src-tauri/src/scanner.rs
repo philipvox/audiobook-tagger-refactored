@@ -121,10 +121,10 @@ fn read_embedded_tags(path: &Path) -> EmbeddedTags {
         &["SERIES", "Series", "Series-Name", "MVNM"],
         &[ItemKey::Movement],
     );
-    // The freeform/TXXX SERIES-PART value is checked BEFORE the movement number:
-    // MVIN and the MP4 movement-number atom only hold whole numbers, so a
-    // decimal position ("1.5") survives only in SERIES-PART (writer.rs writes
-    // both).
+    // SERIES-PART is read BEFORE MVIN / the movement number because the writer
+    // always writes both when it writes a series position, and only SERIES-PART
+    // keeps a decimal ("1.5"): MVIN and the MP4 movement-number atom hold whole
+    // numbers only.
     out.series_number = lookup_tag_field(
         tag,
         &["SERIES-PART", "Series-Part", "Series Part", "SERIES_PART", "MVIN"],
@@ -193,9 +193,9 @@ pub(crate) fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
                     }
                 }
                 if let Some(name) = e.path().file_name().and_then(|n| n.to_str()) {
-                    // "._" = macOS resource forks; ".tagtmp-" = a temp copy a
-                    // crashed tag write left behind (writer::TEMP_PREFIX).
-                    if name.starts_with("._") || name.starts_with(crate::writer::TEMP_PREFIX) {
+                    // "._" = macOS resource forks; the other = a temp copy a
+                    // crashed tag write left behind (writer::is_temp_file_name).
+                    if name.starts_with("._") || crate::writer::is_temp_file_name(name) {
                         return false;
                     }
                 }
