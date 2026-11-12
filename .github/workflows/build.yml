@@ -6,8 +6,10 @@ on:
       - 'v*'  # Build on version tags (v2.0.0, v2.1.0, etc.)
   workflow_dispatch:  # Manual trigger from GitHub UI
 
+# Read-only by default. Only the build job, which creates the draft release,
+# is granted contents: write (see below).
 permissions:
-  contents: write  # Required for creating releases
+  contents: read
 
 jobs:
   test-js:
@@ -15,10 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -33,12 +35,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, pinned
+        with:
+          toolchain: stable
 
-      # libwebkit2gtk-4.1-dev etc. are required build-time dependencies for the tauri crate —
+      # libwebkit2gtk-4.1-dev etc. are required build-time dependencies for the tauri crate:
       # cargo test fails at compile time without them, even though scanner tests don't exercise webkit.
       - name: Install Linux dependencies
         run: |
@@ -69,18 +73,21 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     name: Build (${{ matrix.name }})
+    permissions:
+      contents: write  # creates the draft release and attaches assets; used only on v* tags
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, pinned
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -93,41 +100,86 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+      # Manual runs from a branch only build; they must never create a release or
+      # a tag named after the branch. Releases come from v* tags only.
+      - name: Build Tauri app (no release)
+        id: build_only
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        env:
+          # macOS: ad-hoc signed only (not notarized)
+          APPLE_SIGNING_IDENTITY: '-'
+          CI: true
+        with:
+          args: --target ${{ matrix.target }}
+
+      - name: Build Tauri app and create draft release
+        id: build_release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS: skip code signing for CI builds
+          # macOS: ad-hoc signed only (not notarized)
           APPLE_SIGNING_IDENTITY: '-'
           CI: true
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Audiobook Tagger ${{ github.ref_name }}'
           releaseBody: |
-            ## Audiobook Tagger Desktop V2
+            ## Audiobook Tagger Desktop
 
-            AI-powered audiobook metadata manager for AudiobookShelf.
-
-            ### Features
-            - Local AI via Ollama (Gemma 4, Qwen 3, and more) — no API key needed
-            - Cloud AI (OpenAI GPT-5 Nano, Anthropic Claude)
-            - Batch processing with progress bars
-            - Connect to any AudiobookShelf server
-            - Local folder scanning
+            Metadata manager for AudiobookShelf with AI enrichment, plus local folder scanning with tag writing.
 
             ### Installation
-            - **Windows:** Download `.msi` installer
-            - **macOS (Apple Silicon):** Download `.dmg`, right-click → Open (unsigned)
-            - **macOS (Intel):** Download Intel `.dmg`
-            - **Linux:** Download `.deb` or `.AppImage`
+            - **Windows:** Download the `.msi` installer
+            - **macOS (Apple Silicon):** Download the aarch64 `.dmg`
+            - **macOS (Intel):** Download the x64 `.dmg`
+            - **Linux:** Download the `.deb` or `.AppImage`
 
-            > macOS users: Since the app is unsigned, you may need to go to System Settings → Privacy & Security → "Open Anyway" after first launch.
+            ### Verifying a download
+            Each platform's `SHA256SUMS-<platform>.txt` is attached to this release. Compare it with `shasum -a 256 <file>` (macOS), `sha256sum <file>` (Linux) or `Get-FileHash <file>` (Windows).
+
+            ### Not signed
+            These builds are not notarized (macOS) or code-signed (Windows). macOS: right-click the app and choose Open, or use System Settings > Privacy & Security > Open Anyway. Windows SmartScreen may warn on first run.
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
 
+      # Hash exactly the files tauri-action reports as built. artifactPaths is a
+      # JSON array of paths (tauri-action v0.6.2 sets it with JSON.stringify).
+      - name: Write checksums
+        id: checksums
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.build_release.outputs.artifactPaths || steps.build_only.outputs.artifactPaths }}
+          SUMS_NAME: SHA256SUMS-${{ matrix.name }}.txt
+        run: |
+          node -e '
+            const fs = require("fs"), path = require("path"), crypto = require("crypto");
+            const paths = JSON.parse(process.env.ARTIFACT_PATHS || "[]");
+            if (paths.length === 0) { console.error("tauri-action reported no artifacts"); process.exit(1); }
+            const lines = paths.filter(p => fs.statSync(p).isFile()).map(p =>
+              crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex") + "  " + path.basename(p));
+            fs.writeFileSync(process.env.SUMS_NAME, lines.join("\n") + "\n");
+            console.log(lines.join("\n"));
+          '
+
+      - name: Attach checksums to the draft release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.build_release.outputs.releaseId }}
+          SUMS_NAME: SHA256SUMS-${{ matrix.name }}.txt
+        # A draft release has no tag lookup, so upload by release id.
+        shell: bash
+        run: |
+          gh api --method POST \
+            -H "Content-Type: text/plain" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=${SUMS_NAME}" \
+            --input "${SUMS_NAME}"
+
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: audiobook-tagger-${{ matrix.name }}
           path: |
@@ -139,4 +191,5 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.rpm
+            SHA256SUMS-${{ matrix.name }}.txt
           if-no-files-found: ignore
