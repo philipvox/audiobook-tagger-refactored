@@ -3,7 +3,7 @@
 // session; existing tags/genres are never dropped by it; empty arrays are
 // never sent unless the user cleared the field; no "Unknown" author.
 import { describe, it, expect } from 'vitest';
-import { buildAbsPayload, snapshotAbsMetadata, applyPayloadToSnapshot, syncAllSeries } from './absPayload.js';
+import { buildAbsPayload, snapshotAbsMetadata, applyPayloadToSnapshot, syncAllSeries, parseSeriesName, isPlaceholderSeries, isMultiSeriesName } from './absPayload.js';
 
 const base = {
   title: 'Dune',
@@ -188,5 +188,71 @@ describe('applyPayloadToSnapshot', () => {
     // User now removes the tag that was pushed: must be sent.
     const again = buildAbsPayload({ ...base }, next, cfg);
     expect(again.tags).toEqual(base.tags);
+  });
+});
+
+// C-3 / M-3: the ABS list endpoint sends `seriesName` ("Name #seq", several
+// joined by ", "); placeholders from AI never replace a curated series.
+describe('parseSeriesName', () => {
+  it('splits the ABS "Name #seq" form, keeping decimal sequences', () => {
+    expect(parseSeriesName('Rivers of London #8.1')).toEqual({ name: 'Rivers of London', sequence: '8.1' });
+    expect(parseSeriesName('Rivers of London #9')).toEqual({ name: 'Rivers of London', sequence: '9' });
+  });
+
+  it('a name with no sequence keeps the whole name', () => {
+    expect(parseSeriesName('Discworld')).toEqual({ name: 'Discworld', sequence: null });
+  });
+
+  it('a single series whose name contains a comma is still one series', () => {
+    expect(parseSeriesName('Wallace, Gromit #2')).toEqual({ name: 'Wallace, Gromit', sequence: '2' });
+    expect(parseSeriesName('Tales of Earth, Sea and Sky')).toEqual({ name: 'Tales of Earth, Sea and Sky', sequence: null });
+  });
+
+  it('returns null for empty input and for a string that may hold several series', () => {
+    expect(parseSeriesName('')).toBeNull();
+    expect(parseSeriesName('   ')).toBeNull();
+    expect(parseSeriesName(null)).toBeNull();
+    expect(parseSeriesName('The Plantagenet and Tudor #6, Tudor Court #1')).toBeNull();
+  });
+
+  it('isMultiSeriesName is conservative: needs ", " and more than one " #"', () => {
+    expect(isMultiSeriesName('A #6, B #1')).toBe(true);
+    expect(isMultiSeriesName('Wallace, Gromit #2')).toBe(false);
+    expect(isMultiSeriesName('Discworld')).toBe(false);
+  });
+});
+
+describe('isPlaceholderSeries', () => {
+  it('is true for empty and placeholder words, case-insensitively', () => {
+    for (const v of ['', '  ', null, undefined, 'N/A', 'n/a', 'None', 'STANDALONE', 'unknown', 'null', 'Null']) {
+      expect(isPlaceholderSeries(v)).toBe(true);
+    }
+  });
+
+  it('is false for a real series name', () => {
+    expect(isPlaceholderSeries('Discworld')).toBe(false);
+    expect(isPlaceholderSeries('Unknown Armies')).toBe(false);
+  });
+});
+
+describe('series guards in buildAbsPayload', () => {
+  it('never sends series when the import could not resolve them', () => {
+    const meta = { ...base, series: 'A #6, B #1', sequence: null, all_series: [], series_unresolved: true };
+    expect(buildAbsPayload({ ...meta, title: 'Edited' }, snapshotAbsMetadata(meta), cfg).metadata).not.toHaveProperty('series');
+    expect(buildAbsPayload({ ...meta, series: 'A', sequence: '6' }, snapshotAbsMetadata(meta), cfg).metadata).not.toHaveProperty('series');
+    expect(buildAbsPayload(meta, null, cfg).metadata).not.toHaveProperty('series');
+  });
+
+  it('never replaces a curated series with a placeholder', () => {
+    for (const ph of ['N/A', 'None', 'Standalone', 'Unknown', 'null']) {
+      const meta = syncAllSeries(base, { ...base, series: ph, sequence: null });
+      expect(buildAbsPayload(meta, orig(), cfg).metadata).not.toHaveProperty('series');
+      expect(buildAbsPayload({ ...base, series: ph, all_series: [] }, null, cfg).metadata).not.toHaveProperty('series');
+    }
+  });
+
+  it('a real series edit is still sent', () => {
+    const meta = syncAllSeries(base, { ...base, series: 'Dune Saga', sequence: '1' });
+    expect(buildAbsPayload(meta, orig(), cfg).metadata.series).toEqual([{ name: 'Dune Saga', sequence: '1' }]);
   });
 });

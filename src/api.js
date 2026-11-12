@@ -7,7 +7,7 @@ import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
 import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor } from './lib/normalize';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit } from './lib/genres';
-import { buildAbsPayload as buildAbsPayloadPure, isEmptyPayload, applyPayloadToSnapshot, snapshotAbsMetadata } from './lib/absPayload.js';
+import { buildAbsPayload as buildAbsPayloadPure, isEmptyPayload, applyPayloadToSnapshot, snapshotAbsMetadata, parseSeriesName, isMultiSeriesName } from './lib/absPayload.js';
 import { isTauri } from './lib/platform.js';
 import { makeErrorDetail, errorDetailFromException } from './lib/errorDetail.js';
 
@@ -333,8 +333,12 @@ const HANDLERS = {
       if (page > 1000) { console.warn('[import_from_abs] Pagination cap (1000 pages) hit; stopping.'); break; }
     }
 
+    // C-3: the list endpoint only sends `seriesName`. For a book that may be
+    // in several series, fetch the item to get the real series array.
+    const fetchedSeries = await fetchMultiSeries(baseUrl, token, allItems);
+
     // Convert ABS items to book groups
-    const groups = allItems.map(item => absItemToBookGroup(item, baseUrl));
+    const groups = allItems.map(item => absItemToBookGroup(item, baseUrl, fetchedSeries.get(item.id)));
     return { groups, total: groups.length };
   },
 
@@ -1916,7 +1920,39 @@ function parseYearFromDateString(dateStr) {
   return null;
 }
 
-function absItemToBookGroup(item, absBaseUrl) {
+// C-3: list items whose seriesName may hold several series ("A #6, B #1")
+// and carry no series array. The list endpoint cannot be split safely, so
+// GET /api/items/:id?expanded=1 for each one. Returns Map(id -> series array);
+// an id maps to null when the fetch failed or returned no series, which the
+// group builder records as series_unresolved.
+async function fetchMultiSeries(baseUrl, token, items, concurrency = 4) {
+  const wanted = items.filter((item) => {
+    const meta = item?.media?.metadata || {};
+    const hasArray = Array.isArray(meta.series) && meta.series.length > 0;
+    return item?.id && !hasArray && isMultiSeriesName(meta.seriesName);
+  });
+  const out = new Map();
+  let next = 0;
+  const worker = async () => {
+    while (next < wanted.length) {
+      const item = wanted[next++];
+      try {
+        const full = await absApi(baseUrl, token, `/api/items/${item.id}?expanded=1`);
+        const series = full?.media?.metadata?.series;
+        out.set(item.id, Array.isArray(series) && series.length > 0 ? series : null);
+      } catch (err) {
+        console.warn(`[import_from_abs] Could not fetch series for ${item.id}: ${err?.message || err}`);
+        out.set(item.id, null);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, wanted.length) }, worker));
+  return out;
+}
+
+// fetchedSeries: undefined when no item fetch was needed, the item's series
+// array when fetchMultiSeries got one, null when it failed.
+function absItemToBookGroup(item, absBaseUrl, fetchedSeries) {
   const meta = item.media?.metadata || {};
   const base = absBaseUrl.replace(/\/$/, '');
 
@@ -1939,9 +1975,20 @@ function absItemToBookGroup(item, absBaseUrl) {
     || fromTags(firstTags.tagComposer)
     || null;
 
-  // Series can be in metadata.series (array) or metadata.seriesName (string)
+  // Series: a metadata.series array when ABS sends one; otherwise the list
+  // endpoint's seriesName ("Name #seq"), or the item fetch for a string that
+  // may hold several series (C-3). If that could not be resolved the book is
+  // series_unresolved and push never sends series for it.
+  let sourceSeries = Array.isArray(meta.series) && meta.series.length > 0 ? meta.series : [];
+  let seriesUnresolved = false;
+  if (sourceSeries.length === 0 && fetchedSeries) sourceSeries = fetchedSeries;
+  if (sourceSeries.length === 0 && meta.seriesName && String(meta.seriesName).trim()) {
+    const parsed = parseSeriesName(String(meta.seriesName));
+    if (parsed) sourceSeries = [parsed];
+    else seriesUnresolved = true;
+  }
   // L: use ?? (not ||) so a legitimate sequence of 0 is preserved.
-  const seriesArr = (meta.series || []).map(s => ({
+  const seriesArr = sourceSeries.map(s => ({
     name: typeof s === 'string' ? s : s.name,
     sequence: (typeof s === 'string' ? undefined : s.sequence) ?? null,
     source: 'abs',
@@ -1973,6 +2020,7 @@ function absItemToBookGroup(item, absBaseUrl) {
       series: seriesArr[0]?.name || meta.seriesName || fromTags(firstTags.tagSeries) || null,
       sequence: primarySequence != null ? primarySequence : (meta.seriesSequence || fromTags(firstTags.tagSeriesPart) || null),
       all_series: seriesArr,
+      series_unresolved: seriesUnresolved,
       genres: meta.genres || [],
       tags: item.media?.tags || [],
       description: meta.description || null,
@@ -1999,6 +2047,7 @@ function absItemToBookGroup(item, absBaseUrl) {
   };
   // v2.2.3: what ABS holds right now. Push diffs against this so it only
   // sends what the user/AI changed, and so policy never touches existing values.
+  // Taken after series are resolved so an untouched book diffs to nothing.
   group.abs_original = snapshotAbsMetadata(group.metadata);
   return group;
 }

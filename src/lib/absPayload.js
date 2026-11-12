@@ -11,6 +11,8 @@
 //   - Never send `genres: []` / `tags: []` unless the user cleared the field.
 //   - Never create a placeholder ("Unknown") author.
 //   - A series/sequence edit wins over a stale `all_series`.
+//   - Never send series for a book whose series import did not resolve
+//     (`series_unresolved`), nor a placeholder series ("N/A", "None", ...).
 
 import { splitAuthors, isPlaceholderAuthor, isPlaceholderTitle } from './normalize.js';
 import { enforceGenrePolicyWithSplit, enforceTagPolicy, isDnaTag, MAX_GENRES } from './genres.js';
@@ -71,6 +73,45 @@ export function stripEmbeddedSequence(name) {
     if (cleaned) return { name: cleaned, sequence: hashMatch[1] };
   }
   return { name: trimmed, sequence: null };
+}
+
+/**
+ * True when an ABS `seriesName` string could hold more than one series. ABS
+ * joins several series as "A #6, B #1". A series name can itself contain a
+ * comma or a "#", so this is deliberately conservative: it needs ", " AND
+ * more than one " #". Callers fetch the item rather than guess.
+ */
+export function isMultiSeriesName(str) {
+  if (typeof str !== 'string') return false;
+  return str.includes(', ') && str.split(' #').length - 1 > 1;
+}
+
+/**
+ * Parse a single-series ABS `seriesName` ("Rivers of London #8.1",
+ * "Discworld") into { name, sequence }. The sequence is whatever follows the
+ * last " #" (ABS sequences are free text, e.g. "8.1"). Returns null for an
+ * empty value and for a string that may hold several series
+ * (isMultiSeriesName), which this cannot split safely.
+ */
+export function parseSeriesName(str) {
+  if (typeof str !== 'string') return null;
+  const trimmed = str.trim();
+  if (!trimmed || isMultiSeriesName(trimmed)) return null;
+  const at = trimmed.lastIndexOf(' #');
+  if (at > 0) {
+    const name = trimmed.slice(0, at).trim();
+    const sequence = trimmed.slice(at + 2).trim();
+    if (name && sequence) return { name, sequence };
+  }
+  return { name: trimmed, sequence: null };
+}
+
+const PLACEHOLDER_SERIES = new Set(['n/a', 'none', 'standalone', 'unknown', 'null']);
+
+/** True for an empty series value or an AI/lookup placeholder ("N/A", "None", ...). */
+export function isPlaceholderSeries(str) {
+  const v = s(str).toLowerCase();
+  return v === '' || PLACEHOLDER_SERIES.has(v);
 }
 
 /**
@@ -210,9 +251,14 @@ export function buildAbsPayload(meta = {}, original = null, cfg = {}) {
     if (narrators.length > 0) metadata.narrators = narrators;
   }
 
-  // Series: never sent empty (clearing stays manual in ABS, CR-4a).
-  const series = seriesList(m);
-  if (series.length > 0 && (o == null || JSON.stringify(series) !== JSON.stringify(seriesList(o)))) {
+  // Series: never sent empty (clearing stays manual in ABS, CR-4a), never
+  // when import could not resolve a multi-series book (C-3), and never with
+  // a placeholder such as "N/A" in place of a real series (M-3).
+  const series = m.series_unresolved === true ? [] : seriesList(m);
+  const hasPlaceholder = (s(m.series) && isPlaceholderSeries(m.series))
+    || series.some((x) => isPlaceholderSeries(x.name));
+  if (series.length > 0 && !hasPlaceholder
+      && (o == null || JSON.stringify(series) !== JSON.stringify(seriesList(o)))) {
     metadata.series = series;
   }
 
