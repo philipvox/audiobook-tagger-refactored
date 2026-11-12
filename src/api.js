@@ -7,7 +7,8 @@ import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
 import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor } from './lib/normalize';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit } from './lib/genres';
-import { buildAbsPayload as buildAbsPayloadPure, isEmptyPayload, applyPayloadToSnapshot, snapshotAbsMetadata, parseSeriesName, isMultiSeriesName } from './lib/absPayload.js';
+import { buildAbsPayload as buildAbsPayloadPure, isEmptyPayload, applyPayloadToSnapshot, snapshotAbsMetadata } from './lib/absPayload.js';
+import { absItemsToBookGroups } from './lib/absGroup.js';
 import { isTauri } from './lib/platform.js';
 import { makeErrorDetail, errorDetailFromException } from './lib/errorDetail.js';
 
@@ -333,12 +334,8 @@ const HANDLERS = {
       if (page > 1000) { console.warn('[import_from_abs] Pagination cap (1000 pages) hit; stopping.'); break; }
     }
 
-    // C-3: the list endpoint only sends `seriesName`. For a book that may be
-    // in several series, fetch the item to get the real series array.
-    const fetchedSeries = await fetchMultiSeries(baseUrl, token, allItems);
-
-    // Convert ABS items to book groups
-    const groups = allItems.map(item => absItemToBookGroup(item, baseUrl, fetchedSeries.get(item.id)));
+    // Convert ABS items to book groups (shared builder, see lib/absGroup.js).
+    const groups = await absItemsToBookGroups(baseUrl, token, allItems);
     return { groups, total: groups.length };
   },
 
@@ -1898,159 +1895,6 @@ Return JSON: {"year":"2005"}`;
   ollama_get_model_presets: () => [],
   ollama_get_disk_usage: () => 0,
 };
-
-// ============================================================================
-// ABS Item → BookGroup conversion (runs in browser)
-// ============================================================================
-
-// M-4/L-14: parse a year out of a free-form ABS date string (publishedDate or
-// an embedded tagDate) defensively. Only take the first 4 characters when
-// they're actually 4 digits; otherwise fall back to Date parsing, and give up
-// (null) rather than return a bogus year. Mirrors src/lib/abs-client.js's
-// parseYearFromTagDate, kept as a local copy since this file's
-// absItemToBookGroup is itself a standalone copy of that one.
-function parseYearFromDateString(dateStr) {
-  if (!dateStr) return null;
-  const str = String(dateStr).trim();
-  if (!str) return null;
-  const first4 = str.substring(0, 4);
-  if (/^\d{4}$/.test(first4)) return first4;
-  const parsed = new Date(str);
-  if (!Number.isNaN(parsed.getTime())) return String(parsed.getFullYear());
-  return null;
-}
-
-// C-3: list items whose seriesName may hold several series ("A #6, B #1")
-// and carry no series array. The list endpoint cannot be split safely, so
-// GET /api/items/:id?expanded=1 for each one. Returns Map(id -> series array);
-// an id maps to null when the fetch failed or returned no series, which the
-// group builder records as series_unresolved.
-async function fetchMultiSeries(baseUrl, token, items, concurrency = 4) {
-  const wanted = items.filter((item) => {
-    const meta = item?.media?.metadata || {};
-    const hasArray = Array.isArray(meta.series) && meta.series.length > 0;
-    return item?.id && !hasArray && isMultiSeriesName(meta.seriesName);
-  });
-  const out = new Map();
-  let next = 0;
-  const worker = async () => {
-    while (next < wanted.length) {
-      const item = wanted[next++];
-      try {
-        const full = await absApi(baseUrl, token, `/api/items/${item.id}?expanded=1`);
-        const series = full?.media?.metadata?.series;
-        out.set(item.id, Array.isArray(series) && series.length > 0 ? series : null);
-      } catch (err) {
-        console.warn(`[import_from_abs] Could not fetch series for ${item.id}: ${err?.message || err}`);
-        out.set(item.id, null);
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(concurrency, wanted.length) }, worker));
-  return out;
-}
-
-// fetchedSeries: undefined when no item fetch was needed, the item's series
-// array when fetchMultiSeries got one, null when it failed.
-function absItemToBookGroup(item, absBaseUrl, fetchedSeries) {
-  const meta = item.media?.metadata || {};
-  const base = absBaseUrl.replace(/\/$/, '');
-
-  // ABS exposes embedded ID3/M4B tags on each audioFile. When the book's
-  // top-level metadata is empty (common when no Audible match and no sidecar),
-  // these tags often still carry the truth. Use the first file's tags as a
-  // fallback for author / narrator / series.
-  const firstTags = item.media?.audioFiles?.[0]?.metaTags || {};
-  const fromTags = (s) => (s && String(s).trim()) || null;
-
-  // ABS returns authors as both `authorName` (string) and `authors` (array of {id, name})
-  const author = fromTags(meta.authorName)
-    || fromTags((meta.authors || []).map(a => typeof a === 'string' ? a : a.name).join(', '))
-    || fromTags(firstTags.tagAlbumArtist)
-    || fromTags(firstTags.tagArtist)
-    || 'Unknown';
-
-  const narrator = fromTags(meta.narratorName)
-    || fromTags((meta.narrators || []).map(n => typeof n === 'string' ? n : n.name).join(', '))
-    || fromTags(firstTags.tagComposer)
-    || null;
-
-  // Series: a metadata.series array when ABS sends one; otherwise the list
-  // endpoint's seriesName ("Name #seq"), or the item fetch for a string that
-  // may hold several series (C-3). If that could not be resolved the book is
-  // series_unresolved and push never sends series for it.
-  let sourceSeries = Array.isArray(meta.series) && meta.series.length > 0 ? meta.series : [];
-  let seriesUnresolved = false;
-  if (sourceSeries.length === 0 && fetchedSeries) sourceSeries = fetchedSeries;
-  if (sourceSeries.length === 0 && meta.seriesName && String(meta.seriesName).trim()) {
-    const parsed = parseSeriesName(String(meta.seriesName));
-    if (parsed) sourceSeries = [parsed];
-    else seriesUnresolved = true;
-  }
-  // L: use ?? (not ||) so a legitimate sequence of 0 is preserved.
-  const seriesArr = sourceSeries.map(s => ({
-    name: typeof s === 'string' ? s : s.name,
-    sequence: (typeof s === 'string' ? undefined : s.sequence) ?? null,
-    source: 'abs',
-  }));
-
-  const title = fromTags(meta.title)
-    || fromTags(firstTags.tagAlbum)
-    || fromTags(firstTags.tagTitle)
-    || 'Unknown';
-
-  const publishedYear = meta.publishedYear
-    || parseYearFromDateString(meta.publishedDate)
-    || parseYearFromDateString(firstTags.tagDate)
-    || firstTags.tagYear
-    || null;
-
-  // L: don't let `|| meta.seriesSequence` override a legitimate sequence of 0.
-  const primarySequence = seriesArr[0]?.sequence;
-
-  const group = {
-    id: item.id || crypto.randomUUID(),
-    abs_id: item.id,
-    source: 'abs',
-    metadata: {
-      title,
-      author,
-      narrator,
-      subtitle: meta.subtitle || null,
-      series: seriesArr[0]?.name || meta.seriesName || fromTags(firstTags.tagSeries) || null,
-      sequence: primarySequence != null ? primarySequence : (meta.seriesSequence || fromTags(firstTags.tagSeriesPart) || null),
-      all_series: seriesArr,
-      series_unresolved: seriesUnresolved,
-      genres: meta.genres || [],
-      tags: item.media?.tags || [],
-      description: meta.description || null,
-      publisher: meta.publisher || fromTags(firstTags.tagPublisher) || null,
-      published_year: publishedYear,
-      year: publishedYear,
-      language: meta.language || fromTags(firstTags.tagLanguage) || null,
-      isbn: meta.isbn || fromTags(firstTags.tagIsbn) || null,
-      asin: meta.asin || fromTags(firstTags.tagAsin) || null,
-      cover_url: item.id ? `${base}/api/items/${item.id}/cover` : null,
-      duration: item.media?.duration || null,
-      added_at: item.addedAt || item.createdAt || 0,
-    },
-    // CR-3: every file needs a stable id (used for selection Sets etc.) and
-    // a changes object (write/rescan paths assume file.changes exists).
-    files: (item.media?.audioFiles || []).map((f, index) => ({
-      id: `${item.id}-f${index}`,
-      path: f.metadata?.path || '',
-      filename: f.metadata?.filename || '',
-      duration: f.duration || 0,
-      size: f.metadata?.size || 0,
-      changes: {},
-    })),
-  };
-  // v2.2.3: what ABS holds right now. Push diffs against this so it only
-  // sends what the user/AI changed, and so policy never touches existing values.
-  // Taken after series are resolved so an untouched book diffs to nothing.
-  group.abs_original = snapshotAbsMetadata(group.metadata);
-  return group;
-}
 
 // ============================================================================
 // EVENT SUBSCRIPTION (SSE, only needed if using Axum backend, otherwise no-op)

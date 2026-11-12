@@ -105,6 +105,7 @@ describe('import_from_abs series parsing (C-3)', () => {
     expect(g.metadata.series).toBe('The Plantagenet and Tudor');
     expect(g.metadata.sequence).toBe('6');
     expect(g.metadata.series_unresolved).toBe(false);
+    expect(g.lastError).toBeUndefined();
     expect(g.abs_original.all_series).toHaveLength(2);
     expect(isEmptyPayload(buildAbsPayload(g.metadata, g.abs_original, {}))).toBe(true);
     // The rest of the book still comes from the list item.
@@ -126,7 +127,14 @@ describe('import_from_abs series parsing (C-3)', () => {
     expect(g.metadata.all_series).toEqual([]);
     const edited = { ...g.metadata, title: 'Edited', series: 'A', sequence: '6' };
     expect(buildAbsPayload(edited, g.abs_original, {}).metadata).not.toHaveProperty('series');
+    expect(g.lastError).toEqual({
+      stage: 'import',
+      kind: 'series',
+      severity: 'warn',
+      message: "Could not read this book's series from AudiobookShelf. Series will not be pushed until you re-import.",
+    });
     expect(groups.find((x) => x.abs_id === 'i5').metadata.series_unresolved).toBe(false);
+    expect(groups.find((x) => x.abs_id === 'i5').lastError).toBeUndefined();
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
   });
@@ -138,6 +146,7 @@ describe('import_from_abs series parsing (C-3)', () => {
     });
     const { groups } = await callBackend('import_from_abs', {});
     expect(groups[0].metadata.series_unresolved).toBe(true);
+    expect(groups[0].lastError).toMatchObject({ stage: 'import', kind: 'series', severity: 'warn' });
   });
 
   it('keeps using a metadata.series array when the list item carries one', async () => {
