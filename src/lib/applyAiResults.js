@@ -284,11 +284,28 @@ export function audioIntroUpdates(metadata, result, field = 'all', force = false
   return updates;
 }
 
+// result: one AudioIntroResult (src-tauri/src/whisper.rs), whose `status` is
+// "ok" | "failed" | "cancelled" | "timed_out" with `error` when it stopped
+// early, or a { success: false, error } built from a rejected call.
 export function applyAudioResult(group, result, field = 'all', force = false) {
   if (!result) return { group, outcome: 'none' };
-  // No transcript at all: download, FFmpeg or Whisper failed for this book.
-  if (result.transcript == null) {
-    return failed(group, 'audio', null, 'Could not transcribe the audio intro (download, FFmpeg or Whisper failed).');
+  const status = result.status || (result.transcript == null ? 'failed' : 'ok');
+  const cause = has(result.error) ? String(result.error?.message ?? result.error) : '';
+  // Stopped by Cancel: not a failure, and nothing to say on the book.
+  if (status === 'cancelled') return { group, outcome: 'cancelled' };
+  if (status === 'timed_out') {
+    return {
+      group: { ...group, lastError: { stage: 'audio', kind: 'timeout', severity: 'error',
+        message: `Check by Audio timed out${cause ? `: ${cause}` : '.'}` } },
+      outcome: 'timedout',
+    };
+  }
+  // No transcript at all: download, FFmpeg or Whisper failed for this book,
+  // or the whole call was rejected (no key, ffmpeg missing, no ABS URL).
+  if (result.success === false || status === 'failed' || result.transcript == null) {
+    return failed(group, 'audio', null, cause
+      ? `Could not transcribe the audio intro: ${cause}`
+      : 'Could not transcribe the audio intro (download, FFmpeg or Whisper failed).');
   }
   const updates = audioIntroUpdates(group.metadata, result, field, force);
   const fields = Object.keys(updates).filter((k) => k !== 'narrators');
@@ -397,7 +414,7 @@ export function applyFixDescriptionResult(group, entry) {
 // pairs: [{ id, outcome }]. Returns summarizeBatch counts plus the per-book
 // list scrollToFirstErrorGroup reads for "Show details".
 export function tallyOutcomes(pairs) {
-  const counts = { succeeded: 0, skipped: 0, warnings: 0, failed: 0 };
+  const counts = { succeeded: 0, skipped: 0, warnings: 0, failed: 0, cancelled: 0, timedOut: 0 };
   const errorResults = [];
   for (const { id, outcome } of pairs) {
     if (outcome === 'changed') counts.succeeded++;
@@ -412,7 +429,10 @@ export function tallyOutcomes(pairs) {
     else if (outcome === 'failed') {
       counts.failed++;
       errorResults.push({ id, success: false });
-    }
+    } else if (outcome === 'timedout') {
+      counts.timedOut++;
+      errorResults.push({ id, success: false });
+    } else if (outcome === 'cancelled') counts.cancelled++;
   }
   return { counts, errorResults };
 }

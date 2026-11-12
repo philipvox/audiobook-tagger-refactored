@@ -25,6 +25,7 @@ import {
 } from './applyAiResults.js';
 import { summarizeBatch, scrollToFirstErrorGroup } from './batchToast.js';
 import { errorDetailFromException } from './errorDetail.js';
+import { isAbsBacked, getAbsId } from './absPush.js';
 
 export const rejectedEntry = (err) => ({ success: false, error: String(err?.message || err) });
 
@@ -47,7 +48,8 @@ export function applyEntries(setGroups, sentGroups, entryFor, apply) {
 // { notProcessed, errorMessage } from runBatchChunks.
 export function reportOutcomes(toast, op, pairs, cancelled = 0, extra = {}) {
   const { counts, errorResults } = tallyOutcomes(pairs);
-  const summary = summarizeBatch({ op, ...counts, cancelled, ...extra });
+  // Books the run never reached plus books that stopped mid-way on a Cancel.
+  const summary = summarizeBatch({ op, ...counts, ...extra, cancelled: cancelled + (counts.cancelled || 0) });
   if (summary && toast) {
     const opts = (summary.hasWarnings || summary.hasFailures)
       ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(errorResults, summary.hasFailures ? 'error' : 'warn') } }
@@ -182,25 +184,32 @@ export const ENRICH_ACTIONS = Object.freeze({
     apply: (g, entry, ctx) => applyAudioResult(g, entry, ctx.field || 'all', !!ctx.force),
     callChunk: async (chunk, ctx, callBackend) => {
       const cfg = ctx.config || {};
-      const items = chunk.map((g) => ({
-        item_id: g.id || g.group_name,
-        source: g.id ? 'abs' : 'local',
+      // D-4: a scanned book has a uuid id too; only an ABS-backed book is
+      // fetched from ABS, and only it carries the ABS connection.
+      const itemId = (g) => (isAbsBacked(g) ? getAbsId(g) : (g.id || g.group_name));
+      const items = chunk.map((g) => {
+        const fromAbs = isAbsBacked(g);
+        return {
+        item_id: itemId(g),
+        source: fromAbs ? 'abs' : 'local',
         title: g.metadata?.title || null,
         author: g.metadata?.author || null,
         file_ino: g.files?.[0]?.ino || null,
         file_path: g.files?.[0]?.path || null,
-        abs_base_url: cfg.abs_base_url || null,
-        abs_api_token: cfg.abs_api_token || null,
+        abs_base_url: fromAbs ? (cfg.abs_base_url || null) : null,
+        abs_api_token: fromAbs ? (cfg.abs_api_token || null) : null,
         openai_api_key: cfg.openai_api_key || null,
         use_local_ai: cfg.use_local_ai || false,
         ollama_model: cfg.ollama_model || null,
         ollama_base_url: cfg.ollama_base_url || null,
         use_local_whisper: cfg.use_local_whisper || false,
         whisper_model: cfg.whisper_model || 'base',
-      }));
+        };
+      });
       const res = byId(await callBackend('batch_extract_audio_intros', { items, force: !!ctx.force }), (r) => r.item_id);
-      // A book missing from the results (cancelled run) has no entry.
-      return chunk.map((g) => res.get(g.id || g.group_name));
+      // The command returns no result for a book it never reached, which
+      // happens only when the run was cancelled: count that book as cancelled.
+      return chunk.map((g) => res.get(itemId(g)) ?? { item_id: itemId(g), transcript: null, narrators: [], authors: [], status: 'cancelled' });
     },
   },
 });
@@ -264,7 +273,7 @@ export async function runEnrichAction(name, groups, options = {}) {
   }
 
   const counts = reportOutcomes(toast, action.op, [...pairs, ...extraPairs], cancelled);
-  return { pairs, counts, cancelled };
+  return { pairs, counts: { ...counts, cancelled: cancelled + (counts.cancelled || 0) }, cancelled };
 }
 
 export const BATCH_CHUNK_SIZE = 25;

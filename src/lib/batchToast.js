@@ -42,8 +42,11 @@ const warningText = (meta, n) => `${n} ${meta.warningLabel || 'warnings'}`;
 // `notProcessed` is how many books a run stopped early (repeated errors) left
 // untouched; `errorMessage` is the first batch error, shown so the cause (a
 // bad key, no provider) is in the toast and not only on the book pills.
-export function summarizeBatch({ op, succeeded = 0, skipped = 0, warnings = 0, failed = 0, cancelled = 0, notProcessed = 0, errorMessage = null }) {
-  const summary = summarizeCounts({ op, succeeded, skipped, warnings, failed, cancelled });
+//
+// `timedOut` (Check by Audio) is counted apart from `failed` and reads as a
+// failure ("2 timed out").
+export function summarizeBatch({ op, succeeded = 0, skipped = 0, warnings = 0, failed = 0, cancelled = 0, timedOut = 0, notProcessed = 0, errorMessage = null }) {
+  const summary = summarizeCounts({ op, succeeded, skipped, warnings, failed, cancelled, timedOut });
   const extra = [];
   if (notProcessed > 0) extra.push(`Stopped after repeated errors; ${notProcessed} not processed.`);
   if (errorMessage) extra.push(`First error: ${errorMessage}`);
@@ -57,31 +60,33 @@ export function summarizeBatch({ op, succeeded = 0, skipped = 0, warnings = 0, f
   return { ...base, type, message: [head, ...extra].filter(Boolean).join(' ') };
 }
 
-function summarizeCounts({ op, succeeded, skipped, warnings, failed, cancelled }) {
+function summarizeCounts({ op, succeeded, skipped, warnings, failed, cancelled, timedOut = 0 }) {
   const meta = OPS[op];
   if (!meta) throw new Error(`summarizeBatch: unknown op "${op}"`);
+  const anyFailure = failed > 0 || timedOut > 0;
 
   if (cancelled > 0) {
-    const processed = succeeded + skipped + warnings + failed;
+    const processed = succeeded + skipped + warnings + failed + timedOut;
     const parts = [];
     if (succeeded > 0) parts.push(`${succeeded} ${meta.verb}`);
     if (failed > 0) parts.push(`${failed} failed`);
+    if (timedOut > 0) parts.push(`${timedOut} timed out`);
     if (warnings > 0) parts.push(warningText(meta, warnings));
     if (skipped > 0) parts.push(skippedText(meta, skipped));
     const detail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
     return {
-      type: failed > 0 ? 'error' : 'warning',
+      type: anyFailure ? 'error' : 'warning',
       title: `${meta.v2v3Title} cancelled`,
       message: `${processed} of ${processed + cancelled} processed${detail}; the remaining ${cancelled} ${cancelled === 1 ? 'was' : 'were'} cancelled.`,
       hasWarnings: warnings > 0,
-      hasFailures: failed > 0,
+      hasFailures: anyFailure,
     };
   }
 
-  if (succeeded === 0 && skipped === 0 && warnings === 0 && failed === 0) return null;
+  if (succeeded === 0 && skipped === 0 && warnings === 0 && failed === 0 && timedOut === 0) return null;
 
   // V1 — all clean.
-  if (warnings === 0 && failed === 0) {
+  if (warnings === 0 && !anyFailure) {
     const parts = [];
     if (succeeded > 0) parts.push(`${succeeded} ${meta.verb}`);
     if (skipped > 0) parts.push(skippedText(meta, skipped));
@@ -95,10 +100,11 @@ function summarizeCounts({ op, succeeded, skipped, warnings, failed, cancelled }
   }
 
   // V2/V3 — mixed. Type is 'error' if any failed (red priority), else 'warning'.
-  const type = failed > 0 ? 'error' : 'warning';
+  const type = anyFailure ? 'error' : 'warning';
   const titleParts = [];
   if (succeeded > 0) titleParts.push(`${succeeded} ${meta.verb}`);
   if (failed > 0) titleParts.push(`${failed} failed`);
+  if (timedOut > 0) titleParts.push(`${timedOut} timed out`);
   if (warnings > 0) titleParts.push(warningText(meta, warnings));
   const title = `${meta.v2v3Title}: ${titleParts.join(', ')}`;
   const message = skipped > 0 ? skippedText(meta, skipped) : undefined;
@@ -108,7 +114,7 @@ function summarizeCounts({ op, succeeded, skipped, warnings, failed, cancelled }
     title,
     message,
     hasWarnings: warnings > 0,
-    hasFailures: failed > 0,
+    hasFailures: anyFailure,
   };
 }
 
