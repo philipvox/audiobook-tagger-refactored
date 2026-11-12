@@ -2204,10 +2204,14 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             // an empty AI answer changes nothing, Force only discards an array when
             // the AI supplied a replacement for it, genres supplement by default,
             // and curated ABS tags survive via the import snapshot.
+            // D-3/D-7: a book with no import snapshot (local files) passes []: none
+            // of its tags is an earlier AI answer unless ai_tags says so, so a
+            // tag added by hand stays. Only tags in ai_tags are replaced.
             const applied = applyClassifyResult(g.metadata, r, {
               force: isForceReset,
               preserveGenres: config?.preserve_existing_genres !== false,
-              originalTags: g.abs_original?.tags,
+              originalTags: g.abs_original?.tags ?? [],
+              aiTags: g.ai_tags ?? [],
             });
             if (applied.error === 'empty-answer') {
               return {
@@ -2256,7 +2260,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             if (r.tropes?.length > 0) cf.add('tropes');
             if (r.age_category && r.age_category !== 'Unknown') cf.add('age');
             if (r.dna_tags?.length > 0) cf.add('dna');
-            return { ...next, changedFields: [...cf], lastError };
+            return { ...next, changedFields: [...cf], lastError, ai_tags: applied.aiTags ?? g.ai_tags };
           });
         }),
       });

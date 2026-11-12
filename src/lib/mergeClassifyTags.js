@@ -20,48 +20,70 @@ export function isAgeTag(t) {
 
 // existingTags: string[] (the book's current tags)
 // result: { tags?, dna_tags?, age_tags? } from the classifier
-// Returns { tags: string[], changed: boolean }.
 // originalTags (optional, v2.2.3): the tags ABS held at import
-// (group.abs_original.tags). When given, a full classification keeps every
-// existing tag that is in that snapshot (curated/user/dna tags) and only
-// replaces tags produced earlier this session; stale dna:/age tags are still
-// replaced when the classifier returns new ones.
-export function mergeClassifyTags(existingTags, result = {}, originalTags = undefined) {
+// (group.abs_original.tags); [] for a book with no snapshot (local files).
+// options.aiTags (optional): the tags earlier AI answers added this session
+// (group.ai_tags).
+// Returns { tags: string[], changed: boolean, aiTags: string[] }.
+//
+// One policy for every AI tag answer (Classify, AI Tags, DNA, Lookup Age):
+//   - a tag in the import snapshot is never removed, except a dna: tag when
+//     new dna: tags came back (the DNA set is replaced as a whole, Task 2);
+//   - an age tag is replaced by new age tags only when it is not in the
+//     snapshot (D-3; the Task 8 ruling for Lookup Age);
+//   - a full classification (top-level tags) replaces only the tags an
+//     earlier AI answer added (D-7): with options.aiTags given, exactly
+//     those; without it, every tag not in the snapshot (the pre-tracking rule);
+//   - without originalTags a full classification replaces every tag (Force,
+//     which the caller only uses when the AI supplied a replacement).
+// `aiTags` in the result is the tracking list to store back on the group: the
+// non-dna, non-age tags of the result that an AI answer added and that are
+// not in the snapshot. A tag the user had before the answer stays theirs.
+const lower = (t) => String(t).toLowerCase();
+const isDna = (t) => String(t).startsWith('dna:');
+const unique = (list) => [...new Set(list)];
+
+export function mergeClassifyTags(existingTags, result = {}, originalTags = undefined, { aiTags } = {}) {
   const existing = Array.isArray(existingTags) ? existingTags : [];
   const clsTags = result.tags || [];
   const dnaTags = result.dna_tags || [];
   const ageTags = result.age_tags || [];
   const changed = clsTags.length > 0 || dnaTags.length > 0 || ageTags.length > 0;
+  const snap = Array.isArray(originalTags) ? new Set(originalTags.map(lower)) : null;
+  const inSnap = (t) => snap != null && snap.has(lower(t));
+  const tracked = Array.isArray(aiTags) ? new Set(aiTags.map(lower)) : null;
+  const prevAi = tracked || new Set();
+
+  const staleDna = (t) => dnaTags.length > 0 && isDna(t);
+  const staleAge = (t) => ageTags.length > 0 && isAgeTag(t) && !inSnap(t);
+  const nextAiTags = (tags, fromAnswer) => {
+    const before = new Set(existing.filter((t) => !prevAi.has(lower(t))).map(lower));
+    const answer = new Set(fromAnswer.map(lower));
+    return tags.filter((t) => !inSnap(t) && !isDna(t) && !isAgeTag(t)
+      && (prevAi.has(lower(t)) || (answer.has(lower(t)) && !before.has(lower(t)))));
+  };
 
   if (clsTags.length > 0) {
-    // Full classification replace (still fold DNA + age in, dedup) - but
-    // never drop tags that already existed in ABS.
-    let curated = [];
-    if (Array.isArray(originalTags)) {
-      const orig = new Set(originalTags.map((t) => String(t).toLowerCase()));
-      curated = existing.filter((t) => {
-        const str = String(t);
-        if (!orig.has(str.toLowerCase())) return false;
-        if (dnaTags.length > 0 && str.startsWith('dna:')) return false;
-        if (ageTags.length > 0 && isAgeTag(str)) return false;
-        return true;
-      });
+    if (!snap) {
+      // No snapshot: a full replace that still folds DNA and age in.
+      const tags = unique([...clsTags, ...dnaTags, ...ageTags]);
+      return { tags, changed, aiTags: nextAiTags(tags, clsTags) };
     }
-    return { tags: [...new Set([...curated, ...clsTags, ...dnaTags, ...ageTags])], changed };
+    const earlierAi = (t) => !inSnap(t) && !isDna(t) && !isAgeTag(t)
+      && (tracked ? tracked.has(lower(t)) : true);
+    const kept = existing.filter((t) => !staleDna(t) && !staleAge(t) && !earlierAi(t));
+    const tags = unique([...kept, ...clsTags, ...dnaTags, ...ageTags]);
+    return { tags, changed, aiTags: nextAiTags(tags, clsTags) };
   }
 
   if (dnaTags.length > 0 || ageTags.length > 0) {
-    // Additive merge: preserve curated tags, drop only the stale dna:/age
-    // tags that the new sets replace.
-    const preserved = existing.filter((t) => {
-      const s = String(t);
-      if (dnaTags.length > 0 && s.startsWith('dna:')) return false;
-      if (ageTags.length > 0 && isAgeTag(s)) return false;
-      return true;
-    });
-    return { tags: [...new Set([...preserved, ...dnaTags, ...ageTags])], changed };
+    // Additive merge: preserve every other tag, drop only the stale dna:/age
+    // tags that the new sets replace (never an age tag from the snapshot).
+    const preserved = existing.filter((t) => !staleDna(t) && !staleAge(t));
+    const tags = unique([...preserved, ...dnaTags, ...ageTags]);
+    return { tags, changed, aiTags: nextAiTags(tags, []) };
   }
 
   // No tag data at all - leave the existing tags untouched.
-  return { tags: existing, changed };
+  return { tags: existing, changed, aiTags: nextAiTags(existing, []) };
 }

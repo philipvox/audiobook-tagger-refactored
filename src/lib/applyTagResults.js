@@ -10,6 +10,9 @@ import { applyMetadataToGroup } from './applyMetadata';
 
 const nonEmpty = (a) => Array.isArray(a) && a.length > 0;
 
+// The fewest dna: tags a DNA answer needs to replace an existing, fuller set.
+export const MIN_DNA_TAGS = 3;
+
 // Tag lists to keep: the ABS import snapshot when present, else everything
 // currently on the book (nothing existing is ever dropped).
 const keepTags = (group) => group.abs_original?.tags ?? group.metadata?.tags ?? [];
@@ -45,12 +48,17 @@ export function applyTagsResultToGroup(group, tagResult) {
     };
   }
   const existing = group.metadata?.tags || [];
+  // D-7: only tags an earlier AI answer added (group.ai_tags) are replaced; a
+  // tag the user added by hand stays.
   const merged = mergeClassifyTags(
     existing,
     { tags: tagResult.tags, dna_tags: tagResult.dna_tags },
-    keepTags(group)
+    keepTags(group),
+    { aiTags: group.ai_tags ?? [] }
   );
-  let next = merged.changed ? applyMetadataToGroup(group, { tags: merged.tags }, ['tags']) : group;
+  let next = merged.changed
+    ? { ...applyMetadataToGroup(group, { tags: merged.tags }, ['tags']), ai_tags: merged.aiTags }
+    : group;
   if (tagResult.dna_error) {
     return {
       group: withError(next, 'tags', 'dna', `DNA tags were not updated: ${tagResult.dna_error}`),
@@ -70,6 +78,17 @@ export function applyDnaResultToGroup(group, dnaResult) {
     };
   }
   const existing = group.metadata?.tags || [];
+  // A thin answer (fewer than MIN_DNA_TAGS) never replaces a fuller set: it
+  // is treated as a failed answer and the existing DNA stays.
+  const fresh = dnaResult.dna_tags.filter((t) => String(t).startsWith('dna:'));
+  const current = existing.filter((t) => String(t).startsWith('dna:'));
+  if (fresh.length < MIN_DNA_TAGS && current.length > fresh.length) {
+    return {
+      group: withError(group, 'dna', 'parse',
+        `The DNA answer had only ${fresh.length} DNA tag${fresh.length === 1 ? '' : 's'}, so the existing ${current.length} were kept.`),
+      outcome: 'failed',
+    };
+  }
   const merged = mergeClassifyTags(existing, { dna_tags: dnaResult.dna_tags }, existing);
   const next = merged.changed ? applyMetadataToGroup(group, { tags: merged.tags }, ['tags']) : group;
   return { group: clearStage(next, 'dna'), outcome: 'ok' };

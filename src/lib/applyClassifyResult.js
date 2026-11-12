@@ -17,11 +17,11 @@ const nonEmpty = (a) => Array.isArray(a) && a.length > 0;
 export function applyClassifyResult(
   metadata,
   result,
-  { force = false, preserveGenres = true, originalTags = undefined } = {}
+  { force = false, preserveGenres = true, originalTags = undefined, aiTags = undefined } = {}
 ) {
   const r = result || {};
   if (!nonEmpty(r.genres) && !nonEmpty(r.tags) && !nonEmpty(r.dna_tags) && !nonEmpty(r.age_tags)) {
-    return { metadata, changedFields: [], error: 'empty-answer' };
+    return { metadata, changedFields: [], error: 'empty-answer', aiTags };
   }
 
   const next = { ...metadata };
@@ -36,13 +36,17 @@ export function applyClassifyResult(
 
   // Tags. Force drops the existing tags only when top-level tags came back.
   const forceTags = force && nonEmpty(r.tags);
+  // D-7: aiTags (group.ai_tags) names the tags earlier AI answers added; only
+  // those are replaced, so a tag added by hand stays.
   const tagResult = mergeClassifyTags(
     forceTags ? [] : next.tags,
     r,
-    forceTags ? undefined : originalTags
+    forceTags ? undefined : originalTags,
+    { aiTags }
   );
   next.tags = tagResult.tags;
   if (tagResult.changed) changedFields.push('tags');
 
-  return { metadata: next, changedFields, error: undefined };
+  // aiTags: the tracking list to store back on the group (group.ai_tags).
+  return { metadata: next, changedFields, error: undefined, aiTags: tagResult.aiTags };
 }

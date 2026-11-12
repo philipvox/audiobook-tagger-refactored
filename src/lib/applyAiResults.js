@@ -21,7 +21,7 @@ import { mergeGenres } from './mergeGenres.js';
 import { mergeClassifyTags } from './mergeClassifyTags.js';
 import { isPlaceholderSeries, stripEmbeddedSequence } from './absPayload.js';
 import { isPlaceholderAuthor, isPlaceholderTitle } from './normalize.js';
-import { enforceGenrePolicyWithSplit } from './genres.js';
+import { enforceGenrePolicyWithSplit, splitCombinedGenres } from './genres.js';
 import { mapAgeCategory } from './ageCategory.js';
 import { severityForKind } from './errorDetail.js';
 import { extractNarrator } from './extractNarrator.js';
@@ -125,12 +125,17 @@ export function applySubtitleResult(group, entry) {
 }
 
 // ---- Clean Genres (AI) ----
-// A genre from the import snapshot survives unless the answer holds what the
-// genre policy maps it to (e.g. "Sci Fi" -> "Science Fiction").
+// A genre from the import snapshot survives unless the answer holds an exact
+// replacement for the whole genre: the genre itself (any casing), or, for a
+// single genre, the one value the genre policy maps it to ("Sci-Fi" ->
+// "Science Fiction"). A compound genre ("Biography, Memoir") is never
+// replaced by an answer that holds some of its parts: when in doubt the
+// snapshot genre stays and the answer's genres are added beside it.
 function isReplaced(genre, cleanedKeys) {
   if (cleanedKeys.has(lower(genre))) return true;
+  if (splitCombinedGenres([genre]).length !== 1) return false;
   const mapped = enforceGenrePolicyWithSplit([genre]);
-  return mapped.some((g) => cleanedKeys.has(lower(g)));
+  return mapped.length === 1 && cleanedKeys.has(lower(mapped[0]));
 }
 
 export function applyGenreCleanupResult(group, entry) {
@@ -163,16 +168,11 @@ export function applyStaticGenreCleanupResult(group, entry) {
 }
 
 // ---- Lookup Age ----
-// mergeClassifyTags replaces every existing age tag with the new answer. A tag
-// that was in ABS at import (originalTags) is never removed: only age tags
-// added this session are replaced. Existing order is kept, new tags appended.
+// The age-tag policy lives in mergeClassifyTags (D-3, one place): a tag that
+// was in ABS at import (originalTags) is never removed; only age tags added
+// this session are replaced. Existing order is kept, new tags appended.
 export function mergeAgeTags(existingTags, ageTags, originalTags) {
-  const merged = mergeClassifyTags(existingTags, { age_tags: ageTags }).tags;
-  const inSnapshot = new Set((Array.isArray(originalTags) ? originalTags : []).map(lower));
-  const mergedSet = new Set(merged);
-  const kept = existingTags.filter((t) => mergedSet.has(t) || inSnapshot.has(lower(t)));
-  const keptSet = new Set(kept);
-  return [...kept, ...merged.filter((t) => !keptSet.has(t))];
+  return mergeClassifyTags(existingTags, { age_tags: ageTags }, Array.isArray(originalTags) ? originalTags : []).tags;
 }
 
 // Age tags go through mergeClassifyTags (curated tags kept, stale age tags
