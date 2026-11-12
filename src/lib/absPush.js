@@ -228,9 +228,10 @@ export async function runPush(groups, { pushById, pushByFileIds }) {
 /**
  * H-11: run `worker(item, index)` over `items` with at most `concurrency`
  * calls in flight. Results come back in input order. A worker that throws
- * rejects the pool, so workers should catch their own errors.
+ * never stops the other lanes: its slot gets `onError(error, item, index)`
+ * (default `{ error }`).
  */
-export async function runPool(items, worker, concurrency) {
+export async function runPool(items, worker, concurrency, onError = (error) => ({ error })) {
   const list = Array.isArray(items) ? items : [];
   const results = new Array(list.length);
   const limit = Math.max(1, Math.min(list.length, Math.floor(Number(concurrency)) || 1));
@@ -238,7 +239,11 @@ export async function runPool(items, worker, concurrency) {
   const lane = async () => {
     while (next < list.length) {
       const i = next++;
-      results[i] = await worker(list[i], i);
+      try {
+        results[i] = await worker(list[i], i);
+      } catch (error) {
+        results[i] = onError(error, list[i], i);
+      }
     }
   };
   await Promise.all(Array.from({ length: limit }, lane));
@@ -257,41 +262,66 @@ export function pushConcurrency(config) {
   return Math.min(MAX_PUSH_CONCURRENCY, Math.max(1, n));
 }
 
+/** id and title used to report one push item; never throws. */
+function describeItem(item) {
+  const absId = item?.abs_id || item?.id;
+  const id = item?.id ?? item?.group_id ?? absId ?? null;
+  let title = '';
+  try { title = s(item?.metadata?.title) || s(item?.title); } catch { /* unreadable title */ }
+  return { absId, id, title: title || String(absId || '') };
+}
+
+/** `snapshot` with its tags and genres replaced by the server's lists. */
+function withLists(snapshot, lists) {
+  return { ...snapshot, tags: [...lists.tags], genres: [...lists.genres] };
+}
+
 /**
  * Push one book. H-5: diff against the import snapshot, then re-read the live
  * item and apply only the local tag/genre delta to it, so values added in ABS
  * since import survive. When in doubt nothing is sent: a failed or unreadable
- * GET fails the book without a PATCH.
+ * GET fails the book without a PATCH. Never throws: any error lands the book
+ * in `failed` with its id and title.
  *
  * `request(path, options?)` performs an ABS API call; `cfg` is the app config.
- * Returns { status: 'updated'|'skipped'|'failed', entry, snapshot? }.
+ * Returns { status: 'updated'|'skipped'|'failed', entry, snapshot?, refreshed? }.
+ * `refreshed` ({ snapshot, fields }) is set when the rebase left nothing to
+ * send: ABS already holds the intended lists, so the caller can adopt them.
  */
 export async function pushOneAbsItem(item, { request, cfg = {} }) {
-  const meta = item?.metadata || {};
-  const original = item?.original || null;
-  const absId = item?.abs_id || item?.id;
-  const id = item?.id ?? item?.group_id ?? absId ?? null;
-  const title = s(meta.title) || s(item?.title) || String(absId || '');
-  if (!absId) return { status: 'failed', entry: { id, title, error: 'Missing item ID' } };
-  // H-4: a group restored without its import snapshot cannot be diffed.
-  if (item?.needs_reimport === true) {
-    return { status: 'skipped', entry: { id, title, reason: 'Re-import from ABS before pushing' } };
-  }
-
-  const first = buildAbsPayload(meta, original, cfg);
-  if (isEmptyPayload(first)) return { status: 'skipped', entry: { id, title, reason: 'no changes' } };
-
+  const { absId, id, title } = describeItem(item);
   try {
+    const meta = item?.metadata || {};
+    const original = item?.original || null;
+    if (!absId) return { status: 'failed', entry: { id, title, error: 'Missing item ID' } };
+    // H-4: a group restored without its import snapshot cannot be diffed.
+    if (item?.needs_reimport === true) {
+      return { status: 'skipped', entry: { id, title, reason: 'Re-import from ABS before pushing' } };
+    }
+
+    const first = buildAbsPayload(meta, original, cfg);
+    if (isEmptyPayload(first)) return { status: 'skipped', entry: { id, title, reason: 'no changes' } };
+
     const live = readLiveLists(await request(`/api/items/${absId}?expanded=1`));
     if (!live) {
       return { status: 'failed', entry: { id, title, error: 'Could not read the current tags and genres from ABS' } };
     }
     const { payload, lists } = rebasePayloadOnLive(first, original, live, meta);
-    if (isEmptyPayload(payload)) return { status: 'skipped', entry: { id, title, reason: 'no changes' } };
+    if (isEmptyPayload(payload)) {
+      // Only lists were staged and ABS already holds them: adopt the server
+      // lists so the book stops showing as changed.
+      const fields = [];
+      if ('tags' in first) fields.push('tags');
+      if ('genres' in (first.metadata || {})) fields.push('genres');
+      const base = snapshotAbsMetadata(original || meta);
+      return {
+        status: 'skipped',
+        entry: { id, title, reason: 'no changes' },
+        refreshed: { snapshot: withLists(base, lists), fields },
+      };
+    }
     await request(`/api/items/${absId}/media`, { method: 'PATCH', body: payload });
-    const snapshot = applyPayloadToSnapshot(original || snapshotAbsMetadata(meta), meta, payload);
-    snapshot.tags = lists.tags;
-    snapshot.genres = lists.genres;
+    const snapshot = withLists(applyPayloadToSnapshot(original || snapshotAbsMetadata(meta), meta, payload), lists);
     return { status: 'updated', entry: { id, title }, snapshot };
   } catch (err) {
     return { status: 'failed', entry: { id, title, error: String(err?.message || err) } };
@@ -300,15 +330,23 @@ export async function pushOneAbsItem(item, { request, cfg = {} }) {
 
 /**
  * Push several books through pushOneAbsItem, `pushConcurrency(cfg)` at a time.
- * Returns { updated, skipped, failed, snapshots } where `snapshots` holds the
- * advanced abs_original of each updated book, keyed by its id.
+ * Returns { updated, skipped, failed, snapshots, refreshed }: `snapshots`
+ * holds the advanced abs_original of each updated book and `refreshed` the
+ * { snapshot, fields } of each book skipped because ABS already matched,
+ * both keyed by book id.
  */
 export async function pushAbsItems(items, { request, cfg = {} }) {
-  const outcomes = await runPool(items || [], (item) => pushOneAbsItem(item, { request, cfg }), pushConcurrency(cfg));
-  const result = { updated: [], skipped: [], failed: [], snapshots: {} };
+  const onError = (err, item) => {
+    const { id, title } = describeItem(item);
+    return { status: 'failed', entry: { id, title, error: String(err?.message || err) } };
+  };
+  const outcomes = await runPool(items || [], (item) => pushOneAbsItem(item, { request, cfg }), pushConcurrency(cfg), onError);
+  const result = { updated: [], skipped: [], failed: [], snapshots: {}, refreshed: {} };
   for (const o of outcomes) {
     result[o.status].push(o.entry);
-    if (o.status === 'updated' && o.entry.id != null) result.snapshots[o.entry.id] = o.snapshot;
+    if (o.entry.id == null) continue;
+    if (o.status === 'updated') result.snapshots[o.entry.id] = o.snapshot;
+    if (o.refreshed) result.refreshed[o.entry.id] = o.refreshed;
   }
   return result;
 }
@@ -328,6 +366,50 @@ export function buildPushItems(groups) {
   }));
 }
 
+// changedFields uses metadata names; file.changes uses 'genre' for genres.
+const FILE_FIELDS = { tags: ['tags'], genres: ['genre', 'genres'] };
+
+/**
+ * A group with `snapshot` as its abs_original and the server's tags/genres.
+ * `fields` null clears all staged state (total_changes, changedFields, every
+ * file.changes, metadata.user_cleared); otherwise only those fields'.
+ */
+function adoptServerState(g, snapshot, fields) {
+  const metadata = { ...(g.metadata || {}) };
+  if (Array.isArray(snapshot.tags)) metadata.tags = [...snapshot.tags];
+  if (Array.isArray(snapshot.genres)) metadata.genres = [...snapshot.genres];
+  if (fields == null) {
+    delete metadata.user_cleared;
+    return {
+      ...g,
+      abs_original: snapshot,
+      metadata,
+      total_changes: 0,
+      changedFields: [],
+      files: (g.files || []).map((f) => ({ ...f, changes: {} })),
+    };
+  }
+  if (Array.isArray(metadata.user_cleared)) {
+    const left = metadata.user_cleared.filter((f) => !fields.includes(f));
+    if (left.length > 0) metadata.user_cleared = left;
+    else delete metadata.user_cleared;
+  }
+  const fileKeys = new Set(fields.flatMap((f) => FILE_FIELDS[f] || [f]));
+  const files = (g.files || []).map((f) => {
+    const changes = { ...(f.changes || {}) };
+    for (const k of fileKeys) delete changes[k];
+    return { ...f, changes };
+  });
+  const changedFields = (g.changedFields || []).filter((f) => !fields.includes(f));
+  // Same rule as applyMetadataToGroup: a representative file's change count,
+  // or the changed-field count for a group without files.
+  const representative = files.find((f) => Object.keys(f.changes).length > 0);
+  const total_changes = representative
+    ? Object.keys(representative.changes).length
+    : (files.length > 0 ? 0 : changedFields.length);
+  return { ...g, abs_original: snapshot, metadata, changedFields, total_changes, files };
+}
+
 /**
  * Advance each pushed group's abs_original to what ABS now holds, so a later
  * revert of a pushed change is still detected. `snapshots` is keyed by group id.
@@ -339,18 +421,20 @@ export function applyPushSnapshots(groups, snapshots) {
   if (!snapshots || typeof snapshots !== 'object') return groups;
   return (groups || []).map((g) => {
     if (!Object.prototype.hasOwnProperty.call(snapshots, g.id) || !snapshots[g.id]) return g;
-    const snapshot = snapshots[g.id];
-    const metadata = { ...(g.metadata || {}) };
-    delete metadata.user_cleared;
-    if (Array.isArray(snapshot.tags)) metadata.tags = [...snapshot.tags];
-    if (Array.isArray(snapshot.genres)) metadata.genres = [...snapshot.genres];
-    return {
-      ...g,
-      abs_original: snapshot,
-      metadata,
-      total_changes: 0,
-      changedFields: [],
-      files: (g.files || []).map((f) => ({ ...f, changes: {} })),
-    };
+    return adoptServerState(g, snapshots[g.id], null);
+  });
+}
+
+/**
+ * For books skipped because ABS already held the intended lists (`refreshed`
+ * from pushAbsItems, keyed by group id, values { snapshot, fields }): adopt
+ * the server lists and clear the staged state of those fields only.
+ */
+export function applyRefreshedLists(groups, refreshed) {
+  if (!refreshed || typeof refreshed !== 'object') return groups;
+  return (groups || []).map((g) => {
+    const r = Object.prototype.hasOwnProperty.call(refreshed, g.id) ? refreshed[g.id] : null;
+    if (!r?.snapshot) return g;
+    return adoptServerState(g, r.snapshot, Array.isArray(r.fields) ? r.fields : []);
   });
 }

@@ -313,13 +313,14 @@ export function applyPayloadToSnapshot(original, meta, payload) {
 /**
  * H-5: apply the local delta to the live list. Returns
  * live + (local - snapshot) - (snapshot - local), compared case-insensitively
- * (listKey), keeping the live order and casing and appending additions in
- * local order. A null snapshot means nothing counts as removed.
+ * (listKey), appending additions in local order. Live values are kept
+ * verbatim (order, casing, and two values that share a key): the key only
+ * decides what is added and what is removed. A null snapshot removes nothing.
  */
 export function rebaseArrayOnLive(snapshotArr, localArr, liveArr) {
   const snapshot = dedupe(snapshotArr);
   const local = dedupe(localArr);
-  const live = dedupe(liveArr);
+  const live = Array.isArray(liveArr) ? [...liveArr] : [];
   const snapKeys = new Set(snapshot.map(listKey));
   const localKeys = new Set(local.map(listKey));
   const removed = new Set(snapshot.filter((v) => !localKeys.has(listKey(v))).map(listKey));
@@ -340,7 +341,8 @@ export function readLiveLists(item) {
   const tags = media.tags;
   const genres = media.metadata?.genres;
   if (!Array.isArray(tags) || !Array.isArray(genres)) return null;
-  return { tags: dedupe(tags), genres: dedupe(genres) };
+  // Verbatim: never merge two live values that happen to share a key.
+  return { tags: [...tags], genres: [...genres] };
 }
 
 /**

@@ -13,6 +13,7 @@ vi.mock('./lib/proxy', async (importOriginal) => {
 
 const { callBackend } = await import('./api.js');
 const { absApi } = await import('./lib/proxy');
+const { serveLive } = await import('./test/absLive.js');
 
 beforeEach(() => {
   localStorage.clear();
@@ -21,16 +22,9 @@ beforeEach(() => {
     abs_api_token: 'token',
   }));
   vi.resetAllMocks();
-  serveLive();
+  serveLive(absApi);
 });
 
-// Task 5: every push GETs the live item before the PATCH. Serve one whose
-// tags and genres are `live` (by default: empty, i.e. an unchanged server).
-function serveLive(live = {}) {
-  absApi.mockImplementation(async (_base, _token, _path, opts) => (
-    opts?.method === 'PATCH' ? {} : { media: { tags: live.tags || [], metadata: { genres: live.genres || [] } } }
-  ));
-}
 
 async function pushUpdatesAndGetPayload(meta, idField = 'abs_id') {
   const item = { metadata: meta, original: {} };

@@ -10,6 +10,7 @@ vi.mock('./proxy', async (importOriginal) => {
 
 const { callBackend } = await import('../api.js');
 const { absApi } = await import('./proxy');
+const { liveItem, mockAbs } = await import('../test/absLive.js');
 const {
   getAbsId, isAbsBacked, fileIdsInGroups, partitionPushGroups, normalizePushResult, mergePushResults,
   summarizePush, runPush,
@@ -197,19 +198,6 @@ describe('rebaseArrayOnLive (H-5)', () => {
   });
 });
 
-const liveItem = (tags, genres) => ({ media: { tags, metadata: { genres } } });
-
-/** absApi mock: GET returns `live` (or throws `getError`), PATCH returns {} (or throws `patchError`). */
-function mockAbs({ live, getError, patchError } = {}) {
-  absApi.mockImplementation(async (_base, _token, path, opts) => {
-    if (opts?.method === 'PATCH') {
-      if (patchError) throw patchError;
-      return {};
-    }
-    if (getError) throw getError;
-    return live;
-  });
-}
 
 const pushImports = (items) => callBackend('push_abs_imports', { request: { items } });
 
@@ -221,7 +209,7 @@ describe('push_abs_imports rebases on the live item (H-5)', () => {
   });
 
   it('GETs the live item before the PATCH and sends the rebased tags and genres', async () => {
-    mockAbs({ live: liveItem(['a', 'b', 'x'], ['Fantasy', 'Horror', 'Mystery']) });
+    mockAbs(absApi, { live: liveItem(['a', 'b', 'x'], ['Fantasy', 'Horror', 'Mystery']) });
     const out = await pushImports([{
       id: 'g1', abs_id: 'li-1',
       metadata: { title: 'Book', tags: ['a', 'b', 'c'], genres: ['Fantasy'] },
@@ -244,7 +232,7 @@ describe('push_abs_imports rebases on the live item (H-5)', () => {
   });
 
   it('drops a list that already matches the live item; skips the book when nothing is left', async () => {
-    mockAbs({ live: liveItem(['A', 'b'], ['Fantasy']) });
+    mockAbs(absApi, { live: liveItem(['A', 'b'], ['Fantasy']) });
     const out = await pushImports([{
       id: 'g1', abs_id: 'li-1',
       metadata: { title: 'Book', tags: ['a', 'b'], genres: ['Fantasy'] },
@@ -256,7 +244,7 @@ describe('push_abs_imports rebases on the live item (H-5)', () => {
   });
 
   it('keeps scalar changes when the lists already match the live item', async () => {
-    mockAbs({ live: liveItem(['a', 'b'], []) });
+    mockAbs(absApi, { live: liveItem(['a', 'b'], []) });
     await pushImports([{
       id: 'g1', abs_id: 'li-1',
       metadata: { title: 'New Title', tags: ['a', 'b'] },
@@ -267,7 +255,7 @@ describe('push_abs_imports rebases on the live item (H-5)', () => {
 
   it('never sends an empty list the user did not clear, even when the rebase empties it', async () => {
     // Removed 'b' locally while someone removed 'a' in ABS.
-    mockAbs({ live: liveItem(['b'], []) });
+    mockAbs(absApi, { live: liveItem(['b'], []) });
     await pushImports([{
       id: 'g1', abs_id: 'li-1',
       metadata: { title: 'New', tags: ['a'] },
@@ -279,7 +267,7 @@ describe('push_abs_imports rebases on the live item (H-5)', () => {
   });
 
   it('without a snapshot nothing is sent and the live item is not even read (H-4)', async () => {
-    mockAbs({ live: liveItem(['server-tag'], ['Mystery']) });
+    mockAbs(absApi, { live: liveItem(['server-tag'], ['Mystery']) });
     const out = await pushImports([{ id: 'g1', abs_id: 'li-1', metadata: { title: 'Book', tags: ['local-tag'], genres: ['Fantasy'] } }]);
     expect(absApi).not.toHaveBeenCalled();
     expect(out.updated).toEqual([]);
@@ -287,7 +275,7 @@ describe('push_abs_imports rebases on the live item (H-5)', () => {
   });
 
   it('caps added genres against the live list; live genres are never trimmed', async () => {
-    mockAbs({ live: liveItem([], ['Fantasy', 'Horror', 'Mystery']) });
+    mockAbs(absApi, { live: liveItem([], ['Fantasy', 'Horror', 'Mystery']) });
     const out = await pushImports([{
       id: 'g1', abs_id: 'li-1',
       metadata: { title: 'Book', genres: ['Fantasy', 'Thriller'] },
@@ -307,7 +295,7 @@ describe('per-book push results (M-9)', () => {
   });
 
   it('a 500 on the PATCH lands in failed with the id and title', async () => {
-    mockAbs({ live: liveItem([], []), patchError: new Error('HTTP 500') });
+    mockAbs(absApi, { live: liveItem([], []), patchError: new Error('HTTP 500') });
     const out = await pushImports([{ id: 'g1', abs_id: 'li-1', metadata: { title: 'Dune 2' }, original: { title: 'Dune' } }]);
     expect(out.updated).toEqual([]);
     expect(out.failed).toEqual([{ id: 'g1', title: 'Dune 2', error: 'HTTP 500' }]);
@@ -315,14 +303,14 @@ describe('per-book push results (M-9)', () => {
   });
 
   it('a failed GET fails the book and sends no PATCH', async () => {
-    mockAbs({ getError: new Error('HTTP 404') });
+    mockAbs(absApi, { getError: new Error('HTTP 404') });
     const out = await pushImports([{ id: 'g1', abs_id: 'li-1', metadata: { title: 'Dune 2' }, original: { title: 'Dune' } }]);
     expect(absApi).toHaveBeenCalledTimes(1);
     expect(out.failed).toEqual([{ id: 'g1', title: 'Dune 2', error: 'HTTP 404' }]);
   });
 
   it('a live item without media fails the book and sends no PATCH', async () => {
-    mockAbs({ live: {} });
+    mockAbs(absApi, { live: {} });
     const out = await pushImports([{ id: 'g1', abs_id: 'li-1', metadata: { title: 'Dune 2' }, original: { title: 'Dune' } }]);
     expect(absApi).toHaveBeenCalledTimes(1);
     expect(out.failed[0]).toMatchObject({ id: 'g1', title: 'Dune 2' });
@@ -333,15 +321,16 @@ describe('per-book push results (M-9)', () => {
     const { readLiveLists } = await import('./absPayload.js');
     expect(readLiveLists({ media: { metadata: { genres: [] } } })).toBeNull();
     expect(readLiveLists({ media: { tags: [], metadata: {} } })).toBeNull();
+    // Fix round 1: live values are kept verbatim, never merged by key.
     expect(readLiveLists({ media: { tags: ['a', 'A'], metadata: { genres: ['Fantasy'] } } }))
-      .toEqual({ tags: ['a'], genres: ['Fantasy'] });
+      .toEqual({ tags: ['a', 'A'], genres: ['Fantasy'] });
   });
 
   it('the single-book push (push_abs_updates) goes through the same per-book path', async () => {
     localStorage.setItem('audiobook_tagger_config', JSON.stringify({
       abs_base_url: 'http://abs.local', abs_api_token: 'token', preserve_existing_tags: true,
     }));
-    mockAbs({ live: liveItem(['a', 'x'], []) });
+    mockAbs(absApi, { live: liveItem(['a', 'x'], []) });
     const out = await callBackend('push_abs_updates', {
       items: [{ group_id: 'g1', abs_id: 'li-1', metadata: { title: 'Book', tags: ['a', 'c'] }, original: { title: 'Book', tags: ['a'] } }],
     });
@@ -445,5 +434,89 @@ describe('push summary names failed books', () => {
     expect(s.type).toBe('info');
     expect(s.message).toMatch(/1 book.*skipped/i);
     expect(s.message).toMatch(/no changes/);
+  });
+});
+
+describe('Task 5 fix round 1', () => {
+  beforeEach(() => {
+    localStorage.setItem('audiobook_tagger_config', JSON.stringify({
+      abs_base_url: 'http://abs.local', abs_api_token: 'token', preserve_existing_tags: true,
+    }));
+  });
+
+  it('a book whose payload build throws fails alone; the others are updated with their snapshots', async () => {
+    mockAbs(absApi, { live: liveItem([], []) });
+    const bad = { title: 'Bad Book' };
+    Object.defineProperty(bad, 'description', { enumerable: true, get() { throw new Error('bad metadata'); } });
+    const out = await pushImports([
+      { id: 'g1', abs_id: 'li-1', metadata: { title: 'One' }, original: { title: 'old' } },
+      { id: 'g2', abs_id: 'li-2', metadata: bad, original: { title: 'old' } },
+      { id: 'g3', abs_id: 'li-3', metadata: { title: 'Three' }, original: { title: 'old' } },
+    ]);
+    expect(out.updated).toEqual([{ id: 'g1', title: 'One' }, { id: 'g3', title: 'Three' }]);
+    expect(out.failed).toEqual([{ id: 'g2', title: 'Bad Book', error: 'bad metadata' }]);
+    expect(Object.keys(out.snapshots).sort()).toEqual(['g1', 'g3']);
+    expect(out.snapshots.g1.title).toBe('One');
+  });
+
+  it('runPool keeps every other result when a worker throws', async () => {
+    const { runPool } = await import('./absPush.js');
+    const worker = async (n) => {
+      await new Promise((r) => setTimeout(r, 2));
+      if (n === 2) throw new Error('boom');
+      return n * 10;
+    };
+    const out = await runPool([1, 2, 3, 4], worker, 2);
+    expect(out[0]).toBe(10);
+    expect(out[1].error.message).toBe('boom');
+    expect(out.slice(2)).toEqual([30, 40]);
+    const mapped = await runPool([1, 2, 3], worker, 3, (err, item, i) => ({ failed: item, i, msg: err.message }));
+    expect(mapped).toEqual([10, { failed: 2, i: 1, msg: 'boom' }, 30]);
+  });
+
+  it('a book the rebase leaves with nothing to send is skipped but its lists are refreshed', async () => {
+    mockAbs(absApi, { live: liveItem(['a', 'b'], ['Fantasy']) });
+    const out = await pushImports([{
+      id: 'g1', abs_id: 'li-1',
+      metadata: { title: 'Book', tags: ['a', 'b'], genres: ['Fantasy'] },
+      original: { title: 'Book', tags: ['a'], genres: ['Fantasy'] },
+    }]);
+    expect(out.skipped).toEqual([{ id: 'g1', title: 'Book', reason: 'no changes' }]);
+    expect(out.snapshots).toEqual({});
+    expect(out.refreshed.g1.fields).toEqual(['tags']);
+    expect(out.refreshed.g1.snapshot).toMatchObject({ title: 'Book', tags: ['a', 'b'], genres: ['Fantasy'] });
+  });
+
+  it('applyRefreshedLists advances the snapshot and clears staged state for those fields only', async () => {
+    const { applyRefreshedLists } = await import('./absPush.js');
+    const g = {
+      id: 'g1',
+      metadata: { title: 'New', tags: ['a', 'b'], genres: [], user_cleared: ['tags', 'genres'] },
+      abs_original: { title: 'Old', tags: ['a'], genres: [] },
+      total_changes: 2,
+      changedFields: ['tags', 'title'],
+      files: [{ id: 'f1', changes: { tags: { old: 'a', new: 'a, b' }, title: { old: 'Old', new: 'New' } } }],
+    };
+    const snapshot = { title: 'Old', tags: ['a', 'b'], genres: [] };
+    const [out] = applyRefreshedLists([g], { g1: { snapshot, fields: ['tags'] } });
+    expect(out.abs_original).toBe(snapshot);
+    expect(out.metadata.tags).toEqual(['a', 'b']);
+    expect(out.metadata.title).toBe('New');
+    expect(out.metadata.user_cleared).toEqual(['genres']);
+    expect(out.changedFields).toEqual(['title']);
+    expect(out.files[0].changes).toEqual({ title: { old: 'Old', new: 'New' } });
+    expect(out.total_changes).toBe(1);
+    const other = { id: 'g2', metadata: {} };
+    expect(applyRefreshedLists([other], { g1: { snapshot, fields: ['tags'] } })[0]).toBe(other);
+  });
+
+  it('live values that share a key are both kept when tags are sent', async () => {
+    mockAbs(absApi, { live: liveItem(['Sci Fi', 'sci-fi', 'x'], []) });
+    await pushImports([{
+      id: 'g1', abs_id: 'li-1',
+      metadata: { title: 'Book', tags: ['x', 'new-tag'] },
+      original: { title: 'Book', tags: ['x'] },
+    }]);
+    expect(absApi.mock.calls[1][3].body.tags).toEqual(['Sci Fi', 'sci-fi', 'x', 'new-tag']);
   });
 });

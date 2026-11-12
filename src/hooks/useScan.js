@@ -2,7 +2,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { callBackend, subscribe, pickPath } from '../api';
 import { useApp } from '../context/AppContext';
-import { getAbsId, normalizePushResult, buildPushItems, applyPushSnapshots, failedPushResult } from '../lib/absPush';
+import { getAbsId, normalizePushResult, buildPushItems, applyPushSnapshots, applyRefreshedLists, failedPushResult } from '../lib/absPush';
 import { logEvent } from '../lib/logEvent';
 
 // ============================================================================
@@ -575,7 +575,10 @@ export function useScan() {
       const raw = await callBackend('push_abs_imports', { request });
       const result = normalizePushResult(raw);
       // H-5: pushed books take the server's tags/genres and drop staged state.
-      if (raw?.snapshots) setGroups(prev => applyPushSnapshots(prev, raw.snapshots));
+      // Books skipped because ABS already matched adopt the server lists too.
+      if (raw?.snapshots || raw?.refreshed) {
+        setGroups(prev => applyRefreshedLists(applyPushSnapshots(prev, raw.snapshots), raw.refreshed));
+      }
 
       if (result.failed.length > 0) {
         // Group errors by type

@@ -16,6 +16,7 @@ vi.mock('./lib/proxy', async (importOriginal) => {
 
 const { callBackend } = await import('./api.js');
 const { absApi } = await import('./lib/proxy');
+const { serveLive } = await import('./test/absLive.js');
 
 function setConfig(extra = {}) {
   localStorage.setItem('audiobook_tagger_config', JSON.stringify({
@@ -29,20 +30,13 @@ beforeEach(() => {
   localStorage.clear();
   setConfig();
   vi.resetAllMocks();
-  serveLive();
+  serveLive(absApi);
 });
 
-// Task 5: every push GETs the live item before the PATCH. Serve one whose
-// tags and genres are `live` (by default: empty, i.e. an unchanged server).
-function serveLive(live = {}) {
-  absApi.mockImplementation(async (_base, _token, _path, opts) => (
-    opts?.method === 'PATCH' ? {} : { media: { tags: live.tags || [], metadata: { genres: live.genres || [] } } }
-  ));
-}
 
 // The live item matches the import snapshot (nothing changed in ABS since).
 async function pushAndGetPayload(meta, original) {
-  serveLive(original || {});
+  serveLive(absApi, original || {});
   const result = await callBackend('push_abs_updates', { items: [{ abs_id: 'item-1', metadata: meta, original }] });
   expect(result.updated).toHaveLength(1);
   return absApi.mock.calls.at(-1)?.[3]?.body;
