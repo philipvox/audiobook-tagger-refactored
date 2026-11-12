@@ -6,7 +6,7 @@
 // the multi-series item fetch and series_unresolved behave the same (C-3).
 
 import { absApi } from './proxy';
-import { snapshotAbsMetadata, parseSeriesName, isMultiSeriesName } from './absPayload.js';
+import { snapshotAbsMetadata, parseSeriesName, isMultiSeriesName, UNRESOLVED_SERIES_IMPORT_MESSAGE } from './absPayload.js';
 
 // M-4/L-14: parse a year out of a free-form ABS date string (publishedDate or
 // an embedded tagDate) defensively. Only take the first 4 characters when
@@ -163,7 +163,7 @@ export function absItemToBookGroup(item, absBaseUrl, fetchedSeries) {
       stage: 'import',
       kind: 'series',
       severity: 'warn',
-      message: "Could not read this book's series from AudiobookShelf. Series will not be pushed until you re-import.",
+      message: UNRESOLVED_SERIES_IMPORT_MESSAGE,
     };
   }
   // v2.2.3: what ABS holds right now. Push diffs against this so it only

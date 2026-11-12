@@ -107,7 +107,8 @@ export function applySeriesResult(group, entry) {
   if (!same(sequence, m.sequence)) fields.push('sequence');
   if (fields.length === 0) return { group: clearStage(group, 'series'), outcome: 'unchanged' };
   // No all_series in the updates: syncAllSeries (inside applyMetadataToGroup)
-  // replaces the primary entry in place and keeps the secondary series.
+  // replaces the primary entry in place, or promotes the named secondary
+  // series, and keeps every other series (D-2).
   const next = applyMetadataToGroup(group, { series, sequence }, fields);
   return { group: clearStage(next, 'series'), outcome: 'changed' };
 }
@@ -317,22 +318,30 @@ export function applyResolveResult(group, entry, gatherDetail) {
 
   // H2/H6: stamp each resolved field that actually changed into file.changes
   // so Write Tags writes the resolution output.
+  // D-6: never stage a series on a book whose series list could not be read
+  // (push would never send it). An empty or placeholder answer never clears
+  // a series. A series the book is already in as a secondary is promoted by
+  // syncAllSeries, keeping the old primary (D-2).
+  const m = g.metadata || {};
+  const takeSeries = r.series !== undefined
+    && m.series_unresolved !== true
+    && !isPlaceholderSeries(r.series);
   const changedFileFields = [];
-  if (r.title && r.title !== g.metadata.title) changedFileFields.push('title');
-  if (r.author && r.author !== g.metadata.author) changedFileFields.push('author');
-  if (r.subtitle && r.subtitle !== g.metadata.subtitle) changedFileFields.push('subtitle');
-  if (r.series !== undefined && r.series !== g.metadata.series) changedFileFields.push('series');
-  if (r.sequence !== undefined && r.sequence !== g.metadata.sequence) changedFileFields.push('sequence');
-  if (r.narrator && r.narrator !== g.metadata.narrator) changedFileFields.push('narrator');
+  if (r.title && r.title !== m.title) changedFileFields.push('title');
+  if (r.author && r.author !== m.author) changedFileFields.push('author');
+  if (r.subtitle && r.subtitle !== m.subtitle) changedFileFields.push('subtitle');
+  if (takeSeries && r.series !== m.series) changedFileFields.push('series');
+  if (takeSeries && r.sequence !== undefined && r.sequence !== m.sequence) changedFileFields.push('sequence');
+  if (r.narrator && r.narrator !== m.narrator) changedFileFields.push('narrator');
   const next = applyMetadataToGroup(
     g,
     {
-      title: r.title || g.metadata.title,
-      author: r.author || g.metadata.author,
-      subtitle: r.subtitle || g.metadata.subtitle,
-      series: r.series !== undefined ? r.series : g.metadata.series,
-      sequence: r.sequence !== undefined ? r.sequence : g.metadata.sequence,
-      narrator: r.narrator || g.metadata.narrator,
+      title: r.title || m.title,
+      author: r.author || m.author,
+      subtitle: r.subtitle || m.subtitle,
+      series: takeSeries ? r.series : m.series,
+      sequence: takeSeries && r.sequence !== undefined ? r.sequence : m.sequence,
+      narrator: r.narrator || m.narrator,
     },
     changedFileFields
   );

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { callBackend } from '../../api';
 import { ErrorPill } from './ErrorPill';
+import { standingWarnings } from '../../lib/groupWarnings';
 import { computeListMetrics } from '../../lib/listLayout';
 import { aggregateGroupChanges } from '../../lib/aggregateChanges';
 import { CheckCircle, FileAudio, ChevronRight, ChevronDown, Book, Search, X, Sparkles, FileJson, Cloud, ArrowRight, ArrowUpDown, ArrowUp, ArrowDown, AlertCircle, Filter, FolderOpen } from 'lucide-react';
@@ -1008,6 +1009,10 @@ export function BookList({
                           severity={group.lastError.severity || 'warn'}
                         />
                       )}
+                      {/* D-6: warnings that last as long as the book's state, so no later stage's lastError can hide them. */}
+                      {standingWarnings(group).map((w) => (
+                        <ErrorPill key={`${w.stage}-${w.kind}`} detail={w} severity={w.severity} />
+                      ))}
                       {hasChanges && !group.changedFields?.length && (
                         <span
                           className="w-2 h-2 rounded-full bg-amber-500"

@@ -62,6 +62,10 @@ function groupHasStagedChanges(group) {
  * stale metadata under a fresh snapshot would push reversals of server-side
  * changes, so those edits are dropped (callers tell the user via `refreshed`).
  * A flagged group whose book is not in the result is kept as it is.
+ *
+ * D-1: a kept staged group whose series could not be read
+ * (`series_unresolved`) takes its series from the fresh group (see
+ * healUnresolvedSeries), so a re-import is what clears the flag.
  */
 export function mergeAbsPull(prevGroups, newGroups) {
   const isStale = (g) => g?.needs_reimport === true;
@@ -70,7 +74,8 @@ export function mergeAbsPull(prevGroups, newGroups) {
 
   const anyStaged = prevGroups.some(groupHasStagedChanges);
   if (!anyStaged) {
-    return { groups: newGroups, refreshed };
+    const keptStale = prevGroups.filter(g => isStale(g) && !newById.has(g.id));
+    return { groups: keptStale.length > 0 ? [...newGroups, ...keptStale] : newGroups, refreshed };
   }
 
   const seen = new Set();
@@ -78,7 +83,9 @@ export function mergeAbsPull(prevGroups, newGroups) {
   const merged = prevGroups.map(group => {
     if (!newById.has(group.id)) return group;
     seen.add(group.id);
-    return groupHasStagedChanges(group) && !isStale(group) ? group : newById.get(group.id);
+    const fresh = newById.get(group.id);
+    if (!groupHasStagedChanges(group) || isStale(group)) return fresh;
+    return healUnresolvedSeries(group, fresh);
   });
 
   for (const group of newGroups) {
@@ -86,6 +93,45 @@ export function mergeAbsPull(prevGroups, newGroups) {
   }
 
   return { groups: merged, refreshed };
+}
+
+const SERIES_FIELDS = ['series', 'sequence'];
+
+/**
+ * D-1: a staged group whose series could not be read keeps its other edits on
+ * re-import but takes series, sequence, all_series, series_unresolved and the
+ * series part of its import snapshot from the fresh group. Any staged series
+ * change is dropped with it: it was made against a series list that was never
+ * known. Returns `staged` unchanged when it is not series_unresolved.
+ */
+export function healUnresolvedSeries(staged, fresh) {
+  if (staged?.metadata?.series_unresolved !== true || !fresh) return staged;
+  const fm = fresh.metadata || {};
+  const metadata = {
+    ...staged.metadata,
+    series: fm.series ?? null,
+    sequence: fm.sequence ?? null,
+    all_series: Array.isArray(fm.all_series) ? fm.all_series : [],
+    series_unresolved: fm.series_unresolved === true,
+  };
+  const fo = fresh.abs_original || {};
+  const abs_original = staged.abs_original
+    ? { ...staged.abs_original, series: fo.series ?? null, sequence: fo.sequence ?? null, all_series: Array.isArray(fo.all_series) ? fo.all_series : [] }
+    : fresh.abs_original;
+  const files = (staged.files || []).map((f) => {
+    const changes = { ...(f.changes || {}) };
+    for (const k of SERIES_FIELDS) delete changes[k];
+    return { ...f, changes };
+  });
+  const changedFields = (staged.changedFields || []).filter((f) => !SERIES_FIELDS.includes(f));
+  const representative = files.find((f) => Object.keys(f.changes).length > 0);
+  const total_changes = representative
+    ? Object.keys(representative.changes).length
+    : (files.length > 0 ? 0 : changedFields.length);
+  const next = { ...staged, metadata, abs_original, files, changedFields, total_changes };
+  // The import warning was about the series this re-import just read.
+  if (staged.lastError?.kind === 'series') next.lastError = fresh.lastError;
+  return next;
 }
 
 export function mergeAbsPullGroups(prevGroups, newGroups) {

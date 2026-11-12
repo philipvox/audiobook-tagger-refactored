@@ -13,6 +13,7 @@
 //     caller as { saved: false, error } and never thrown at the UI.
 
 import { isTauri } from './platform.js';
+import { needsSeriesUnresolvedFlag, UNRESOLVED_SERIES_IMPORT_MESSAGE } from './absPayload.js';
 
 export const SESSION_VERSION = 1;
 
@@ -127,7 +128,7 @@ export function parseSession(json) {
     savedAt: Number.isFinite(parsed.savedAt) ? parsed.savedAt : null,
     libraryId: typeof parsed.libraryId === 'string' ? parsed.libraryId : null,
     bookCount: parsed.groups.length,
-    groups: parsed.groups.map(flagMissingSnapshot),
+    groups: parsed.groups.map((g) => flagUnresolvedSeries(flagMissingSnapshot(g))),
   };
 }
 
@@ -148,6 +149,27 @@ function flagMissingSnapshot(g) {
       severity: 'warn',
       message: 'Restored from an older session. Re-import from ABS before pushing this book.',
     },
+  };
+}
+
+/**
+ * D-1: a v2.2.3 session holds ABS books imported by the old builder, which
+ * kept a multi-series string ("A #6, B #1") as the series and no series list.
+ * Pushing a series edit for such a book sends that string as one series name
+ * (C-3). Flag it series_unresolved, as a fresh import would, so no series is
+ * pushed until the book is re-imported. Any error already on the book is kept;
+ * the book list shows the series warning as a separate badge.
+ */
+function flagUnresolvedSeries(g) {
+  if (!g || typeof g !== 'object') return g;
+  if (g.source !== 'abs' && !g.abs_id) return g;
+  if (!needsSeriesUnresolvedFlag(g.metadata)) return g;
+  return {
+    ...g,
+    metadata: { ...g.metadata, series_unresolved: true },
+    ...(g.lastError ? {} : {
+      lastError: { stage: 'import', kind: 'series', severity: 'warn', message: UNRESOLVED_SERIES_IMPORT_MESSAGE },
+    }),
   };
 }
 

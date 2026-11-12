@@ -109,6 +109,21 @@ export function parseSeriesName(str) {
   return { name: trimmed, sequence: null };
 }
 
+/** The book-list warning for a book whose series could not be read (C-3). */
+export const UNRESOLVED_SERIES_IMPORT_MESSAGE =
+  "Could not read this book's series from AudiobookShelf. Series will not be pushed until you re-import.";
+
+/**
+ * D-1: true for a book saved by v2.2.3 that still carries the old builder's
+ * unparsed multi-series string ("A #6, B #1") with no series list and no
+ * series_unresolved flag. Such a book must be treated as series_unresolved.
+ */
+export function needsSeriesUnresolvedFlag(m) {
+  if (!m || typeof m !== 'object' || 'series_unresolved' in m) return false;
+  const list = Array.isArray(m.all_series) ? m.all_series : [];
+  return isMultiSeriesName(m.series) && list.length <= 1;
+}
+
 const PLACEHOLDER_SERIES = new Set(['n/a', 'none', 'standalone', 'unknown', 'null']);
 
 /** True for an empty series value or an AI/lookup placeholder ("N/A", "None", ...). */
@@ -129,14 +144,27 @@ export function syncAllSeries(prev = {}, next = {}) {
   // Caller supplied a fresh all_series alongside the edit - trust it.
   if (next.all_series !== undefined
       && JSON.stringify(next.all_series) !== JSON.stringify(prev.all_series)) return next;
-  const rest = (Array.isArray(prev.all_series) ? prev.all_series : []).slice(1);
+  const list = Array.isArray(prev.all_series) ? prev.all_series : [];
+  const rest = list.slice(1);
   // Primary cleared: drop it, keep any secondary series.
   if (!s(next.series)) return { ...next, all_series: rest };
-  const first = (Array.isArray(prev.all_series) && prev.all_series[0]) || {};
-  const primary = { ...first, name: s(next.series), sequence: s(next.sequence) || null };
-  const others = rest.filter((x) => s(x?.name).toLowerCase() !== primary.name.toLowerCase());
+  const first = list[0] || {};
+  const name = s(next.series);
+  const key = name.toLowerCase();
+  // D-2: the new primary is one of the book's other series. Promote that entry
+  // and keep the old primary as a secondary, so no series is dropped.
+  const at = list.findIndex((x, i) => i > 0 && seriesEntryName(x).toLowerCase() === key);
+  if (at > 0) {
+    const promoted = { ...list[at], name, sequence: s(next.sequence) || null };
+    const others = list.filter((_, i) => i !== at);
+    return { ...next, all_series: [promoted, ...others] };
+  }
+  const primary = { ...first, name, sequence: s(next.sequence) || null };
+  const others = rest.filter((x) => seriesEntryName(x).toLowerCase() !== key);
   return { ...next, all_series: [primary, ...others] };
 }
+
+const seriesEntryName = (x) => s(typeof x === 'string' ? x : x?.name);
 
 /** Normalised series list to send: [{ name, sequence? }]. */
 function seriesList(m) {

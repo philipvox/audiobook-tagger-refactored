@@ -108,3 +108,19 @@ describe('BookList empty state (#62)', () => {
     expect(screen.getByRole('button', { name: /Load from AudiobookShelf/ })).toBeInTheDocument();
   });
 });
+
+describe('BookList standing warnings (D-6)', () => {
+  it('shows the unresolved-series warning even when another stage put its own error on the book', () => {
+    const g = {
+      ...book('s1', 'Series Book', 1),
+      metadata: { title: 'Series Book', author: 'A', series: 'A #6, B #1', series_unresolved: true },
+      lastError: { stage: 'resolve', kind: 'low-confidence', message: 'Kept the current values.', severity: 'warn' },
+    };
+    render(
+      <BookList groups={[g]} selectedFiles={new Set()} selectedGroupIds={new Set()} expandedGroups={new Set()} fileStatuses={{}} />
+    );
+    const pills = screen.getAllByTestId('error-pill').map((el) => el.textContent);
+    expect(pills.some((t) => t.includes('Kept the current values'))).toBe(true);
+    expect(pills.some((t) => /Could not read this book/.test(t))).toBe(true);
+  });
+});
