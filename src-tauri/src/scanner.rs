@@ -752,6 +752,11 @@ fn book_key(raw: &str) -> String {
     }
 }
 
+/// The book key of a file's album tag, if it has a usable one.
+fn album_key(f: &RawFile) -> Option<String> {
+    f.tags.album.as_deref().map(book_key).filter(|k| !k.is_empty())
+}
+
 fn file_stem(f: &RawFile) -> String {
     Path::new(&f.filename)
         .file_stem()
@@ -888,9 +893,11 @@ fn is_numbered_track_set(files: &[RawFile]) -> bool {
 ///
 /// - mp3/flac/...: the album; without one, a file in a numbered track set has
 ///   no identity (it is a chapter), otherwise its title, else its filename.
-/// - m4b/m4a are usually whole books: title, else album, else filename. When
-///   `per_track` (see `album_overrides_titles`) a shared album wins over their
-///   differing track titles. In a numbered track set an untagged one whose
+/// - m4b/m4a are usually whole books: title, else filename. The album is NOT
+///   a fallback key: a collection or series album is shared by different
+///   books, and the filename already separates files of one folder. Only when
+///   `per_track` (see `album_overrides_titles`) does a shared album win over
+///   their differing track titles. In a numbered track set an untagged one whose
 ///   filename is generic keys by that filename with the number masked
 ///   ("01.m4a" and "02.m4a" are the same book); a filename with a title keeps
 ///   its number ("Harry Potter 1" and "Harry Potter 2" are different books).
@@ -909,7 +916,7 @@ fn file_book_key(f: &RawFile, track_set: bool, per_track: bool) -> String {
                 return album;
             }
         }
-        tag_key(&f.tags.title).or_else(|| tag_key(&f.tags.album)).unwrap_or_else(|| {
+        tag_key(&f.tags.title).unwrap_or_else(|| {
             match stem_number(&stem) {
                 Some(n) if track_set && stem_is_generic(&stem) => book_key(&n.pattern),
                 _ => stem_key(),
@@ -968,7 +975,18 @@ pub(crate) fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
     for (book_dir, folder_files) in map {
         let books = split_folder_into_books(folder_files);
         let split = books.len() > 1;
-        for (_key, mut raw_files) in books {
+        // How many of this folder's books carry each album. An album on two
+        // or more books is a collection/series label, not either book's title.
+        let mut album_books: HashMap<String, usize> = HashMap::new();
+        if split {
+            for (_, raw_files) in &books {
+                let albums: std::collections::HashSet<String> = raw_files.iter().filter_map(album_key).collect();
+                for a in albums {
+                    *album_books.entry(a).or_default() += 1;
+                }
+            }
+        }
+        for (key, mut raw_files) in books {
             // Sort by full path so tracks stay ordered across discs
             // (Disc 1/track01, Disc 1/track02, Disc 2/track01, ...).
             raw_files.sort_by(|a, b| natord_cmp(&a.path, &b.path));
@@ -981,10 +999,20 @@ pub(crate) fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
             // Several books share this folder: each is named after its own
             // file, and the folder is read as their PARENT (author/series), as
             // if each book had a folder of its own.
+            //
+            // A book that was NOT grouped by its album, while that album is on
+            // another book here too, takes its title from its own title tag,
+            // else its filename. A book grouped BY the album (per-track files)
+            // keeps the album as its title.
+            let shared_album = split
+                && raw_files.iter().filter_map(album_key).any(|a| a != key && album_books.get(&a).copied().unwrap_or(0) >= 2);
+            let own_title = || raw_files.iter().find_map(|f| f.tags.title.clone().filter(|t| !book_key(t).is_empty()));
             let (group_name, hierarchy_dir) = if split {
                 let first = &raw_files[0];
                 let name = if raw_files.len() == 1 {
                     file_stem(first)
+                } else if shared_album {
+                    own_title().unwrap_or_else(|| file_stem(first))
                 } else {
                     first.tags.album.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| file_stem(first))
                 };
@@ -996,7 +1024,10 @@ pub(crate) fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
 
             let group_type = if raw_files.len() == 1 { "single" } else { "chapters" }.to_string();
             let scan_root = raw_files[0].root.clone();
-            let metadata = pick_metadata(&raw_files, &hierarchy_dir, &group_name, &scan_root);
+            let mut metadata = pick_metadata(&raw_files, &hierarchy_dir, &group_name, &scan_root);
+            if shared_album {
+                metadata.title = own_title().unwrap_or_else(|| group_name.clone());
+            }
 
             let audio_files: Vec<AudioFile> = raw_files
                 .iter()
@@ -1491,6 +1522,16 @@ mod tests {
         let mut group_names: Vec<&str> = groups.iter().map(|g| g.group_name.as_str()).collect();
         group_names.sort();
         assert_eq!(group_names, vec!["Carrie", "It"]);
+        // Each split book is titled from its own title tag, not the shared album.
+        assert_eq!(names(&groups), vec!["Carrie", "It"]);
+        let untitled = |track: u32| EmbeddedTags { title: None, ..t("", track) };
+        let groups = group_files(vec![raw(d, "It.m4b", untitled(1)), raw(d, "Carrie.m4b", untitled(2))]);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!(names(&groups), vec!["Carrie", "It"], "untitled: titled from the stems");
+        for g in &groups {
+            assert_eq!(g.metadata.author, "Stephen King");
+            assert_eq!(g.metadata.series, "");
+        }
         // Two generic-named files are still too thin to merge on the album.
         let groups = group_files(vec![raw(d, "01.m4b", t("It", 1)), raw(d, "02.m4b", t("Carrie", 2))]);
         assert_eq!(groups.len(), 2, "{groups:?}");
