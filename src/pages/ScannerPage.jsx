@@ -465,6 +465,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         );
         return applyMetadataToGroup(
           group,
+          // Only genres: this modal has no tags editor, so tags are never user-emptied here.
           { ...newMetadata, ...userClearedPatch(group.metadata, { genres: newMetadata.genres }) },
           changedFileFields
         );

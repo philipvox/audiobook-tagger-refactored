@@ -45,9 +45,11 @@ const DEFAULT_CONFIG = {
   backup_tags: true,
   genre_enforcement: true,
   // #54: when true, AI classification genres SUPPLEMENT the book's existing
-  // genres instead of replacing them. Off by default (and an absent key reads
-  // as false) so existing users see no change.
+  // genres instead of replacing them. On by default; readers use `!== false`.
+  // getLocalConfig migrates configs saved before the default flipped (marker
+  // genres_default_v2).
   preserve_existing_genres: true,
+  genres_default_v2: true,
   // #54: when true, tags outside the approved vocabulary survive the ABS push
   // with their original casing instead of being dropped by mapTag. Off by
   // default (and an absent key reads as false).
@@ -69,7 +71,18 @@ const DEFAULT_CONFIG = {
 export function getLocalConfig() {
   try {
     const stored = localStorage.getItem(CONFIG_KEY);
-    if (stored) return { ...DEFAULT_CONFIG, ...JSON.parse(stored) };
+    if (stored) {
+      const cfg = { ...DEFAULT_CONFIG, ...JSON.parse(stored) };
+      // One-time migration: older saves persisted preserve_existing_genres:false
+      // (the old default). Flip it once, then the marker protects later choices.
+      const raw = JSON.parse(stored);
+      if (raw.genres_default_v2 !== true) {
+        cfg.preserve_existing_genres = true;
+        cfg.genres_default_v2 = true;
+        try { localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg)); } catch (e) { /* non-fatal */ }
+      }
+      return cfg;
+    }
   } catch (e) {
     console.warn('Failed to load config:', e);
   }
@@ -877,19 +890,20 @@ If it's part of a series, fill in the name and book number. If standalone, use n
 
     // Helper: build result from parsed classification
     const buildResult = (book, parsed, dna_tags = []) => {
-      // Empty AI answer (no genres and no tags): report a failure rather than a
-      // success the applier could mistake for "clear everything".
-      if (!(parsed.genres || []).length && !(parsed.tags || []).length) {
+      const age_tags = parseAgeTags(parsed.age_rating);
+      // Empty AI answer (no genres, tags, dna or age tags): report a failure
+      // rather than a success the applier could mistake for "clear everything".
+      if (!(parsed.genres || []).length && !(parsed.tags || []).length && !dna_tags.length && !age_tags.length) {
         return { id: book.id, success: false, error: 'Empty AI answer', errorDetail: { stage: 'classify', kind: 'parse', message: 'Empty AI answer' } };
       }
       return {
-      id: book.id, success: true,
-      genres: parsed.genres || [], tags: parsed.tags || [],
-      age_tags: parseAgeTags(parsed.age_rating), dna_tags,
-      themes: parsed.themes || [], tropes: parsed.tropes || [],
-      age_category: parsed.age_rating?.age_category || null,
-      content_rating: parsed.age_rating?.content_rating || null,
-      intended_for_kids: parsed.age_rating?.intended_for_kids || false,
+        id: book.id, success: true,
+        genres: parsed.genres || [], tags: parsed.tags || [],
+        age_tags, dna_tags,
+        themes: parsed.themes || [], tropes: parsed.tropes || [],
+        age_category: parsed.age_rating?.age_category || null,
+        content_rating: parsed.age_rating?.content_rating || null,
+        intended_for_kids: parsed.age_rating?.intended_for_kids || false,
       };
     };
 

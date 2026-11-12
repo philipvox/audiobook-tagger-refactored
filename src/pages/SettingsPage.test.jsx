@@ -98,8 +98,8 @@ describe('SettingsPage handleSave (H6)', () => {
   });
 });
 
-// #54: "supplement genres instead of replacing". The flag must default to OFF
-// (an absent key reads as false) and persist through the normal save path.
+// #54: "supplement genres instead of replacing". The flag defaults to ON
+// (an absent key reads as true) and persist through the normal save path.
 describe('SettingsPage preserve_existing_genres toggle (#54)', () => {
   beforeEach(() => {
     vi.clearAllMocks();

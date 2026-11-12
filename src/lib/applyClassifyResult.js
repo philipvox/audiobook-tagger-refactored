@@ -1,7 +1,7 @@
 // applyClassifyResult - pure genres/tags application for a classify result.
 //
 // Composes mergeGenres + mergeClassifyTags. Guarantees (audit C-1, H-1):
-//   - an empty AI answer (no genres AND no tags) leaves metadata untouched and
+//   - an empty AI answer (no genres, tags, dna_tags or age_tags) leaves metadata untouched and
 //     reports error 'empty-answer';
 //   - Force only discards an existing array when the AI supplied a non-empty
 //     replacement for that same array;
@@ -20,7 +20,7 @@ export function applyClassifyResult(
   { force = false, preserveGenres = true, originalTags = undefined } = {}
 ) {
   const r = result || {};
-  if (!nonEmpty(r.genres) && !nonEmpty(r.tags)) {
+  if (!nonEmpty(r.genres) && !nonEmpty(r.tags) && !nonEmpty(r.dna_tags) && !nonEmpty(r.age_tags)) {
     return { metadata, changedFields: [], error: 'empty-answer' };
   }
 

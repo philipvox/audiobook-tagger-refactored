@@ -44,3 +44,22 @@ describe('applyClassifyResult - never empties genres or tags', () => {
     expect(m).toEqual(meta());
   });
 });
+
+describe('applyClassifyResult - dna-only and age-only results', () => {
+  it('merges dna tags with no genres/tags, leaving genres and other tags alone, no error', () => {
+    const m = { genres: ['Fantasy'], tags: ['curated', 'dna:old:x'] };
+    const out = applyClassifyResult(m, { genres: [], tags: [], dna_tags: ['dna:new:y'] }, { force: true });
+    expect(out.error).toBeUndefined();
+    expect(out.metadata.genres).toEqual(['Fantasy']);
+    expect(out.metadata.tags).toEqual(['curated', 'dna:new:y']);
+    expect(out.changedFields).toEqual(['tags']);
+  });
+
+  it('merges age tags with no genres/tags', () => {
+    const m = { genres: ['Fantasy'], tags: ['curated', 'age-adult'] };
+    const out = applyClassifyResult(m, { age_tags: ['age-childrens'] }, {});
+    expect(out.error).toBeUndefined();
+    expect(out.metadata.tags).toEqual(['curated', 'age-childrens']);
+    expect(out.metadata.genres).toEqual(['Fantasy']);
+  });
+});

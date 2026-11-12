@@ -1266,9 +1266,8 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                   Keep the genres a book already has (e.g. matched from Audible) and add the AI's
                   suggestions alongside them, instead of replacing them. Existing genres are never
                   removed, so a book already at the {MAX_GENRES}-genre limit keeps exactly what it
-                  has. "Force" re-classification still starts fresh. Genres are also pushed to
-                  AudiobookShelf as-is, bypassing the approved-list filter above. Note:
-                  AudiobookShelf adds every genre it receives to your library-wide genre list.
+                  has. "Force" re-classification replaces genres only when the AI returns new
+                  ones. Note: AudiobookShelf adds every genre it receives to your library-wide genre list.
                 </p>
 
                 <Toggle
