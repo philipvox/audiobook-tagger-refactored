@@ -224,6 +224,9 @@ export function useScan() {
   const [scanning, setScanning] = useState(false);
   // #62: true while the running operation is a local folder scan.
   const [scanningFolder, setScanningFolder] = useState(false);
+  // I-1/I-2: which operation the scan bar is showing ('scan', 'rescan',
+  // 'import' or 'push'), so its wording names it.
+  const [scanOperation, setScanOperation] = useState('scan');
   // H-7: the cancel token (lib/cancel.js) of the operation the scan progress
   // bar is showing (import, push, pipeline rescan); null while the running
   // operation cannot be cancelled, so the bar offers no Cancel for it.
@@ -344,6 +347,7 @@ export function useScan() {
     const bar = beginScanCancel();
     const cancel = bar.token;
     setScanning(true);
+    setScanOperation('scan');
     setScanningFolder(true);
     const startTime = Date.now();
     setScanProgress({
@@ -355,11 +359,14 @@ export function useScan() {
       covers_found: 0,
     });
 
-    // Poll the Rust progress counters once a second.
+    // Poll the Rust progress counters once a second. `finished` is set when
+    // the scan settles, so a poll still in flight cannot write progress back
+    // after the bar was reset (the ghost bar).
+    let finished = false;
     progressIntervalRef.current = setInterval(async () => {
       try {
         const progress = await callBackend('get_scan_progress');
-        if (cancel.cancelled) return; // keep showing "Cancelling..."
+        if (finished || cancel.cancelled) return; // keep showing "Cancelling..."
         const elapsed = (Date.now() - startTime) / 1000;
         const rate = progress.current > 0 && elapsed > 0 ? progress.current / elapsed : 0;
         setScanProgress(prev => ({
@@ -393,6 +400,7 @@ export function useScan() {
       console.error('Scan failed:', error);
       throw error;
     } finally {
+      finished = true;
       if (progressIntervalRef.current) {
         clearInterval(progressIntervalRef.current);
         progressIntervalRef.current = null;
@@ -456,6 +464,7 @@ export function useScan() {
       }
 
       setScanning(true);
+      setScanOperation('rescan');
       const startTime = Date.now();
       setScanProgress({
         current: 0,
@@ -584,6 +593,7 @@ export function useScan() {
     const cancel = bar.token;
     try {
       setScanning(true);
+      setScanOperation('import');
       const startTime = Date.now();
       const enriching = options.enrichWithCustomProviders ? ' + custom providers' : '';
       setScanProgress({
@@ -672,6 +682,7 @@ export function useScan() {
 
       // Set up progress listener
       setScanning(true);
+      setScanOperation('push');
       setScanProgress({
         current: 0,
         total: groupsToPush.length,
@@ -757,6 +768,7 @@ export function useScan() {
     let pushOutcome = null; // #60: auto-push result, returned to the caller
     try {
       setScanning(true);
+      setScanOperation('rescan');
       const startTime = Date.now();
       setScanProgress({
         current: 0,
@@ -868,6 +880,7 @@ export function useScan() {
     const cancel = bar.token;
     try {
       setScanning(true);
+      setScanOperation('rescan');
       const startTime = Date.now();
       setScanProgress({
         current: 0,
@@ -1031,6 +1044,7 @@ export function useScan() {
   return {
     scanning,
     scanningFolder,
+    scanOperation,
     scanCancellable,
     scanProgress,
     calculateETA,

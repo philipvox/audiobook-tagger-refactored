@@ -2,10 +2,22 @@
 import { useState, useEffect, useRef } from 'react';
 import { RefreshCw, Save, AlertTriangle, ChevronDown, ChevronUp, X } from 'lucide-react';
 
-export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA }) {
+// I-1/I-2: the scan bar is shared by every long operation useScan runs; it
+// names the one that is running.
+const SCAN_OPERATIONS = {
+  scan: { unit: 'files', running: 'Scanning', waiting: 'Reading audio files' },
+  rescan: { unit: 'files', running: 'Rescanning', waiting: 'Rescanning' },
+  import: { unit: 'books', running: 'Importing', waiting: 'Importing from AudiobookShelf' },
+  push: { unit: 'books', running: 'Pushing', waiting: 'Pushing to AudiobookShelf' },
+};
+
+export function ProgressBar({ type = 'scan', operation = 'scan', progress, onCancel, calculateETA }) {
   const [showErrors, setShowErrors] = useState(false);
 
-  const isVisible = progress.total > 0;
+  // The scan bar is rendered only while its operation runs, so it shows (with
+  // Cancel) before the total is known, as an indeterminate bar (I-1).
+  const indeterminate = type === 'scan' && !(progress.total > 0);
+  const isVisible = progress.total > 0 || type === 'scan';
 
   if (!isVisible) return null;
 
@@ -22,7 +34,12 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
               <div className="flex items-center gap-2">
                 <RefreshCw className="w-5 h-5 text-blue-600 animate-spin" />
                 <span className="font-semibold text-gray-100">
-                  Scanning {progress.current} of {progress.total} files
+                  {(() => {
+                    const op = SCAN_OPERATIONS[operation] || SCAN_OPERATIONS.scan;
+                    return indeterminate
+                      ? `${op.waiting}...`
+                      : `${op.running} ${progress.current} of ${progress.total} ${op.unit}`;
+                  })()}
                 </span>
               </div>
 
@@ -55,7 +72,7 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
                 </div>
               )}
               <div className="text-sm text-gray-400">
-                {Math.round((progress.current / progress.total) * 100)}% complete
+                {indeterminate ? 'Working' : `${Math.round((progress.current / progress.total) * 100)}% complete`}
                 {progress.covers_found > 0 && (
                   <span className="ml-2 text-green-600">• {progress.covers_found} covers</span>
                 )}
@@ -66,9 +83,9 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
           <div className="mb-3">
             <div className="w-full bg-gray-600 rounded-full h-3">
               <div
-                className="bg-gradient-to-r from-blue-500 to-blue-600 h-3 rounded-full transition-all duration-300"
+                className={`bg-gradient-to-r from-blue-500 to-blue-600 h-3 rounded-full transition-all duration-300${indeterminate ? ' animate-pulse' : ''}`}
                 style={{
-                  width: `${progress.total > 0 ? Math.max(2, (progress.current / progress.total) * 100) : 0}%`
+                  width: `${indeterminate ? 100 : Math.max(2, (progress.current / progress.total) * 100)}%`
                 }}
               ></div>
             </div>
@@ -175,7 +192,7 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
 
             <div className="text-right">
               <div className="text-sm text-gray-400">
-                {Math.round((progress.current / progress.total) * 100)}% complete
+                {indeterminate ? 'Working' : `${Math.round((progress.current / progress.total) * 100)}% complete`}
               </div>
             </div>
           </div>
@@ -238,7 +255,7 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
 
             <div className="text-right">
               <div className="text-sm text-gray-400">
-                {Math.round((progress.current / progress.total) * 100)}% complete
+                {indeterminate ? 'Working' : `${Math.round((progress.current / progress.total) * 100)}% complete`}
               </div>
             </div>
           </div>
@@ -301,7 +318,7 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
 
             <div className="text-right">
               <div className="text-sm text-gray-400">
-                {Math.round((progress.current / progress.total) * 100)}% complete
+                {indeterminate ? 'Working' : `${Math.round((progress.current / progress.total) * 100)}% complete`}
               </div>
             </div>
           </div>

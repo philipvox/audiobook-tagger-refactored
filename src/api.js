@@ -438,6 +438,10 @@ async function pushAbsHandler(args) {
     request: (path, options) => absApi(baseUrl, token, path, options),
     cfg: config,
     shouldStop: () => isCancelled(args.cancel),
+    // I-2: per-book progress for the push modal and the scan bar.
+    onProgress: (current, total, title) => emitEvent('push_progress', {
+      current, total, message: title ? `Pushed ${title}` : `Pushed ${current} of ${total}`,
+    }),
   });
 }
 
@@ -485,12 +489,18 @@ const HANDLERS = {
     // `cancelled`.
     const cancel = args?.cancel;
     const cancelledResult = { cancelled: true, groups: [], total: 0 };
+    // I-1: progress for the scan bar (useScan subscribes to import_progress).
+    let knownTotal = 0;
+    const progress = (current, total, message, phase) => emitEvent('import_progress', { current, total, message, phase });
     while (true) {
+      progress(allItems.length, knownTotal, `Fetching books from AudiobookShelf (page ${page + 1})...`, 'fetch');
       const data = await absApi(baseUrl, token, `/api/libraries/${libraryId}/items?limit=${limit}&page=${page}&expanded=1`);
       if (isCancelled(cancel)) return cancelledResult;
       const items = data.results || [];
       const total = data.total || 0;
+      if (total) knownTotal = total;
       allItems.push(...items);
+      progress(allItems.length, knownTotal || allItems.length, `Fetched ${allItems.length}${knownTotal ? ` of ${knownTotal}` : ''} books`, 'fetch');
       page++;
       if (items.length === 0) break;
       if (total && allItems.length >= total) break;
@@ -499,7 +509,14 @@ const HANDLERS = {
     }
 
     // Convert ABS items to book groups (shared builder, see lib/absGroup.js).
-    const groups = await absItemsToBookGroups(baseUrl, token, allItems, undefined, undefined, { shouldStop: () => isCancelled(cancel) });
+    const groups = await absItemsToBookGroups(
+      baseUrl, token, allItems,
+      (index, total) => {
+        if ((index + 1) % 100 === 0 || index + 1 === total) progress(index + 1, total, `Building ${index + 1} of ${total} books`, 'build');
+      },
+      (done, total) => progress(done, total, `Reading series ${done} of ${total}`, 'series'),
+      { shouldStop: () => isCancelled(cancel) },
+    );
     if (isCancelled(cancel)) return cancelledResult;
     return { groups, total: groups.length };
   },

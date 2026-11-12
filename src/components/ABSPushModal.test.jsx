@@ -91,7 +91,8 @@ describe('ABSPushModal copy and counts (M-10)', () => {
     const files = Array.from({ length: 12 }, (_, i) => ({
       id: `f${i}`, filename: `part${i}.mp3`, changes: { title: { old: 'a', new: 'b' } },
     }));
-    const twelve = [{ id: 'b1', metadata: { title: 'Long Book' }, files }];
+    // M-e: the modal counts ABS books only, so the fixture is an ABS book.
+    const twelve = [{ id: 'b1', abs_id: 'b1', source: 'abs', metadata: { title: 'Long Book' }, files }];
     render(<ABSPushModal isOpen groups={twelve} pushing={false} onClose={vi.fn()} onConfirm={vi.fn()} />);
     expect(screen.getByText('1 title update')).toBeInTheDocument();
     expect(screen.queryByText(/12 title/)).not.toBeInTheDocument();

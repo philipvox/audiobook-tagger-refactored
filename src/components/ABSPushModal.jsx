@@ -1,10 +1,12 @@
 import { useState, useMemo } from 'react';
-import { X, UploadCloud, AlertTriangle, CheckCircle, BookOpen, User, Mic2, Tag, Image } from 'lucide-react';
+import { X, UploadCloud, AlertTriangle, CheckCircle, BookOpen, User, Mic2, Tag, Image, Library, FileText, Calendar } from 'lucide-react';
+import { isAbsBacked } from '../lib/absPush';
 
 // H-7: while a push runs this modal covers the progress bar, so its own
 // Cancel becomes "Cancel push" and calls onCancelPush (books in flight finish,
 // the rest are skipped). The modal closes when the push settles.
-export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups, pushing }) {
+// I-2: `progress` ({ current, total }) is the running push's count.
+export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups, pushing, progress = null }) {
   const [confirmText, setConfirmText] = useState('');
   // H-7: disabled from the first click until the push settles, so a second
   // click before the parent reports `pushing` cannot start a second push.
@@ -20,20 +22,36 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups,
     let authorChanges = 0;
     let narratorChanges = 0;
     let genreChanges = 0;
+    let tagChanges = 0;
+    let seriesChanges = 0;
+    let descriptionChanges = 0;
+    let yearChanges = 0;
     let coverChanges = 0;
     let lowConfidenceCount = 0;
     const lowConfidenceBooks = [];
 
-    groups.forEach(group => {
-      const metadata = group.metadata;
+    // M-e: only ABS books are pushed; local books are skipped (Write Tags
+    // updates their files).
+    const absGroups = groups.filter(isAbsBacked);
+
+    absGroups.forEach(group => {
+      const metadata = group.metadata || {};
 
       // M-10: count books, not files. A multi-file book stages the same
       // change on every file but is one ABS item and one update.
-      const changed = (...keys) => (group.files || []).some(file => keys.some(k => file.changes?.[k]));
+      // M-e: changedFields (metadata names) first, so a book with no files
+      // still counts; file.changes (tag names) as the fallback.
+      const fields = new Set(group.changedFields || []);
+      const changed = (...keys) => keys.some(k => fields.has(k))
+        || (group.files || []).some(file => keys.some(k => file.changes?.[k]));
       if (changed('title')) titleChanges++;
       if (changed('author', 'artist')) authorChanges++;
       if (changed('narrator')) narratorChanges++;
-      if (changed('genre')) genreChanges++;
+      if (changed('genre', 'genres')) genreChanges++;
+      if (changed('tags', 'dna', 'age')) tagChanges++;
+      if (changed('series', 'sequence')) seriesChanges++;
+      if (changed('description')) descriptionChanges++;
+      if (changed('year', 'published_year')) yearChanges++;
 
       // Check for cover
       if (metadata.cover_url) coverChanges++;
@@ -51,11 +69,16 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups,
     });
 
     return {
-      totalBooks: groups.length,
+      totalBooks: absGroups.length,
+      localBooks: groups.length - absGroups.length,
       titleChanges,
       authorChanges,
       narratorChanges,
       genreChanges,
+      tagChanges,
+      seriesChanges,
+      descriptionChanges,
+      yearChanges,
       coverChanges,
       lowConfidenceCount,
       lowConfidenceBooks
@@ -119,7 +142,12 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups,
           <div className="bg-black/50 rounded-xl p-4 border border-gray-800">
             <div className="text-center mb-4">
               <span className="text-4xl font-bold text-gray-100">{summary.totalBooks}</span>
-              <span className="text-gray-400 ml-2">books will be pushed</span>
+              <span className="text-gray-400 ml-2">{summary.totalBooks === 1 ? 'book' : 'books'} will be pushed</span>
+              {summary.localBooks > 0 && (
+                <p className="text-xs text-gray-500 mt-1">
+                  {summary.localBooks} local {summary.localBooks === 1 ? 'book' : 'books'} will be skipped (use Write Tags for local files).
+                </p>
+              )}
             </div>
 
             {/* Change breakdown */}
@@ -146,6 +174,30 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups,
                 <div className="flex items-center gap-2 text-gray-300">
                   <Tag className="w-4 h-4 text-orange-500" />
                   <span>{summary.genreChanges} genre {summary.genreChanges === 1 ? 'update' : 'updates'}</span>
+                </div>
+              )}
+              {summary.tagChanges > 0 && (
+                <div className="flex items-center gap-2 text-gray-300">
+                  <Tag className="w-4 h-4 text-amber-500" />
+                  <span>{summary.tagChanges} tag {summary.tagChanges === 1 ? 'update' : 'updates'}</span>
+                </div>
+              )}
+              {summary.seriesChanges > 0 && (
+                <div className="flex items-center gap-2 text-gray-300">
+                  <Library className="w-4 h-4 text-indigo-400" />
+                  <span>{summary.seriesChanges} series {summary.seriesChanges === 1 ? 'update' : 'updates'}</span>
+                </div>
+              )}
+              {summary.descriptionChanges > 0 && (
+                <div className="flex items-center gap-2 text-gray-300">
+                  <FileText className="w-4 h-4 text-cyan-400" />
+                  <span>{summary.descriptionChanges} description {summary.descriptionChanges === 1 ? 'update' : 'updates'}</span>
+                </div>
+              )}
+              {summary.yearChanges > 0 && (
+                <div className="flex items-center gap-2 text-gray-300">
+                  <Calendar className="w-4 h-4 text-yellow-400" />
+                  <span>{summary.yearChanges} year {summary.yearChanges === 1 ? 'update' : 'updates'}</span>
                 </div>
               )}
             </div>
@@ -241,7 +293,7 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups,
             {busy ? (
               <>
                 <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                Pushing...
+                {progress?.total > 0 ? `Pushed ${progress.current || 0} of ${progress.total}` : 'Pushing...'}
               </>
             ) : (
               <>

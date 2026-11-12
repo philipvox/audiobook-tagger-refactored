@@ -539,12 +539,14 @@ export async function pushOneAbsItem(item, { request, cfg = {} }) {
  * { snapshot, fields } of each book skipped because ABS already matched,
  * both keyed by book id.
  *
+ * I-2: `onProgress(settled, total, title)` is called as each book settles.
+ *
  * H-7: once `shouldStop()` is true no new book starts; books in flight finish
  * and every book not started is skipped with reason 'cancelled' (the result
  * then carries `cancelled: true`). Snapshots for the books that were written
  * are returned either way, so the caller can apply them.
  */
-export async function pushAbsItems(items, { request, cfg = {}, shouldStop } = {}) {
+export async function pushAbsItems(items, { request, cfg = {}, shouldStop, onProgress } = {}) {
   const onError = (err, item) => {
     const { id, title } = describeItem(item);
     return { status: 'failed', entry: { id, title, error: String(err?.message || err) } };
@@ -553,7 +555,16 @@ export async function pushAbsItems(items, { request, cfg = {}, shouldStop } = {}
     const { id, title } = describeItem(item);
     return { status: 'skipped', entry: { id, title, reason: CANCELLED_REASON }, stopped: true };
   };
-  const outcomes = await runPool(items || [], (item) => pushOneAbsItem(item, { request, cfg }), pushConcurrency(cfg), onError, { shouldStop, onStopped });
+  // I-2: onProgress(settled, total, title) as each started book settles.
+  const total = (items || []).length;
+  let settled = 0;
+  const worker = async (item) => {
+    const out = await pushOneAbsItem(item, { request, cfg });
+    settled += 1;
+    try { onProgress?.(settled, total, out?.entry?.title || ''); } catch { /* progress only */ }
+    return out;
+  };
+  const outcomes = await runPool(items || [], worker, pushConcurrency(cfg), onError, { shouldStop, onStopped });
   const result = { updated: [], skipped: [], failed: [], snapshots: {}, refreshed: {}, pushed: {} };
   if (outcomes.some((o) => o.stopped)) result.cancelled = true;
   for (const o of outcomes) {

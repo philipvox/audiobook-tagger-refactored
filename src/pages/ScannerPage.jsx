@@ -274,6 +274,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const {
     scanning,
     scanningFolder,
+    scanOperation,
     scanProgress,
     calculateETA,
     handleScan,
@@ -2910,6 +2911,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           key={scanProgress.startTime} 
           type="scan"
+          operation={scanOperation}
           progress={scanProgress}
           // H-7: only operations that stop on a Cancel offer one.
           onCancel={scanCancellable ? cancelScan : undefined}
@@ -3138,6 +3140,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         onCancelPush={() => { if (pushCancelRef.current) requestCancel(pushCancelRef.current); }}
         groups={modals.data.push?.groups || []}
         pushing={pushing || absPushing}
+        // I-2: the running push's count (useScan fills scanProgress from push_progress).
+        progress={absPushing && scanOperation === 'push' ? scanProgress : null}
       />
 
       {/* Write Tags Preview Modal (H3) */}
