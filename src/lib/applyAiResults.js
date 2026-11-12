@@ -152,6 +152,18 @@ export function applyGenreCleanupResult(group, entry) {
 }
 
 // ---- Lookup Age ----
+// mergeClassifyTags replaces every existing age tag with the new answer. A tag
+// that was in ABS at import (originalTags) is never removed: only age tags
+// added this session are replaced. Existing order is kept, new tags appended.
+export function mergeAgeTags(existingTags, ageTags, originalTags) {
+  const merged = mergeClassifyTags(existingTags, { age_tags: ageTags }).tags;
+  const inSnapshot = new Set((Array.isArray(originalTags) ? originalTags : []).map(lower));
+  const mergedSet = new Set(merged);
+  const kept = existingTags.filter((t) => mergedSet.has(t) || inSnapshot.has(lower(t)));
+  const keptSet = new Set(kept);
+  return [...kept, ...merged.filter((t) => !keptSet.has(t))];
+}
+
 // Age tags go through mergeClassifyTags (curated tags kept, stale age tags
 // replaced). With addGenre, a non-adult age category is added as a genre via
 // mergeGenres, which never drops an existing genre.
@@ -169,9 +181,11 @@ export function applyAgeResult(group, entry, { addGenre = true } = {}) {
   const fields = [];
   const existingTags = Array.isArray(m.tags) ? m.tags : [];
   if (ageTags.length > 0) {
-    const merged = mergeClassifyTags(existingTags, { age_tags: ageTags });
-    if (!sameList(merged.tags, existingTags)) {
-      updates.tags = merged.tags;
+    // No snapshot (local files): every current tag counts as existing, same
+    // rule as applyTagResults' keepTags.
+    const tags = mergeAgeTags(existingTags, ageTags, group.abs_original?.tags ?? existingTags);
+    if (!sameList(tags, existingTags)) {
+      updates.tags = tags;
       fields.push('tags');
     }
   }
@@ -190,6 +204,16 @@ export function applyAgeResult(group, entry, { addGenre = true } = {}) {
   const next = applyMetadataToGroup(group, updates, fields);
   const changedFields = next.changedFields.includes('age') ? next.changedFields : [...next.changedFields, 'age'];
   return { group: clearStage({ ...next, changedFields }, 'age'), outcome: 'changed' };
+}
+
+// The AI Tags age sub-step: age tags only (no genre), and a failed or empty
+// age answer never replaces an error another stage (the tags step) already
+// put on the book. Only a clean age result clears an age error.
+export function applyAgeTagsResult(group, entry) {
+  const out = applyAgeResult(group, entry, { addGenre: false });
+  const bad = out.outcome === 'failed' || out.outcome === 'warning';
+  if (bad && group.lastError && group.lastError.stage !== 'age') return { group, outcome: out.outcome };
+  return out;
 }
 
 // ---- ISBN / ASIN lookup ----

@@ -25,7 +25,7 @@ import { useTagOperations } from '../hooks/useTagOperations';
 import { useBatchOperations } from '../hooks/useBatchOperations';
 import { useModals } from '../hooks/useModals';
 import { useApp } from '../context/AppContext';
-import { severityForKind, errorDetailFromException } from '../lib/errorDetail';
+import { severityForKind } from '../lib/errorDetail';
 import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
 import { keepCurrentBooksToast } from '../lib/session.js';
 import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
@@ -33,10 +33,7 @@ import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePu
 import { userClearedPatch } from '../lib/userCleared';
 import { applyClassifyResult } from '../lib/applyClassifyResult';
 import { applyTagsResultToGroup, applyDnaResultToGroup, normalizeResults } from '../lib/applyTagResults';
-import {
-  applyTitleResult, applySeriesResult, applySubtitleResult, applyGenreCleanupResult,
-  applyAgeResult, applyIsbnResult, applyAudioResult, tallyOutcomes,
-} from '../lib/applyAiResults';
+import { runEnrichAction, applyEntries } from '../lib/enrichActions';
 import { syncAllSeries } from '../lib/absPayload';
 import { applyMetadataToGroup, readFileField, setYear } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
@@ -852,32 +849,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const cleaningGenres = batch.isActive('genres');
   const genreProgress = batch.getProgress('genres');
 
-  // H-3/M-7: apply one backend result per book. Outcomes are counted from the
-  // groups as sent, outside the updater (React may run an updater twice), and
-  // the same pure applier then runs on the live groups.
-  const applyPerGroup = (sentGroups, entryFor, apply) => {
-    const pairs = sentGroups.map((g) => ({ id: g.id, outcome: apply(g, entryFor(g)).outcome }));
-    const ids = new Set(sentGroups.map((g) => g.id));
-    setGroups((prev) => prev.map((g) => (ids.has(g.id) ? apply(g, entryFor(g)).group : g)));
-    return pairs;
-  };
-
-  // M-7: one end-of-run toast, so total failure never looks like success.
-  const reportBatchOutcome = (op, pairs) => {
-    const { counts, errorResults } = tallyOutcomes(pairs);
-    const summary = summarizeBatch({ op, ...counts });
-    if (summary) {
-      const opts = (summary.hasWarnings || summary.hasFailures)
-        ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(errorResults, summary.hasFailures ? 'error' : 'warn') } }
-        : undefined;
-      toast[summary.type](summary.title, summary.message, opts);
-    }
-    return counts;
-  };
-
-  // A rejected per-book call, in the { success: false, error } shape the
-  // appliers read.
-  const rejectedEntry = (err) => ({ success: false, error: String(err?.message || err) });
+  // H-3/M-7: the per-book Enrich actions share one body (src/lib/enrichActions.js):
+  // chunk loop, per-book failure, counting outside the updater, end toast.
+  const runAction = (name, sentGroups, options = {}) =>
+    runEnrichAction(name, sentGroups, { callBackend, setGroups, toast, ...options });
 
   // ✅ GPT-powered genre cleanup for selected books (with progress)
   const handleGenreCleanup = async () => {
@@ -901,11 +876,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     logBatchStart('genres', selectedGroups.length);
 
 
-    let cleanedCount = 0;
-    let unchangedCount = 0;
-    let failedCount = 0;
-    const genrePairs = [];
-
     // Listen for per-book progress events within each chunk
     let chunkOffset = 0;
     const unlisten = subscribe('batch-progress', (d) => {
@@ -913,61 +883,23 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       batch.update('genres', { current: chunkOffset + d.current, currentBook: d.title });
     });
 
-    // Process in batches of 25 for efficiency while still showing progress
-    const batchSize = 25;
-    for (let i = 0; i < selectedGroups.length; i += batchSize) {
-      const chunk = selectedGroups.slice(i, i + batchSize);
-      chunkOffset = i;
-
-      // Update progress with current batch
-      batch.update('genres', { current: i, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
-
-      try {
-        const books = chunk.map(g => ({
-          id: g.id,
-          title: g.metadata?.title || '',
-          author: g.metadata?.author || '',
-          genres: g.metadata?.genres || [],
-          description: g.metadata?.description || null,
-        }));
-
-        const result = await callBackend('cleanup_genres_with_gpt', { books, config });
-
-        // Update groups with cleaned genres. The applier keeps any genre from
-        // the import snapshot that the answer has no replacement for.
-        const results = result?.results || [];
-        const pairs = applyPerGroup(chunk, (g) => results.find((r) => r.id === g.id), applyGenreCleanupResult);
-        genrePairs.push(...pairs);
-        cleanedCount += pairs.filter((x) => x.outcome === 'changed').length;
-        unchangedCount += pairs.filter((x) => x.outcome === 'unchanged').length;
-        failedCount += pairs.filter((x) => x.outcome === 'failed').length;
-
-        // Update progress after batch
-        batch.update('genres', {
-          current: Math.min(i + batchSize, selectedGroups.length),
-          cleaned: cleanedCount,
-          unchanged: unchangedCount,
-          failed: failedCount,
-        });
-
-      } catch (error) {
-        console.error(`Batch ${i}-${i + batchSize} failed:`, error);
-        genrePairs.push(...applyPerGroup(chunk, () => rejectedEntry(error), applyGenreCleanupResult));
-        failedCount += chunk.length;
-        batch.update('genres', {
-          current: Math.min(i + batchSize, selectedGroups.length),
-          failed: failedCount,
-        });
-      }
-    }
+    // Chunks of 25. The applier keeps any genre from the import snapshot that
+    // the answer has no replacement for.
+    const { counts } = await runAction('genres', selectedGroups, {
+      ctx: { config },
+      onChunkStart: (chunk, offset) => {
+        chunkOffset = offset;
+        batch.update('genres', { current: offset, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
+      },
+      onChunkDone: (done, c) => batch.update('genres', { current: done, cleaned: c.succeeded, unchanged: c.skipped, failed: c.failed }),
+    });
 
     unlisten();
-    reportBatchOutcome('genres', genrePairs);
     logBatchEnd('genres', {
       books: selectedGroups.length,
-      cleaned: cleanedCount,
-      unchanged: unchangedCount,
-      failed: failedCount,
+      cleaned: counts.succeeded,
+      unchanged: counts.skipped,
+      failed: counts.failed,
     });
 
     // Clear progress after a short delay
@@ -1009,71 +941,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     logBatchStart('titles', selectedGroups.length);
 
 
-    let successCount = 0;
-    let failedCount = 0;
-    const titlePairs = [];
+    // Chunks of 25 in parallel. resolve_title returns { success, result }; the
+    // applier sets only title/author/subtitle (series is Fix Series' job).
+    const { counts } = await runAction('titles', selectedGroups, {
+      onChunkStart: (chunk, offset) => batch.update('titles', { current: offset, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') }),
+      onChunkDone: (done, c) => batch.update('titles', { current: done, success: c.succeeded + c.skipped + c.warnings, failed: c.failed }),
+    });
 
-    // Process in batches of 25 for efficiency
-    const batchSize = 25;
-    for (let i = 0; i < selectedGroups.length; i += batchSize) {
-      const chunk = selectedGroups.slice(i, i + batchSize);
-
-      // Update progress with current batch
-      batch.update('titles', { current: i, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') });
-
-      // Process batch in parallel
-      const results = await Promise.allSettled(
-        chunk.map(async (group) => {
-          try {
-            // Extract folder path from first file if available, or use source_path for ABS imports
-            const folderPath = group.files?.[0]?.path?.split('/').slice(0, -1).join('/')
-              || group.metadata?.source_path
-              || null;
-
-            const result = await callBackend('resolve_title', {
-              request: {
-                filename: group.files?.[0]?.filename || null,
-                folder_name: group.group_name,
-                folder_path: folderPath,
-                current_title: group.metadata?.title || '',
-                current_author: group.metadata?.author || '',
-                current_subtitle: group.metadata?.subtitle || null,
-                current_series: group.metadata?.series || null,
-                current_sequence: group.metadata?.sequence || null,
-                current_narrator: group.metadata?.narrator || null,
-                additional_context: null
-              }
-            });
-            return { groupId: group.id, result };
-          } catch (err) {
-            console.error(`Failed to fix title for ${group.group_name}:`, err);
-            return { groupId: group.id, result: rejectedEntry(err) };
-          }
-        })
-      );
-
-      // H-3: resolve_title returns { success, result }; the applier sets only
-      // title/author/subtitle (series is Fix Series' job) and keeps the current
-      // value for a null, empty or placeholder answer.
-      const entryFor = (g) => results.find((r) => r.status === 'fulfilled' && r.value.groupId === g.id)?.value.result;
-      const pairs = applyPerGroup(chunk, entryFor, applyTitleResult);
-      titlePairs.push(...pairs);
-      successCount += pairs.filter((x) => x.outcome !== 'failed').length;
-      failedCount += pairs.filter((x) => x.outcome === 'failed').length;
-
-      // Update progress after batch
-      batch.update('titles', {
-        current: Math.min(i + batchSize, selectedGroups.length),
-        success: successCount,
-        failed: failedCount,
-      });
-    }
-
-    reportBatchOutcome('titles', titlePairs);
     logBatchEnd('titles', {
       books: selectedGroups.length,
-      succeeded: successCount,
-      failed: failedCount,
+      succeeded: counts.succeeded + counts.skipped + counts.warnings,
+      failed: counts.failed,
     });
     batch.end('titles');
   };
@@ -1088,11 +966,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     logBatchStart('subtitles', selectedGroups.length);
 
 
-    let fixedCount = 0;
-    let skippedCount = 0;
-    let failedCount = 0;
-    const subtitlePairs = [];
-
     // Listen for per-book progress events within each chunk
     let subtitleChunkOffset = 0;
     const unlistenSubtitles = subscribe('batch-progress', (d) => {
@@ -1100,59 +973,22 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       batch.update('subtitles', { current: subtitleChunkOffset + d.current, currentBook: d.title });
     });
 
-    // Process in batches of 10 (lower due to Audible rate limits)
-    const batchSize = 10;
-    for (let i = 0; i < selectedGroups.length; i += batchSize) {
-      const chunk = selectedGroups.slice(i, i + batchSize);
-      subtitleChunkOffset = i;
-
-      // Update progress with current batch
-      batch.update('subtitles', { current: i, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
-
-      try {
-        const books = chunk.map(g => ({
-          id: g.id,
-          title: g.metadata?.title || '',
-          author: g.metadata?.author || '',
-          current_subtitle: g.metadata?.subtitle || null,
-        }));
-
-        const result = await callBackend('fix_subtitles_batch', { books, config, force: forceFresh });
-
-        // Update groups with new subtitles (failed books get lastError).
-        const results = result?.results || [];
-        const pairs = applyPerGroup(chunk, (g) => results.find((r) => r.id === g.id), applySubtitleResult);
-        subtitlePairs.push(...pairs);
-        fixedCount += pairs.filter((x) => x.outcome === 'changed').length;
-        skippedCount += pairs.filter((x) => x.outcome === 'unchanged').length;
-        failedCount += pairs.filter((x) => x.outcome === 'failed').length;
-
-        // Update progress after batch
-        batch.update('subtitles', {
-          current: Math.min(i + batchSize, selectedGroups.length),
-          fixed: fixedCount,
-          skipped: skippedCount,
-          failed: failedCount,
-        });
-
-      } catch (error) {
-        console.error(`Batch ${i}-${i + batchSize} failed:`, error);
-        subtitlePairs.push(...applyPerGroup(chunk, () => rejectedEntry(error), applySubtitleResult));
-        failedCount += chunk.length;
-        batch.update('subtitles', {
-          current: Math.min(i + batchSize, selectedGroups.length),
-          failed: failedCount,
-        });
-      }
-    }
+    // Chunks of 10 (Audible rate limits). Failed books get lastError.
+    const { counts } = await runAction('subtitles', selectedGroups, {
+      ctx: { config, force: forceFresh },
+      onChunkStart: (chunk, offset) => {
+        subtitleChunkOffset = offset;
+        batch.update('subtitles', { current: offset, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
+      },
+      onChunkDone: (done, c) => batch.update('subtitles', { current: done, fixed: c.succeeded, skipped: c.skipped, failed: c.failed }),
+    });
 
     unlistenSubtitles();
-    reportBatchOutcome('subtitles', subtitlePairs);
     logBatchEnd('subtitles', {
       books: selectedGroups.length,
-      fixed: fixedCount,
-      skipped: skippedCount,
-      failed: failedCount,
+      fixed: counts.succeeded,
+      skipped: counts.skipped,
+      failed: counts.failed,
     });
 
     // Clear progress after a short delay
@@ -1467,23 +1303,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     batch.start('audio_check', { total: needsProcessing.length });
     logBatchStart('audio_check', needsProcessing.length);
 
-    const items = needsProcessing.map(g => ({
-      item_id: g.id || g.group_name,
-      source: g.id ? 'abs' : 'local',
-      title: g.metadata?.title || null,
-      author: g.metadata?.author || null,
-      file_ino: g.files?.[0]?.ino || null,
-      file_path: g.files?.[0]?.path || null,
-      abs_base_url: config?.abs_base_url || null,
-      abs_api_token: config?.abs_api_token || null,
-      openai_api_key: config?.openai_api_key || null,
-      use_local_ai: config?.use_local_ai || false,
-      ollama_model: config?.ollama_model || null,
-      ollama_base_url: config?.ollama_base_url || null,
-      use_local_whisper: config?.use_local_whisper || false,
-      whisper_model: config?.whisper_model || 'base',
-    }));
-
     // Listen for Tauri progress events with stage tracking
     let tauriUnlisten = null;
     try {
@@ -1503,23 +1322,13 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     } catch (e) { /* not in Tauri */ }
 
     try {
-      const results = await callBackend('batch_extract_audio_intros', { items, force: forceFresh });
-
-      const resultMap = new Map((results || []).map(r => [r.item_id, r]));
-
-      // M-7: count outside the updater (it used to count inside it, so the
-      // toast read 0) and report books whose audio could not be transcribed.
-      // A placeholder value ("Unknown") counts as missing, same as the skip gate.
-      const pairs = applyPerGroup(
-        needsProcessing,
-        (g) => resultMap.get(g.id || g.group_name),
-        (g, r) => applyAudioResult(g, r, field, forceFresh)
-      );
-      const updatedCount = pairs.filter((x) => x.outcome === 'changed').length;
-      const audioFailed = pairs.filter((x) => x.outcome === 'failed').length;
-
-      logBatchEnd('audio_check', { books: needsProcessing.length, field, updated: updatedCount, failed: audioFailed });
-      reportBatchOutcome('audio_check', pairs);
+      // One backend call for all books; a book with no transcript is a
+      // per-book failure. Placeholder values ("Unknown") count as missing,
+      // same as the skip gate above.
+      const { counts } = await runAction('audio_check', needsProcessing, {
+        ctx: { config, force: forceFresh, field },
+      });
+      logBatchEnd('audio_check', { books: needsProcessing.length, field, updated: counts.succeeded, failed: counts.failed });
     } catch (error) {
       logEvent('batch', 'audio_check aborted', { error: String(error?.message || error) });
       toast.error(`Check ${label}`, String(error));
@@ -1539,69 +1348,20 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     logBatchStart('series', selectedGroups.length);
 
 
-    let successCount = 0;
-    let failedCount = 0;
-    // A book whose series list could not be read is not sent to the AI: any
-    // change could drop a series. The applier marks it skipped.
-    const seriesPairs = applyPerGroup(
-      selectedGroups.filter((g) => g.metadata?.series_unresolved === true),
-      () => undefined,
-      applySeriesResult
-    );
-    const lookupGroups = selectedGroups.filter((g) => g.metadata?.series_unresolved !== true);
-    const unresolvedCount = selectedGroups.length - lookupGroups.length;
+    // Chunks of 3 in parallel. The applier replaces the primary series in place
+    // (all_series keeps one entry per series); a book whose series list is
+    // unknown is skipped without an AI call.
+    const { counts } = await runAction('series', selectedGroups, {
+      onChunkStart: (chunk, offset) => batch.update('series', { current: offset, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') }),
+      onChunkDone: (done, c) => batch.update('series', { current: done, success: c.succeeded + c.skipped + c.warnings, failed: c.failed }),
+    });
 
-    // Process in batches of 3 (series lookup is slower due to Audible API)
-    const batchSize = 3;
-    for (let i = 0; i < lookupGroups.length; i += batchSize) {
-      const chunk = lookupGroups.slice(i, i + batchSize);
-
-      // Update progress with current batch
-      batch.update('series', { current: unresolvedCount + i, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') });
-
-      // Process batch in parallel
-      const results = await Promise.allSettled(
-        chunk.map(async (group) => {
-          try {
-            const result = await callBackend('resolve_series', {
-              request: {
-                title: group.metadata?.title || group.group_name,
-                author: group.metadata?.author || '',
-                current_series: group.metadata?.series || null,
-                current_sequence: group.metadata?.sequence || null,
-              }
-            });
-            return { groupId: group.id, result };
-          } catch (err) {
-            console.error(`Failed to fix series for ${group.group_name}:`, err);
-            return { groupId: group.id, result: rejectedEntry(err) };
-          }
-        })
-      );
-
-      // H-3/M-5: resolve_series returns { success, result }; the applier
-      // replaces the primary series in place (all_series keeps one entry per
-      // series) and keeps the current series for a null or placeholder answer.
-      const entryFor = (g) => results.find((r) => r.status === 'fulfilled' && r.value.groupId === g.id)?.value.result;
-      const pairs = applyPerGroup(chunk, entryFor, applySeriesResult);
-      seriesPairs.push(...pairs);
-      successCount += pairs.filter((x) => x.outcome !== 'failed').length;
-      failedCount += pairs.filter((x) => x.outcome === 'failed').length;
-
-      // Update progress after batch
-      batch.update('series', {
-        current: unresolvedCount + Math.min(i + batchSize, lookupGroups.length),
-        success: successCount,
-        failed: failedCount,
-      });
-    }
-
-    reportBatchOutcome('series', seriesPairs);
     logBatchEnd('series', {
       books: selectedGroups.length,
-      succeeded: successCount,
-      failed: failedCount,
-      skipped: unresolvedCount,
+      succeeded: counts.succeeded,
+      unchanged: counts.skipped,
+      warnings: counts.warnings,
+      failed: counts.failed,
     });
     batch.end('series');
   };
@@ -1616,61 +1376,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     logBatchStart('age', selectedGroups.length);
 
 
-    let successCount = 0;
-    let failedCount = 0;
-    const agePairs = [];
+    // Chunks of 2 (web search is slow). Age tags go in through mergeClassifyTags
+    // (snapshot age tags kept), the age genre through mergeGenres.
+    const { counts } = await runAction('age', selectedGroups, {
+      onChunkStart: (chunk, offset) => batch.update('age', { current: offset, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') }),
+      onChunkDone: (done, c) => batch.update('age', { current: done, success: c.succeeded + c.skipped, failed: c.failed + c.warnings }),
+    });
 
-    // Process in batches of 2 (web search is slow)
-    const batchSize = 2;
-    for (let i = 0; i < selectedGroups.length; i += batchSize) {
-      const chunk = selectedGroups.slice(i, i + batchSize);
-
-      // Update progress with current batch
-      batch.update('age', { current: i, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') });
-
-      // Process batch in parallel
-      const results = await Promise.allSettled(
-        chunk.map(async (group) => {
-          try {
-            const result = await callBackend('resolve_book_age_rating', {
-              request: {
-                title: group.metadata?.title || group.group_name,
-                author: group.metadata?.author || '',
-                series: group.metadata?.series || null,
-                description: group.metadata?.description || null,
-                genres: group.metadata?.genres || [],
-                publisher: group.metadata?.publisher || null,
-              }
-            });
-            return { groupId: group.id, result };
-          } catch (err) {
-            console.error(`Age lookup failed for ${group.group_name}:`, err);
-            return { groupId: group.id, result: rejectedEntry(err) };
-          }
-        })
-      );
-
-      // H-3: age tags go in through mergeClassifyTags and the age genre
-      // through mergeGenres, so nothing curated is dropped.
-      const entryFor = (g) => results.find((r) => r.status === 'fulfilled' && r.value.groupId === g.id)?.value.result;
-      const pairs = applyPerGroup(chunk, entryFor, applyAgeResult);
-      agePairs.push(...pairs);
-      successCount += pairs.filter((x) => x.outcome === 'changed' || x.outcome === 'unchanged').length;
-      failedCount += pairs.filter((x) => x.outcome === 'failed' || x.outcome === 'warning').length;
-
-      // Update progress after batch
-      batch.update('age', {
-        current: Math.min(i + batchSize, selectedGroups.length),
-        success: successCount,
-        failed: failedCount,
-      });
-    }
-
-    reportBatchOutcome('age', agePairs);
     logBatchEnd('age', {
       books: selectedGroups.length,
-      succeeded: successCount,
-      failed: failedCount,
+      succeeded: counts.succeeded + counts.skipped,
+      warnings: counts.warnings,
+      failed: counts.failed,
     });
     batch.end('age');
   };
@@ -1706,72 +1423,25 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     logBatchStart('isbn', booksToProcess.length);
 
 
-    let successCount = 0;
-    let notFoundCount = 0;
-    let failedCount = 0;
-    const isbnPairs = [];
-
-    // Process in batches of 3 (API calls are fast)
-    const batchSize = 3;
-    for (let i = 0; i < booksToProcess.length; i += batchSize) {
-      const chunk = booksToProcess.slice(i, i + batchSize);
-
-      // Update progress with current batch
-      batch.update('isbn', { current: i, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') });
-
-      // Process batch, use pre-fetched data from gather phase if available
-      const results = await Promise.allSettled(
-        chunk.map(async (group) => {
-          try {
-            // Check if gather phase already found ISBN/ASIN
-            const gathered = gatheredDataRef.current?.get(group.id);
-            if (gathered && (gathered.isbn || gathered.asin)) {
-              return { groupId: group.id, result: { success: true, isbn: gathered.isbn, asin: gathered.asin, source: 'gather-phase' } };
-            }
-            const result = await callBackend('lookup_book_isbn', {
-              request: {
-                title: group.metadata?.title || group.group_name,
-                author: group.metadata?.author || '',
-              }
-            });
-            return { groupId: group.id, result };
-          } catch (err) {
-            console.error(`ISBN lookup failed for ${group.group_name}:`, err);
-            // A thrown call is an error, not "not found".
-            return { groupId: group.id, result: { ...rejectedEntry(err), errorDetail: errorDetailFromException(err, { stage: 'lookup-isbn' }) } };
-          }
-        })
-      );
-
-      // Task 7 made lookup_book_isbn return its errors; they become per-book
-      // lastError here and count as failures, separate from "not found".
-      const entryFor = (g) => results.find((r) => r.status === 'fulfilled' && r.value.groupId === g.id)?.value.result;
-      const pairs = applyPerGroup(chunk, entryFor, applyIsbnResult);
-      isbnPairs.push(...pairs);
-      successCount += pairs.filter((x) => x.outcome === 'changed' || x.outcome === 'unchanged').length;
-      notFoundCount += pairs.filter((x) => x.outcome === 'notfound').length;
-      failedCount += pairs.filter((x) => x.outcome === 'failed').length;
-
-      // Update progress after batch
-      batch.update('isbn', {
-        current: Math.min(i + batchSize, booksToProcess.length),
-        success: successCount,
-        failed: failedCount,
-      });
-    }
-
+    // Chunks of 3, using the gather phase's ISBN/ASIN when it found one. Lookup
+    // errors become per-book lastError and failures, separate from "not found".
     // Books the smart skip left out count as "already had ISBN".
-    reportBatchOutcome('isbn', [
-      ...isbnPairs,
-      ...Array.from({ length: skippedIsbn }, () => ({ id: null, outcome: 'unchanged' })),
-    ]);
+    const { pairs } = await runAction('isbn', booksToProcess, {
+      ctx: { gathered: gatheredDataRef.current },
+      extraPairs: Array.from({ length: skippedIsbn }, () => ({ id: null, outcome: 'unchanged' })),
+      onChunkStart: (chunk, offset) => batch.update('isbn', { current: offset, currentBook: chunk.map(g => g.metadata?.title || g.group_name).join(', ') }),
+      onChunkDone: (done, c) => batch.update('isbn', { current: done, success: c.succeeded, failed: c.failed }),
+    });
+    const count = (o) => pairs.filter((x) => x.outcome === o).length;
 
+    // Same buckets as the toast: found = a new ISBN/ASIN applied; a lookup
+    // that returned what the book already had joins the smart-skipped books.
     logBatchEnd('isbn', {
       books: booksToProcess.length,
-      found: successCount,
-      skipped: skippedIsbn,
-      notFound: notFoundCount,
-      failed: failedCount,
+      found: count('changed'),
+      skipped: skippedIsbn + count('unchanged'),
+      notFound: count('notfound'),
+      failed: count('failed'),
     });
 
     // M2: ISBN lookup reads gather hints from gatheredDataRef; clear them when
@@ -2212,7 +1882,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     let successCount = 0;
     let failedCount = 0;
     let tagsPartialCount = 0; // books whose DNA step failed or whose answer was empty
-    let ageFailedCount = 0; // books whose age lookup failed (age tags not updated)
 
     // Listen for per-book progress events within each chunk
     let tagChunkOffset = 0;
@@ -2245,7 +1914,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         // Update groups with new tags. The partial count is taken outside the
         // updater so the toast and log below read it after it is complete.
         if (result.results && result.results.length > 0) {
-          const pairs = applyPerGroup(chunk, (g) => result.results.find(r => r.id === g.id), applyTagsResultToGroup);
+          const pairs = applyEntries(setGroups, chunk, (g) => result.results.find(r => r.id === g.id), applyTagsResultToGroup);
           tagsPartialCount += pairs.filter((x) => x.outcome === 'partial' || x.outcome === 'empty').length;
 
           successCount += result.total_success;
@@ -2272,48 +1941,14 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     unlistenTags();
 
     // Now run age rating lookup for the same books and append age tags
+    // (snapshot age tags kept; a failed age lookup does not replace the
+    // tags-step error on a book). No toast of its own; counted below.
     batch.update('tags', { currentBook: 'Looking up age ratings...' });
-
-    // Process age ratings in smaller batches (API calls are slower)
-    const ageBatchSize = 3;
-    for (let i = 0; i < selectedGroups.length; i += ageBatchSize) {
-      const chunk = selectedGroups.slice(i, i + ageBatchSize);
-
-      batch.update('tags', { currentBook: `Age: ${chunk.map(g => g.metadata?.title || g.group_name).join(', ')}` });
-
-      // Process batch in parallel
-      const ageResults = await Promise.allSettled(
-        chunk.map(async (group) => {
-          try {
-            const result = await callBackend('resolve_book_age_rating', {
-              request: {
-                title: group.metadata?.title || group.group_name,
-                author: group.metadata?.author || '',
-                series: group.metadata?.series || null,
-                description: group.metadata?.description || null,
-                genres: group.metadata?.genres || [],
-                publisher: group.metadata?.publisher || null,
-              }
-            });
-            return { groupId: group.id, result };
-          } catch (err) {
-            console.error(`Age lookup failed for ${group.group_name}:`, err);
-            return { groupId: group.id, result: rejectedEntry(err) };
-          }
-        })
-      );
-
-      // Age tags through the same applier as Lookup Age (mergeClassifyTags),
-      // without touching genres. A failed age lookup does not overwrite a
-      // tags error already on the book.
-      const entryFor = (g) => ageResults.find((r) => r.status === 'fulfilled' && r.value.groupId === g.id)?.value.result;
-      const applyAgeTags = (g, entry) => {
-        const out = applyAgeResult(g, entry, { addGenre: false });
-        return out.outcome === 'failed' && g.lastError ? { group: g, outcome: out.outcome } : out;
-      };
-      ageFailedCount += applyPerGroup(chunk, entryFor, applyAgeTags).filter((x) => x.outcome === 'failed').length;
-    }
-
+    const { counts: ageCounts } = await runAction('age_tags', selectedGroups, {
+      toast: null,
+      onChunkStart: (chunk) => batch.update('tags', { currentBook: `Age: ${chunk.map(g => g.metadata?.title || g.group_name).join(', ')}` }),
+    });
+    const ageFailedCount = ageCounts.failed;
 
     logBatchEnd('tags', {
       books: selectedGroups.length,
@@ -2323,11 +1958,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       ageFailed: ageFailedCount,
     });
     // M-7: failures are shown, not only logged.
-    if (failedCount > 0) {
-      toast.error('AI Tags', `${failedCount} book${failedCount > 1 ? 's' : ''} failed. Existing tags were kept.`);
-    }
-    if (tagsPartialCount > 0) {
-      toast.warning('Tags partly applied', `${tagsPartialCount} book${tagsPartialCount > 1 ? 's' : ''} got no DNA tags or no new tags; see the book error. Existing tags were kept.`);
+    const tagsSummary = summarizeBatch({ op: 'tags', succeeded: Math.max(0, successCount - tagsPartialCount), warnings: tagsPartialCount, failed: failedCount });
+    if (tagsSummary && (tagsSummary.hasFailures || tagsSummary.hasWarnings)) {
+      toast[tagsSummary.type](tagsSummary.title, 'See the book error. Existing tags were kept.');
     }
     if (ageFailedCount > 0) {
       toast.warning('Age tags not updated', `The age lookup failed for ${ageFailedCount} book${ageFailedCount > 1 ? 's' : ''}.`);

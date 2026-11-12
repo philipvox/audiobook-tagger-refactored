@@ -5,6 +5,7 @@ import {
   applySubtitleResult,
   applyGenreCleanupResult,
   applyAgeResult,
+  applyAgeTagsResult,
   applyIsbnResult,
   applyAudioResult,
   tallyOutcomes,
@@ -175,14 +176,27 @@ describe('applyGenreCleanupResult', () => {
 describe('applyAgeResult', () => {
   const ageEntry = { success: true, age_category: 'Teen 13-17', age_tags: ['not-for-kids', 'age-teens', 'rated-pg13'], age_rating: 'Teens', content_rating: 'PG-13' };
 
-  it('adds age tags through mergeClassifyTags, keeping curated tags', () => {
-    const start = book({ tags: ['cozy', 'age-adult'], genres: ['Fantasy'] });
+  it('adds age tags through mergeClassifyTags; an age tag added this session is replaced', () => {
+    const start = book({ tags: ['cozy', 'age-adult'], genres: ['Fantasy'] }, { abs_original: { tags: ['cozy'] } });
     const { group, outcome } = applyAgeResult(start, ageEntry);
     expect(outcome).toBe('changed');
     expect(group.metadata.tags).toEqual(['cozy', 'not-for-kids', 'age-teens', 'rated-pg13']);
     expect(group.metadata.age_rating).toBe('Teens');
     expect(group.metadata.content_rating).toBe('PG-13');
     expect(group.changedFields).toEqual(expect.arrayContaining(['tags', 'age']));
+  });
+
+  it('an age tag that was in ABS at import is kept', () => {
+    const start = book({ tags: ['cozy', 'age-adult', 'rated-r'] }, { abs_original: { tags: ['cozy', 'age-adult'] } });
+    const { group } = applyAgeResult(start, ageEntry);
+    // age-adult is in the snapshot: kept. rated-r was added this session: replaced.
+    expect(group.metadata.tags).toEqual(['cozy', 'age-adult', 'not-for-kids', 'age-teens', 'rated-pg13']);
+  });
+
+  it('without a snapshot, existing age tags are kept too (nothing is known to be session-only)', () => {
+    const start = book({ tags: ['age-adult'] });
+    const { group } = applyAgeResult(start, ageEntry);
+    expect(group.metadata.tags).toContain('age-adult');
   });
 
   it('adds the age genre without dropping existing genres', () => {
@@ -201,6 +215,25 @@ describe('applyAgeResult', () => {
     const { outcome, group } = applyAgeResult(book(), { success: false, error: 'HTTP 401' });
     expect(outcome).toBe('failed');
     expect(group.lastError.message).toBe('HTTP 401');
+  });
+});
+
+describe('applyAgeTagsResult (AI Tags age step)', () => {
+  const tagsError = { stage: 'tags', kind: 'dna', message: 'DNA tags were not updated', severity: 'error' };
+
+  it('an empty (warning) age answer keeps the tags-step error', () => {
+    const start = book({ tags: ['cozy'] }, { lastError: tagsError });
+    const { group, outcome } = applyAgeTagsResult(start, { success: true, age_tags: [], age_category: null });
+    expect(outcome).toBe('warning');
+    expect(group.lastError).toEqual(tagsError);
+  });
+
+  it('a successful age answer adds tags, leaves genres and the tags-step error alone', () => {
+    const start = book({ tags: ['cozy'], genres: ['Fantasy'] }, { lastError: tagsError });
+    const { group } = applyAgeTagsResult(start, { success: true, age_category: 'Teen 13-17', age_tags: ['age-teens'] });
+    expect(group.metadata.tags).toEqual(['cozy', 'age-teens']);
+    expect(group.metadata.genres).toEqual(['Fantasy']);
+    expect(group.lastError).toEqual(tagsError);
   });
 });
 

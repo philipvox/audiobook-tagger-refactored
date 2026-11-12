@@ -26,6 +26,8 @@ beforeEach(() => {
   }));
   vi.resetAllMocks();
   parseAIJson.mockImplementation((s) => JSON.parse(s));
+  // The resolve handlers log a [series-fix] line per book.
+  vi.spyOn(console, 'log').mockImplementation(() => {});
 });
 
 function systemPromptArgOf(mockCall) {

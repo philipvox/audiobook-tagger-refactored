@@ -21,6 +21,7 @@ const OPS = Object.freeze({
   genres:      { v1Title: 'Genre Cleanup Complete',       v2v3Title: 'Genre Cleanup',       verb: 'cleaned' },
   age:         { v1Title: 'Age Lookup Complete',          v2v3Title: 'Age Lookup',          verb: 'rated' },
   audio_check: { v1Title: 'Audio Check Complete',         v2v3Title: 'Audio Check',         verb: 'updated', skippedLabel: 'nothing new' },
+  tags:        { v1Title: 'AI Tags Complete',             v2v3Title: 'AI Tags',             verb: 'tagged', warningLabel: 'partly tagged' },
   isbn:        { v1Title: 'ISBN Lookup Complete',         v2v3Title: 'ISBN Lookup',         verb: 'found', skippedLabel: 'already had ISBN', warningLabel: 'not found' },
 });
 
