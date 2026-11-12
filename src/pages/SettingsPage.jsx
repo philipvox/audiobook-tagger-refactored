@@ -136,6 +136,16 @@ const PromptEditor = ({ label, subtitle, value, defaultValue, onChange, rows = 6
   );
 };
 
+/** Validate the Ollama server URL. Empty means the local default. */
+function validateOllamaUrl(url) {
+  if (!url || !url.trim()) return null;
+  try {
+    const parsed = new URL(url.trim());
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return null;
+  } catch { /* fall through */ }
+  return 'Enter the full Ollama address including http:// and the port, for example http://localhost:11434';
+}
+
 /** Validate ABS server URL format. Desktop app supports both HTTP and HTTPS. */
 function validateAbsUrl(url) {
   if (!url || !url.trim()) return null; // empty is OK (not configured yet)
@@ -507,11 +517,20 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   const handleSave = async () => {
     // M-11: trimmed ABS URL and token, no trailing slashes, and a model that
     // matches the only cloud key the user has.
-    const prepared = prepareConfigForSave(localConfig);
+    let prepared = prepareConfigForSave(localConfig);
+    if (typeof prepared.ollama_base_url === 'string') {
+      prepared = { ...prepared, ollama_base_url: prepared.ollama_base_url.trim() };
+    }
     // Validate ABS URL before saving
     const urlError = validateAbsUrl(prepared.abs_base_url);
     if (urlError) {
       toast.error('Invalid Server URL', urlError);
+      return;
+    }
+    // A rejected Ollama URL stays in the form; never save it unvalidated.
+    const ollamaUrlError = validateOllamaUrl(prepared.ollama_base_url);
+    if (ollamaUrlError) {
+      toast.error('Invalid Ollama URL', ollamaUrlError);
       return;
     }
     setSaving(true);
@@ -596,26 +615,38 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   };
 
   // The installed model local AI should use: the saved one if it is still
-  // installed, else the one picked in the dropdown, else the first.
+  // installed, else the first installed one.
   const pickOllamaModel = (models) => {
     const names = models.map(m => m.name);
     const saved = localConfigRef.current?.ollama_model;
-    if (saved && names.includes(saved)) return saved;
-    if (names.includes(selectedPreset)) return selectedPreset;
-    return names[0];
+    return saved && names.includes(saved) ? saved : names[0];
   };
 
   // H-12: the switch is the only thing that sets use_local_ai, whether or not
   // this app started Ollama (an Ollama it did not start is never stopped).
+  // ollama_get_status lists models only while Ollama runs, so a stopped
+  // Ollama falls back to the saved model instead of refusing.
   const handleToggleLocalAI = async (on) => {
     if (on) {
-      const models = ollamaStatus?.models || [];
-      if (models.length === 0) {
-        toast.warning('Download a model first', 'Local AI needs at least one installed Ollama model.');
-        return;
+      let fields;
+      if (ollamaStatus?.running) {
+        const models = ollamaStatus.models || [];
+        if (models.length === 0) {
+          toast.warning('Download a model first', 'Local AI needs at least one installed Ollama model.');
+          return;
+        }
+        fields = { use_local_ai: true, ollama_model: pickOllamaModel(models) };
+      } else {
+        const saved = localConfigRef.current?.ollama_model;
+        if (!saved) {
+          toast.warning('Start Ollama first', 'Its installed models are listed once it runs.');
+          return;
+        }
+        fields = { use_local_ai: true, ollama_model: saved };
       }
-      const res = await persistFields({ use_local_ai: true, ollama_model: pickOllamaModel(models) });
+      const res = await persistFields(fields);
       if (!res?.success) toast.error('Could not turn on Local AI', res?.error);
+      else if (!ollamaStatus?.running) toast.info('Local AI is on. Start Ollama to use it.');
     } else {
       const res = await persistFields({ use_local_ai: false });
       if (!res?.success) toast.error('Could not turn off Local AI', res?.error);
@@ -629,9 +660,11 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       if (ollamaStatus?.running) {
         const message = await callBackend('ollama_stop');
         toast.info(typeof message === 'string' && message ? message : 'Ollama stopped');
+        setOllamaStatus(await ollamaCall('ollama_get_status'));
       } else {
         await ollamaCall('ollama_start');
         const started = await ollamaCall('ollama_get_status');
+        setOllamaStatus(started);
         const models = started?.models || [];
         if (localConfigRef.current?.use_local_ai === undefined && models.length > 0) {
           const res = await persistFields({ use_local_ai: true, ollama_model: pickOllamaModel(models) });
@@ -640,8 +673,6 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
         if (models.length > 0) toast.success('Ollama started');
         else toast.info('Ollama started', 'Download a model to use Local AI.');
       }
-      const status = await ollamaCall('ollama_get_status');
-      setOllamaStatus(status);
     } catch (err) {
       toast.error(`Failed: ${err.message || err}`);
     }
@@ -963,7 +994,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                       // M-11: save this field only, never the rest of the form.
                       const url = e.target.value.trim();
                       if (url === (configRef.current?.ollama_base_url || '')) return;
-                      const urlError = url ? validateAbsUrl(url) : null;
+                      const urlError = validateOllamaUrl(url);
                       if (urlError) {
                         toast.error('Invalid Ollama URL', urlError);
                         return;

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { useToast } from './Toast';
 import { X, ArrowRight, ArrowLeft, Shield, Server, Key, Download, Check, Sparkles, AlertTriangle, FolderOpen } from 'lucide-react';
@@ -152,6 +152,10 @@ function WizardInput({ label, type = 'text', value, onChange, placeholder, link 
 export function SetupWizard({ onClose }) {
   const { config, saveConfig, groups, setGroups } = useApp();
   const toast = useToast();
+  // Latest workspace groups, read when the import resolves (the same way the
+  // Library import reads groupsRef), not the closure of the click's render.
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
   const [step, setStep] = useState(0);
   const [localConfig, setLocalConfig] = useState({ ...config });
   const [connectionStatus, setConnectionStatus] = useState(null);
@@ -205,7 +209,7 @@ export function SetupWizard({ onClose }) {
     const cfg = await saveWizardConfig();
     const { importLibrary } = await import('../lib/abs-client');
     const imported = await importLibrary(cfg, (current) => setImportProgress(current || 0));
-    const { refreshed } = mergeAbsPull(groups || [], imported);
+    const { refreshed } = mergeAbsPull(groupsRef.current || [], imported);
     setGroups(prev => mergeAbsPullGroups(prev, imported));
     return { success: true, count: imported.length, refreshed };
   };

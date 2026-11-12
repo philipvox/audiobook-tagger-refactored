@@ -3,7 +3,7 @@
 // - H6: handleSave must check saveConfig's {success} result and NEVER show
 //   "Saved!" optimistically when the write failed.
 // - L3: configsEqual powers the dirty-flag sync of localConfig from context.
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { SettingsPage, configsEqual } from './SettingsPage';
 import { ToastProvider } from '../components/Toast';
@@ -167,7 +167,7 @@ describe('SettingsPage preserve_existing_tags toggle (#54)', () => {
 // Task 11 (H-11, H-12, M-11): local-AI switch, save clean-ups, removed controls.
 // ---------------------------------------------------------------------------
 
-const { callBackend } = await import('../api');
+const { callBackend, ollamaCall } = await import('../api');
 const { DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL } = await import('../lib/configSave.js');
 
 function tauriWith({ running = true, models = [] } = {}) {
@@ -194,6 +194,10 @@ const localAiSwitch = () => screen.findByRole('switch', { name: 'Use Local AI' }
 // listen() needs the Tauri IPC bridge. A no-op bridge keeps it quiet.
 window.__TAURI_INTERNALS__ = { transformCallback: () => 0, invoke: async () => 0 };
 window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+afterAll(() => {
+  delete window.__TAURI_INTERNALS__;
+  delete window.__TAURI_EVENT_PLUGIN_INTERNALS__;
+});
 
 async function renderTauriPage() {
   renderPage();
@@ -350,5 +354,87 @@ describe('SettingsPage removed and bounded controls (H-11)', () => {
     expect(saveConfigMock.mock.calls[0][0]).toMatchObject({
       local_concurrency: 3, custom_approved_genres: 'Fantasy, Mystery', custom_system_prompt: '',
     });
+  });
+});
+
+describe('SettingsPage "Use Local AI" switch with a stopped Ollama (H-12, fix round 1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    saveConfigMock.mockResolvedValue({ success: true });
+  });
+
+  it('running with models: a saved model that is not installed is replaced by the first installed one', async () => {
+    tauriWith({ running: true, models: [{ name: 'qwen3:4b', size_bytes: 1 }, { name: 'llama3:8b', size_bytes: 1 }] });
+    env.config = { ...BASE_CONFIG, use_local_ai: false, ollama_model: 'gone:1b' };
+    await renderTauriPage();
+    await waitFor(() => expect(screen.getByText('Running')).toBeInTheDocument());
+    fireEvent.click(await localAiSwitch());
+    await waitFor(() => expect(saveConfigMock).toHaveBeenCalledTimes(1));
+    expect(saveConfigMock.mock.calls[0][0]).toMatchObject({ use_local_ai: true, ollama_model: 'qwen3:4b' });
+  });
+
+  it('not running with a saved model: turns on, keeps the saved model, and says to start Ollama', async () => {
+    tauriWith({ running: false, models: [] });
+    env.config = { ...BASE_CONFIG, use_local_ai: false, ollama_model: 'llama3:8b' };
+    await renderTauriPage();
+    await waitFor(() => expect(screen.getByText('Stopped')).toBeInTheDocument());
+    const sw = await localAiSwitch();
+    fireEvent.click(sw);
+
+    await waitFor(() => expect(saveConfigMock).toHaveBeenCalledTimes(1));
+    expect(saveConfigMock.mock.calls[0][0]).toMatchObject({ use_local_ai: true, ollama_model: 'llama3:8b' });
+    await waitFor(() => expect(sw).toHaveAttribute('aria-checked', 'true'));
+    expect(screen.getByText('Local AI is on. Start Ollama to use it.')).toBeInTheDocument();
+    expect(screen.queryByText('Download a model first')).not.toBeInTheDocument();
+  });
+
+  it('not running and no saved model: "Start Ollama first", config unchanged', async () => {
+    tauriWith({ running: false, models: [] });
+    env.config = { ...BASE_CONFIG, use_local_ai: false };
+    await renderTauriPage();
+    await waitFor(() => expect(screen.getByText('Stopped')).toBeInTheDocument());
+    const sw = await localAiSwitch();
+    fireEvent.click(sw);
+
+    await waitFor(() => expect(screen.getByText('Start Ollama first')).toBeInTheDocument());
+    expect(saveConfigMock).not.toHaveBeenCalled();
+    expect(sw).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('"Start Ollama" reads the status once after starting', async () => {
+    tauriWith({ running: false, models: [] });
+    env.config = { ...BASE_CONFIG, use_local_ai: false };
+    await renderTauriPage();
+    const start = await screen.findByRole('button', { name: 'Start Ollama' });
+    const statusCalls = () => ollamaCall.mock.calls.filter(([cmd]) => cmd === 'ollama_get_status').length;
+    const before = statusCalls();
+    fireEvent.click(start);
+    await waitFor(() => expect(ollamaCall).toHaveBeenCalledWith('ollama_start'));
+    await waitFor(() => expect(screen.getByText('Ollama started')).toBeInTheDocument());
+    expect(statusCalls() - before).toBe(1);
+  });
+});
+
+describe('SettingsPage Ollama URL validation (M-11, fix round 1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    saveConfigMock.mockResolvedValue({ success: true });
+  });
+
+  it('an invalid Ollama URL gets an Ollama message on blur and is not saved by Save Settings either', async () => {
+    tauriWith({ running: false });
+    await renderTauriPage();
+    const field = screen.getByPlaceholderText('http://127.0.0.1:11434');
+    fireEvent.change(field, { target: { value: 'gpu-box:11434' } });
+    fireEvent.blur(field);
+
+    await waitFor(() => expect(screen.getByText('Invalid Ollama URL')).toBeInTheDocument());
+    expect(screen.getByText(/for example http:\/\/localhost:11434/)).toBeInTheDocument();
+    expect(screen.queryByText(/13378/)).not.toBeInTheDocument();
+    expect(saveConfigMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /Save Settings/i }));
+    await waitFor(() => expect(screen.getAllByText('Invalid Ollama URL').length).toBeGreaterThan(1));
+    expect(saveConfigMock).not.toHaveBeenCalled();
   });
 });
