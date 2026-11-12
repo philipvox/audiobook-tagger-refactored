@@ -6,6 +6,7 @@
 // VITE_PROXY_URL is configured and only for a genuine CORS/network failure.
 
 import { isTauri, getTauriFetch } from './platform.js';
+import { DEFAULT_OPENAI_MODEL } from './configSave.js';
 
 /** Default timeout for ABS and lookup requests. */
 export const DEFAULT_TIMEOUT_MS = 30000;
@@ -160,7 +161,7 @@ export async function proxyFetch(targetUrl, options = {}, timeoutMs = DEFAULT_TI
  */
 export async function absApi(absBaseUrl, absToken, path, options = {}) {
   const { method = 'GET', body = null } = options;
-  const url = `${absBaseUrl.replace(/\/$/, '')}${path}`;
+  const url = `${String(absBaseUrl || '').trim().replace(/\/+$/, '')}${path}`;
 
   const res = await proxyFetch(url, {
     method,
@@ -445,7 +446,7 @@ export async function callAI(config, systemPrompt, userPrompt, maxTokens = 2000)
     });
   }
 
-  const model = config.ai_model || 'gpt-5-nano';
+  const model = config.ai_model || DEFAULT_OPENAI_MODEL;
   const isAnthropic = model.startsWith('claude');
 
   if (isAnthropic) {

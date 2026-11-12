@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { useToast } from './Toast';
-import { X, ArrowRight, ArrowLeft, Shield, Server, Key, Download, Check, Sparkles, AlertTriangle } from 'lucide-react';
+import { X, ArrowRight, ArrowLeft, Shield, Server, Key, Download, Check, Sparkles, AlertTriangle, FolderOpen } from 'lucide-react';
+import { hasAiProvider, mergeAbsPull, mergeAbsPullGroups, importFromAbsWithNotice } from '../hooks/useScan';
+import { prepareConfigForSave, DEFAULT_OPENAI_MODEL } from '../lib/configSave';
 
 const ONBOARDING_KEY = 'audiobook_tagger_onboarding_completed';
 
@@ -17,7 +19,7 @@ export function markOnboardingComplete() {
 // Welcome Modal — minimal first-run screen
 // ============================================================================
 
-export function WelcomeModal({ onDismiss, onStartWizard }) {
+export function WelcomeModal({ onDismiss, onStartWizard, onLocalOnly }) {
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
       <div className="bg-neutral-900 rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden">
@@ -50,14 +52,30 @@ export function WelcomeModal({ onDismiss, onStartWizard }) {
                 <div>
                   <p className="text-sm text-white font-medium mb-1">Push writes to your ABS server</p>
                   <p className="text-xs text-gray-400 leading-relaxed">
-                    When you click <strong className="text-gray-300">Push</strong>, changes are written directly to your AudiobookShelf server.
-                    This overwrites existing metadata (genres, tags, descriptions, series) and <strong className="text-gray-300">cannot be undone</strong> from this app.
+                    When you click <strong className="text-gray-300">Push</strong>, the fields you changed since import are written directly to your AudiobookShelf server.
+                    This <strong className="text-gray-300">cannot be undone</strong> from this app.
                     Review changes carefully before pushing. Consider backing up your ABS database first.
                   </p>
                 </div>
               </div>
             </div>
           </div>
+
+          {onLocalOnly && (
+            <button
+              onClick={() => {
+                markOnboardingComplete();
+                onLocalOnly();
+              }}
+              className="w-full mb-3 px-4 py-3 text-left bg-neutral-800/50 rounded-xl hover:bg-neutral-800 transition-colors flex items-start gap-3"
+            >
+              <FolderOpen className="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5" />
+              <span>
+                <span className="block text-sm text-white font-medium">I only use local folders</span>
+                <span className="block text-xs text-gray-400 mt-0.5">Skip the AudiobookShelf setup. Connect it later from Settings.</span>
+              </span>
+            </button>
+          )}
 
           <div className="flex gap-3">
             <button
@@ -132,14 +150,17 @@ function WizardInput({ label, type = 'text', value, onChange, placeholder, link 
 }
 
 export function SetupWizard({ onClose }) {
-  const { config, saveConfig } = useApp();
+  const { config, saveConfig, groups, setGroups } = useApp();
   const toast = useToast();
   const [step, setStep] = useState(0);
   const [localConfig, setLocalConfig] = useState({ ...config });
   const [connectionStatus, setConnectionStatus] = useState(null);
   const [libraries, setLibraries] = useState([]);
   const [importing, setImporting] = useState(false);
-  const [importCount, setImportCount] = useState(0);
+  const [importProgress, setImportProgress] = useState(0);
+  // H-10: null until an import has finished; the success box keys off this,
+  // never off the progress counter.
+  const [importedCount, setImportedCount] = useState(null);
 
   const STEPS = [
     { icon: Server, title: 'Connect AudiobookShelf', subtitle: 'Link your ABS server' },
@@ -169,21 +190,33 @@ export function SetupWizard({ onClose }) {
     }
   };
 
+  // Save what the wizard holds, with the same clean-ups as Settings' Save
+  // (trimmed ABS URL and token, a model that matches the only cloud key).
+  const saveWizardConfig = async () => {
+    const prepared = prepareConfigForSave(localConfig);
+    setLocalConfig(prepared);
+    await saveConfig(prepared);
+    return prepared;
+  };
+
+  // H-10: the imported groups go into the workspace through the same merge
+  // the Library import uses, so staged edits are never clobbered.
+  const runImport = async () => {
+    const cfg = await saveWizardConfig();
+    const { importLibrary } = await import('../lib/abs-client');
+    const imported = await importLibrary(cfg, (current) => setImportProgress(current || 0));
+    const { refreshed } = mergeAbsPull(groups || [], imported);
+    setGroups(prev => mergeAbsPullGroups(prev, imported));
+    return { success: true, count: imported.length, refreshed };
+  };
+
   const handleImport = async () => {
     setImporting(true);
-    try {
-      // Save config first so import can use it
-      await saveConfig(localConfig);
-      const { importLibrary } = await import('../lib/abs-client');
-      const groups = await importLibrary(localConfig, (current, total) => {
-        setImportCount(current);
-      });
-      setImportCount(groups.length);
-      // Dispatch event so ScannerPage picks up the import
-      window.dispatchEvent(new CustomEvent('wizard-import-complete', { detail: { groups } }));
-      toast.success('Import Complete', `Imported ${groups.length} books from your library.`);
-    } catch (e) {
-      toast.error('Import Failed', String(e));
+    setImportProgress(0);
+    const result = await importFromAbsWithNotice(runImport, toast);
+    if (result?.success) {
+      setImportedCount(result.count);
+      toast.success('Import Complete', `Imported ${result.count} ${result.count === 1 ? 'book' : 'books'} from your library.`);
     }
     setImporting(false);
   };
@@ -191,7 +224,7 @@ export function SetupWizard({ onClose }) {
   const canAdvance = () => {
     switch (step) {
       case 0: return connectionStatus === 'success';
-      case 1: return !!(localConfig.openai_api_key || localConfig.anthropic_api_key);
+      case 1: return hasAiProvider(localConfig);
       case 2: return true; // can skip import
       case 3: return true;
       default: return true;
@@ -201,7 +234,7 @@ export function SetupWizard({ onClose }) {
   const handleNext = async () => {
     if (step < 3) {
       // Save config at each step
-      await saveConfig(localConfig);
+      await saveWizardConfig();
       setStep(step + 1);
     } else {
       markOnboardingComplete();
@@ -215,7 +248,7 @@ export function SetupWizard({ onClose }) {
 
   const handleClose = () => {
     markOnboardingComplete();
-    saveConfig(localConfig);
+    saveConfig(prepareConfigForSave(localConfig));
     onClose();
   };
 
@@ -317,7 +350,7 @@ export function SetupWizard({ onClose }) {
               <div>
                 <label className="block text-sm text-gray-400 mb-1.5">AI Model</label>
                 <select
-                  value={localConfig.ai_model || 'gpt-5-nano'}
+                  value={localConfig.ai_model || DEFAULT_OPENAI_MODEL}
                   onChange={(e) => {
                     const model = AI_MODELS.find(m => m.id === e.target.value);
                     setLocalConfig({
@@ -341,10 +374,10 @@ export function SetupWizard({ onClose }) {
               <p className="text-sm text-gray-400">
                 Import your library from AudiobookShelf. This pulls book metadata (titles, authors, genres) into the tagger for processing.
               </p>
-              {importCount > 0 ? (
+              {importedCount !== null ? (
                 <div className="bg-green-600/10 border border-green-600/20 rounded-xl p-4 text-center">
                   <Check className="w-8 h-8 text-green-400 mx-auto mb-2" />
-                  <p className="text-sm text-green-400 font-medium">{importCount} books imported</p>
+                  <p className="text-sm text-green-400 font-medium">{importedCount} {importedCount === 1 ? 'book' : 'books'} imported</p>
                   <p className="text-sm text-gray-400 mt-1">Click Next to finish setup</p>
                 </div>
               ) : (
@@ -354,7 +387,7 @@ export function SetupWizard({ onClose }) {
                   className="w-full py-3 text-sm font-medium rounded-xl bg-blue-600 text-white hover:bg-blue-500 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                   {importing ? (
-                    <>Importing... ({importCount} books)</>
+                    <>Importing... ({importProgress} books)</>
                   ) : (
                     <>
                       <Download className="w-4 h-4" />

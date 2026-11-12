@@ -9,7 +9,9 @@ import {
   DEFAULT_TAG_INSTRUCTIONS,
   BOOK_DNA_SYSTEM_PROMPT as DEFAULT_DNA_PROMPT,
 } from '../lib/prompts';
-import { APPROVED_GENRES, MAX_GENRES } from '../lib/genres';
+import { MAX_GENRES } from '../lib/genres';
+import { pushConcurrency, DEFAULT_PUSH_CONCURRENCY, MAX_PUSH_CONCURRENCY } from '../lib/absPush';
+import { prepareConfigForSave, DEFAULT_OPENAI_MODEL } from '../lib/configSave';
 import { ChevronDown, Check, X, Plus, Trash2, AlertCircle, Library, Settings, Sparkles, Cpu, Download, HardDrive, Mic } from 'lucide-react';
 import { useApp, shouldAutoEnableLocalAI } from '../context/AppContext';
 import { useToast } from '../components/Toast';
@@ -188,6 +190,25 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
     if (res?.success) syncedConfigRef.current = newConfig;
     return res;
   };
+
+  // Latest saved config, read by persistFields from long-lived handlers.
+  const configRef = useRef(config);
+  useEffect(() => { configRef.current = config; }, [config]);
+
+  // M-11: auto-saving controls (the Local AI switch, the Ollama URL field,
+  // model and install actions) save only their own fields on top of the last
+  // saved config. Other unsaved edits stay in the form, unsaved and
+  // unvalidated, until the user clicks Save Settings.
+  const persistFields = async (fields) => {
+    const newConfig = { ...(configRef.current || syncedConfigRef.current || {}), ...fields };
+    const res = await saveConfig(newConfig);
+    if (res?.success) {
+      configRef.current = newConfig;
+      syncedConfigRef.current = newConfig;
+      setLocalConfig(prev => ({ ...prev, ...fields }));
+    }
+    return res;
+  };
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showPrompts, setShowPrompts] = useState(false);
   const [showProviders, setShowProviders] = useState(false);
@@ -312,8 +333,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
           if (!ollamaAutoDetectedRef.current && shouldAutoEnableLocalAI(localConfigRef.current, status)) {
             ollamaAutoDetectedRef.current = true;
             const model = status.models[0].name;
-            const newConfig = { ...localConfigRef.current, use_local_ai: true, ollama_model: model };
-            const res = await persistConfig(newConfig);
+            const res = await persistFields({ use_local_ai: true, ollama_model: model });
             if (!res?.success) {
               ollamaAutoDetectedRef.current = false; // allow a retry on the next poll
             }
@@ -402,8 +422,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       setWhisperStatus(status);
       setWhisperDiskUsage(await callBackend('whisper_local_get_disk_usage'));
       // Auto-enable local whisper - persist the choice, not just local state.
-      const newConfig = { ...localConfigRef.current, use_local_whisper: true, whisper_model: selectedWhisperModel };
-      const res = await persistConfig(newConfig);
+      const res = await persistFields({ use_local_whisper: true, whisper_model: selectedWhisperModel });
       if (res?.success) {
         toast.success('Whisper model downloaded!');
       } else {
@@ -432,7 +451,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       await callBackend('whisper_local_uninstall');
       setWhisperStatus({ installed: false, binary_path: null, models: [], active_model: null });
       setWhisperDiskUsage(0);
-      const res = await persistConfig({ ...localConfigRef.current, use_local_whisper: false, whisper_model: null });
+      const res = await persistFields({ use_local_whisper: false, whisper_model: null });
       if (res?.success) {
         toast.info('Local Whisper removed');
       } else {
@@ -486,8 +505,11 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
 
   const [saved, setSaved] = useState(false);
   const handleSave = async () => {
+    // M-11: trimmed ABS URL and token, no trailing slashes, and a model that
+    // matches the only cloud key the user has.
+    const prepared = prepareConfigForSave(localConfig);
     // Validate ABS URL before saving
-    const urlError = validateAbsUrl(localConfig.abs_base_url);
+    const urlError = validateAbsUrl(prepared.abs_base_url);
     if (urlError) {
       toast.error('Invalid Server URL', urlError);
       return;
@@ -495,7 +517,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
     setSaving(true);
     // saveConfig returns {success} rather than throwing, so a failed write must
     // be detected from the result - never optimistically show "Saved!".
-    const res = await persistConfig(localConfig);
+    const res = await persistConfig(prepared);
     if (res?.success) {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -557,8 +579,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
         await ollamaCall('ollama_pull_model', { modelName: selectedPreset });
         setPulling(false); setPullProgress(null);
       }
-      const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset };
-      const res = await persistConfig(newConfig);
+      const res = await persistFields({ use_local_ai: true, ollama_model: selectedPreset });
       const status = await ollamaCall('ollama_get_status');
       setOllamaStatus(status);
       if (res?.success) {
@@ -574,18 +595,50 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
     }
   };
 
-  const handleToggleOllama = async () => {
+  // The installed model local AI should use: the saved one if it is still
+  // installed, else the one picked in the dropdown, else the first.
+  const pickOllamaModel = (models) => {
+    const names = models.map(m => m.name);
+    const saved = localConfigRef.current?.ollama_model;
+    if (saved && names.includes(saved)) return saved;
+    if (names.includes(selectedPreset)) return selectedPreset;
+    return names[0];
+  };
+
+  // H-12: the switch is the only thing that sets use_local_ai, whether or not
+  // this app started Ollama (an Ollama it did not start is never stopped).
+  const handleToggleLocalAI = async (on) => {
+    if (on) {
+      const models = ollamaStatus?.models || [];
+      if (models.length === 0) {
+        toast.warning('Download a model first', 'Local AI needs at least one installed Ollama model.');
+        return;
+      }
+      const res = await persistFields({ use_local_ai: true, ollama_model: pickOllamaModel(models) });
+      if (!res?.success) toast.error('Could not turn on Local AI', res?.error);
+    } else {
+      const res = await persistFields({ use_local_ai: false });
+      if (!res?.success) toast.error('Could not turn off Local AI', res?.error);
+    }
+  };
+
+  // Starts or stops the Ollama process. Leaves use_local_ai alone, except that
+  // the first start (no choice made yet) turns it on when a model is installed.
+  const handleStartStopOllama = async () => {
     try {
       if (ollamaStatus?.running) {
-        await callBackend('ollama_stop');
-        const res = await persistConfig({ ...localConfig, use_local_ai: false });
-        if (res?.success) toast.info('Local AI stopped');
-        else toast.error('Stopped, but saving settings failed', res?.error);
+        const message = await callBackend('ollama_stop');
+        toast.info(typeof message === 'string' && message ? message : 'Ollama stopped');
       } else {
         await ollamaCall('ollama_start');
-        const res = await persistConfig({ ...localConfig, use_local_ai: true, ollama_model: selectedPreset });
-        if (res?.success) toast.success('Local AI started');
-        else toast.error('Started, but saving settings failed', res?.error);
+        const started = await ollamaCall('ollama_get_status');
+        const models = started?.models || [];
+        if (localConfigRef.current?.use_local_ai === undefined && models.length > 0) {
+          const res = await persistFields({ use_local_ai: true, ollama_model: pickOllamaModel(models) });
+          if (!res?.success) toast.error('Started, but saving settings failed', res?.error);
+        }
+        if (models.length > 0) toast.success('Ollama started');
+        else toast.info('Ollama started', 'Download a model to use Local AI.');
       }
       const status = await ollamaCall('ollama_get_status');
       setOllamaStatus(status);
@@ -610,8 +663,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
       }
       setPulling(false); setPullProgress(null);
     }
-    const newConfig = { ...localConfig, ollama_model: modelId };
-    const res = await persistConfig(newConfig);
+    const res = await persistFields({ ollama_model: modelId });
     if (!res?.success) toast.error('Failed to save model selection', res?.error);
     const status = await ollamaCall('ollama_get_status');
     setOllamaStatus(status);
@@ -620,7 +672,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
   const handleUninstallOllama = async () => {
     try {
       await callBackend('ollama_uninstall');
-      const res = await persistConfig({ ...localConfig, use_local_ai: false, ollama_model: null });
+      const res = await persistFields({ use_local_ai: false, ollama_model: null });
       setOllamaStatus({ installed: false, running: false, models: [], version: null });
       setDiskUsage(0);
       if (res?.success) toast.info('Local AI removed');
@@ -789,7 +841,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                   <div>
                     <label className="block text-sm text-gray-400 mb-1.5">AI Model</label>
                     <select
-                      value={localConfig.ai_model || 'gpt-5-nano'}
+                      value={localConfig.ai_model || DEFAULT_OPENAI_MODEL}
                       onChange={(e) => {
                           const model = AI_MODELS.find(m => m.id === e.target.value);
                           const isAnthropic = model?.provider === 'anthropic';
@@ -828,19 +880,6 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm text-gray-500 mb-1.5">Local AI Workers</label>
-                    <select
-                      value={localConfig.local_concurrency || 1}
-                      onChange={(e) => setLocalConfig({ ...localConfig, local_concurrency: parseInt(e.target.value) })}
-                      className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
-                    >
-                      <option value={1}>1 (Sequential)</option>
-                      <option value={2}>2 books at once</option>
-                      <option value={3}>3 books at once</option>
-                      <option value={5}>5 books at once</option>
-                    </select>
-                  </div>
-                  <div>
                     <label className="block text-sm text-gray-500 mb-1.5">Cloud AI Workers</label>
                     <select
                       value={localConfig.cloud_concurrency || 5}
@@ -854,25 +893,20 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                       <option value={15}>15 (Aggressive)</option>
                     </select>
                   </div>
-                </div>
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-sm text-gray-500">ABS Push Workers</label>
-                    <input
-                      type="number"
-                      min={1}
-                      value={localConfig.concurrency_abs_push || 5}
-                      onChange={(e) => { const v = parseInt(e.target.value); if (v > 0) setLocalConfig({ ...localConfig, concurrency_abs_push: v }); }}
-                      className="w-16 px-2 py-1 bg-neutral-800 border border-neutral-700 rounded text-sm text-white text-center focus:outline-none"
-                    />
+                  <div>
+                    <label htmlFor="abs-push-workers" className="block text-sm text-gray-500 mb-1.5">ABS Push Workers</label>
+                    <select
+                      id="abs-push-workers"
+                      value={pushConcurrency(localConfig)}
+                      onChange={(e) => setLocalConfig({ ...localConfig, concurrency_abs_push: parseInt(e.target.value, 10) })}
+                      className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
+                    >
+                      {Array.from({ length: MAX_PUSH_CONCURRENCY }, (_, i) => i + 1).map(n => (
+                        <option key={n} value={n}>{n === DEFAULT_PUSH_CONCURRENCY ? `${n} (Default)` : n}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-600 mt-1">Books pushed at once. Use 1-2 for NAS.</p>
                   </div>
-                  <input
-                    type="range" min={1} max={50}
-                    value={Math.min(localConfig.concurrency_abs_push || 5, 50)}
-                    onChange={(e) => setLocalConfig({ ...localConfig, concurrency_abs_push: parseInt(e.target.value) })}
-                    className="w-full h-1.5 bg-neutral-700 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full"
-                  />
-                  <p className="text-xs text-gray-600 mt-1">Use 1-2 for NAS.</p>
                 </div>
               </div>
             )}
@@ -902,6 +936,19 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                   )}
                 </div>
 
+                {/* H-12: the only control for use_local_ai. Independent of whether
+                    Ollama runs and of who started it. */}
+                <div>
+                  <Toggle
+                    checked={localConfig.use_local_ai === true}
+                    onChange={handleToggleLocalAI}
+                    label="Use Local AI"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    When on, AI actions use your Ollama model instead of OpenAI or Anthropic.
+                  </p>
+                </div>
+
                 {/* Server URL (supports remote Ollama) */}
                 <div>
                   <label className="block text-sm text-gray-500 mb-1.5">Ollama server URL</label>
@@ -912,8 +959,16 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                       const newConfig = { ...localConfig, ollama_base_url: e.target.value };
                       setLocalConfig(newConfig);
                     }}
-                    onBlur={async () => {
-                      const res = await persistConfig(localConfig);
+                    onBlur={async (e) => {
+                      // M-11: save this field only, never the rest of the form.
+                      const url = e.target.value.trim();
+                      if (url === (configRef.current?.ollama_base_url || '')) return;
+                      const urlError = url ? validateAbsUrl(url) : null;
+                      if (urlError) {
+                        toast.error('Invalid Ollama URL', urlError);
+                        return;
+                      }
+                      const res = await persistFields({ ollama_base_url: url });
                       if (!res?.success) toast.error('Failed to save server URL', res?.error);
                     }}
                     placeholder="http://127.0.0.1:11434"
@@ -1058,14 +1113,14 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
 
                     <div className="flex gap-2">
                       <button
-                        onClick={handleToggleOllama}
+                        onClick={handleStartStopOllama}
                         className={`flex-1 py-2 text-sm font-medium rounded-lg transition-colors ${
                           ollamaStatus.running
                             ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30'
                             : 'bg-green-600/20 text-green-400 hover:bg-green-600/30'
                         }`}
                       >
-                        {ollamaStatus.running ? 'Stop Local AI' : 'Start Local AI'}
+                        {ollamaStatus.running ? 'Stop Ollama' : 'Start Ollama'}
                       </button>
                       <button
                         onClick={handleUninstallOllama}
@@ -1349,16 +1404,6 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                   rows={2}
                 />
 
-                {/* Approved Genres */}
-                <PromptEditor
-                  label="Approved Genres"
-                  subtitle="Comma-separated list — AI will only assign genres from this list"
-                  value={localConfig.custom_approved_genres}
-                  defaultValue={APPROVED_GENRES.join(', ')}
-                  onChange={(v) => setLocalConfig({ ...localConfig, custom_approved_genres: v })}
-                  rows={4}
-                />
-
                 {/* Classification Instructions */}
                 <PromptEditor
                   label="Classification Instructions"
@@ -1413,7 +1458,6 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                   onClick={() => setLocalConfig({
                     ...localConfig,
                     custom_system_prompt: '',
-                    custom_approved_genres: '',
                     custom_classification_rules: '',
                     custom_description_validate_rules: '',
                     custom_description_generate_rules: '',

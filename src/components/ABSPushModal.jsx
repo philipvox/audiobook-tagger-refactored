@@ -27,15 +27,13 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups,
     groups.forEach(group => {
       const metadata = group.metadata;
 
-      // Count changes from files
-      group.files?.forEach(file => {
-        if (file.changes) {
-          if (file.changes.title) titleChanges++;
-          if (file.changes.author || file.changes.artist) authorChanges++;
-          if (file.changes.narrator) narratorChanges++;
-          if (file.changes.genre) genreChanges++;
-        }
-      });
+      // M-10: count books, not files. A multi-file book stages the same
+      // change on every file but is one ABS item and one update.
+      const changed = (...keys) => (group.files || []).some(file => keys.some(k => file.changes?.[k]));
+      if (changed('title')) titleChanges++;
+      if (changed('author', 'artist')) authorChanges++;
+      if (changed('narrator')) narratorChanges++;
+      if (changed('genre')) genreChanges++;
 
       // Check for cover
       if (metadata.cover_url) coverChanges++;
@@ -125,25 +123,25 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups,
               {summary.titleChanges > 0 && (
                 <div className="flex items-center gap-2 text-gray-300">
                   <BookOpen className="w-4 h-4 text-blue-500" />
-                  <span>{summary.titleChanges} title updates</span>
+                  <span>{summary.titleChanges} title {summary.titleChanges === 1 ? 'update' : 'updates'}</span>
                 </div>
               )}
               {summary.authorChanges > 0 && (
                 <div className="flex items-center gap-2 text-gray-300">
                   <User className="w-4 h-4 text-purple-500" />
-                  <span>{summary.authorChanges} author updates</span>
+                  <span>{summary.authorChanges} author {summary.authorChanges === 1 ? 'update' : 'updates'}</span>
                 </div>
               )}
               {summary.narratorChanges > 0 && (
                 <div className="flex items-center gap-2 text-gray-300">
                   <Mic2 className="w-4 h-4 text-green-500" />
-                  <span>{summary.narratorChanges} narrator updates</span>
+                  <span>{summary.narratorChanges} narrator {summary.narratorChanges === 1 ? 'update' : 'updates'}</span>
                 </div>
               )}
               {summary.genreChanges > 0 && (
                 <div className="flex items-center gap-2 text-gray-300">
                   <Tag className="w-4 h-4 text-orange-500" />
-                  <span>{summary.genreChanges} genre updates</span>
+                  <span>{summary.genreChanges} genre {summary.genreChanges === 1 ? 'update' : 'updates'}</span>
                 </div>
               )}
             </div>
@@ -185,8 +183,9 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, onCancelPush, groups,
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
               <div className="text-sm text-amber-300">
-                <p><strong className="text-amber-200">This overwrites metadata on your ABS server.</strong></p>
-                <p className="mt-1 text-amber-400">Genres, tags, descriptions, series, and other fields will be replaced with what you see in the tagger. This cannot be undone from this app. Back up your ABS database if unsure.</p>
+                <p><strong className="text-amber-200">This writes to your ABS server.</strong></p>
+                <p className="mt-1 text-amber-400">Only fields you changed since import are sent. Tags and genres are merged with what is on the server.</p>
+                <p className="mt-1 text-amber-400">This cannot be undone from this app. Back up your ABS database if unsure.</p>
               </div>
             </div>
           </div>

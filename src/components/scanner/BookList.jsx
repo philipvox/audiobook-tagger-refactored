@@ -1035,6 +1035,24 @@ export function BookList({
                         <CheckCircle className="w-4 h-4 text-green-500" />
                       )}
 
+                      {/* File count: expands the file list of a multi-file book */}
+                      {group.files?.length > 1 && (
+                        <button
+                          type="button"
+                          aria-expanded={expandedGroups.has(group.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onToggleGroup?.(group.id);
+                          }}
+                          className="flex items-center gap-0.5 text-xs text-gray-500 hover:text-gray-300 tabular-nums transition-colors"
+                        >
+                          {expandedGroups.has(group.id)
+                            ? <ChevronDown className="w-3 h-3" aria-hidden="true" />
+                            : <ChevronRight className="w-3 h-3" aria-hidden="true" />}
+                          {group.files.length} files
+                        </button>
+                      )}
+
                       {/* Duration */}
                       <span className="text-sm text-gray-500 tabular-nums w-10 text-right">
                         {duration || '0h'}

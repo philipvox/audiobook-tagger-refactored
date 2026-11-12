@@ -51,7 +51,7 @@ API keys are stored locally on your machine and sent only to the AI provider.
 
 ## NAS Users
 
-If your ABS server runs on a NAS and crashes during push operations, lower the ABS Push Workers setting in Settings > Performance. Default is 5. Set it to 1-2 for low-powered hardware.
+If your ABS server runs on a NAS and crashes during push operations, lower the ABS Push Workers setting in Settings > Performance (1 to 10, default 3). Set it to 1-2 for low-powered hardware.
 
 ## Building from Source
 

@@ -13,6 +13,7 @@ import { pushAbsItems } from './lib/absPush.js';
 import { isCancelled } from './lib/cancel.js';
 import { absItemsToBookGroups } from './lib/absGroup.js';
 import { isTauri } from './lib/platform.js';
+import { DEFAULT_OPENAI_MODEL } from './lib/configSave.js';
 import { mapAgeCategory } from './lib/ageCategory.js';
 import { makeErrorDetail, errorDetailFromException } from './lib/errorDetail.js';
 
@@ -60,7 +61,7 @@ const DEFAULT_CONFIG = {
   // default (and an absent key reads as false).
   preserve_existing_tags: false,
   performance_preset: 'balanced',
-  ai_model: 'gpt-5-nano',
+  ai_model: DEFAULT_OPENAI_MODEL,
   ai_base_url: 'https://api.openai.com',
   // use_local_ai is intentionally omitted from defaults: `undefined` means the
   // user has never made a choice (allows one-time Ollama auto-detect), while an

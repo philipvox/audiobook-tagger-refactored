@@ -180,8 +180,6 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
   const [addingTag, setAddingTag] = useState(false);
   const [addingGenre, setAddingGenre] = useState(false);
   const [newTagValue, setNewTagValue] = useState('');
-  const [dirty, setDirty] = useState(false);
-  const [pushResult, setPushResult] = useState(null); // 'success' | null
   const editInputRef = useRef(null);
 
   // Reset editing state when group changes
@@ -190,8 +188,6 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
     setEditingTagIdx(null);
     setAddingTag(false);
     setAddingGenre(false);
-    setDirty(false);
-    setPushResult(null);
   }, [group?.id]);
 
   // Focus input when editing starts
@@ -209,7 +205,6 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
     if (!editingField || !onInlineEdit || !group) return;
     if (editValue !== (group.metadata?.[editingField] || '')) {
       onInlineEdit(group.id, editingField, editValue);
-      setDirty(true);
     }
     setEditingField(null);
   };
@@ -253,7 +248,6 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
     const tags = [...(group.metadata?.tags || [])];
     tags.splice(idx, 1);
     onInlineEdit(group.id, 'tags', tags);
-    setDirty(true);
   };
 
   const removeGenre = (idx) => {
@@ -261,7 +255,6 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
     const genres = [...(group.metadata?.genres || [])];
     genres.splice(idx, 1);
     onInlineEdit(group.id, 'genres', genres);
-    setDirty(true);
   };
 
   const addTag = () => {
@@ -276,7 +269,6 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
     // unconditionally, so calling it here would stage a no-op `tags` change.
     if (tags === current) return;
     onInlineEdit(group.id, 'tags', tags);
-    setDirty(true);
   };
 
   const addGenre = () => {
@@ -285,7 +277,6 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
     onInlineEdit(group.id, 'genres', genres);
     setNewTagValue('');
     setAddingGenre(false);
-    setDirty(true);
   };
 
   const commitTagEdit = () => {
@@ -298,14 +289,6 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
     // `tags` file change (onInlineEdit stamps file.changes unconditionally).
     if (isSameTagList(tags, current)) return;
     onInlineEdit(group.id, 'tags', tags);
-    setDirty(true);
-  };
-
-  const saveLocally = () => {
-    // Inline edits already update the group via onInlineEdit — just clear dirty flag
-    setDirty(false);
-    setPushResult('success');
-    setTimeout(() => setPushResult(null), 2000);
   };
 
   const blobUrlRef = useRef(null);
@@ -432,19 +415,6 @@ export function MetadataPanel({ group, onEdit, onInlineEdit, coverRefreshNonce =
 
   return (
     <div className="flex-1 overflow-y-auto bg-neutral-950 relative">
-      {/* Small save button — top-right corner when dirty */}
-      {(dirty || pushResult) && (
-        <button
-          onClick={saveLocally}
-          className={`absolute top-4 right-4 z-10 px-5 py-2.5 text-sm font-semibold rounded-xl transition-all shadow-lg ${
-            pushResult === 'success'
-              ? 'bg-green-500 text-white scale-95'
-              : 'bg-green-600 hover:bg-green-500 text-white'
-          }`}
-        >
-          {pushResult === 'success' ? 'Saved!' : 'Save Local'}
-        </button>
-      )}
       {/* Header Section */}
       <div className="p-6 pb-0">
         <div className="flex gap-6">

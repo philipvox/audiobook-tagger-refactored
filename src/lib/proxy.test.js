@@ -255,3 +255,13 @@ describe('a discarded 429 releases its body (fix round 1)', () => {
     await expect(p).resolves.toBe('{"ok":true}');
   });
 });
+
+describe('absApi base URL (M-11)', () => {
+  beforeEach(() => { platform.isTauri.mockReturnValue(true); });
+
+  it('trims the base URL and strips every trailing slash', async () => {
+    tauriFetch.mockResolvedValue(json({ libraries: [] }));
+    await absApi(' https://abs.example/// ', 'tok', '/api/libraries');
+    expect(tauriFetch.mock.calls[0][0]).toBe('https://abs.example/api/libraries');
+  });
+});

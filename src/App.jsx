@@ -104,6 +104,10 @@ function AppContent() {
             setShowWelcome(false);
             setShowWizard(true);
           }}
+          onLocalOnly={() => {
+            setShowWelcome(false);
+            navigateTo('scanner');
+          }}
         />
       )}
 

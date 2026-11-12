@@ -78,3 +78,22 @@ describe('ABSPushModal busy state (H-7)', () => {
     expect(gets).toBe(1);
   });
 });
+
+describe('ABSPushModal copy and counts (M-10)', () => {
+  it('describes the diff-only push, not an overwrite', () => {
+    render(<ABSPushModal isOpen groups={groups} pushing={false} onClose={vi.fn()} onConfirm={vi.fn()} />);
+    expect(screen.getByText('Only fields you changed since import are sent. Tags and genres are merged with what is on the server.')).toBeInTheDocument();
+    expect(screen.queryByText(/will be replaced with what you see in the tagger/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/overwrites/i)).not.toBeInTheDocument();
+  });
+
+  it('counts per book: a 12-file book with a title change is 1 title update', () => {
+    const files = Array.from({ length: 12 }, (_, i) => ({
+      id: `f${i}`, filename: `part${i}.mp3`, changes: { title: { old: 'a', new: 'b' } },
+    }));
+    const twelve = [{ id: 'b1', metadata: { title: 'Long Book' }, files }];
+    render(<ABSPushModal isOpen groups={twelve} pushing={false} onClose={vi.fn()} onConfirm={vi.fn()} />);
+    expect(screen.getByText('1 title update')).toBeInTheDocument();
+    expect(screen.queryByText(/12 title/)).not.toBeInTheDocument();
+  });
+});
