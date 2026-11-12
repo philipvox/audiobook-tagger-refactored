@@ -274,6 +274,19 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     cancelScan
   } = useScan();
 
+  // H-4: tell the user when a re-import replaced books restored without a snapshot.
+  const handleImportFromAbsNotify = async (...args) => {
+    const result = await handleImportFromAbs(...args);
+    const n = result?.refreshed || 0;
+    if (n > 0) {
+      toast.warning(
+        'Books Refreshed',
+        `${n} ${n === 1 ? 'book' : 'books'} from an older session ${n === 1 ? 'was' : 'were'} refreshed from AudiobookShelf. Their unpushed edits were discarded.`
+      );
+    }
+    return result;
+  };
+
   // Keep selectedGroup in sync when groups are updated (e.g., after rescan)
   useEffect(() => {
     if (selectedGroup) {
@@ -3388,7 +3401,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         onWrite={handleWriteClick}
         onRename={handleRenameClick}
         onPush={handlePushClick}
-        onPull={handleImportFromAbs}
+        onPull={handleImportFromAbsNotify}
         onBulkEdit={() => modals.open('bulkEdit')}
         onBulkCover={() => modals.open('bulkCover')}
         onOpenRescanModal={() => modals.open('rescan')}
@@ -3471,7 +3484,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           onSelectFile={handleGroupClick}
           onScan={handleScan}
           onImport={handleImport}
-          onImportFromAbs={handleImportFromAbs}
+          onImportFromAbs={handleImportFromAbsNotify}
           onCleanupAllGenres={handleCleanupAllGenres}
           scanning={scanning}
           onSelectAll={handleSelectAll}

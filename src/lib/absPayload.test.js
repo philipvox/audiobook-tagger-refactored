@@ -172,7 +172,8 @@ describe('no snapshot (H-4)', () => {
   });
 
   it('never sends empty arrays', () => {
-    const payload = buildAbsPayload({ title: 'X', genres: [], tags: [] }, null, cfg);
+    const o = snapshotAbsMetadata({ ...base, title: 'X' });
+    const payload = buildAbsPayload({ title: 'X', genres: [], tags: [] }, o, cfg);
     expect(payload.metadata).not.toHaveProperty('genres');
     expect(payload).not.toHaveProperty('tags');
   });

@@ -53,31 +53,46 @@ function groupHasStagedChanges(group) {
  * have staged edits as-is (don't clobber unsaved work), and only replace
  * ABS-sourced groups that have no staged edits with the fresh data. Any
  * brand-new ABS groups not previously known are appended.
+ *
+ * H-4: a `needs_reimport` group (restored without its import snapshot) is
+ * always replaced by the fresh ABS group, staged edits or not. Keeping the
+ * stale metadata under a fresh snapshot would push reversals of server-side
+ * changes, so those edits are dropped (callers tell the user via `refreshed`).
+ * A flagged group whose book is not in the result is kept as it is.
  */
-export function mergeAbsPullGroups(prevGroups, newGroups) {
+export function mergeAbsPull(prevGroups, newGroups) {
+  const isStale = (g) => g?.needs_reimport === true;
+  const newById = new Map(newGroups.map(g => [g.id, g]));
+  const refreshed = prevGroups.filter(g => isStale(g) && newById.has(g.id)).length;
+
   const anyStaged = prevGroups.some(groupHasStagedChanges);
   if (!anyStaged) {
-    return newGroups;
+    return { groups: newGroups, refreshed };
   }
 
-  const newById = new Map(newGroups.map(g => [g.id, g]));
   const seen = new Set();
 
   const merged = prevGroups.map(group => {
     if (!newById.has(group.id)) return group;
     seen.add(group.id);
-    return groupHasStagedChanges(group) ? group : newById.get(group.id);
+    return groupHasStagedChanges(group) && !isStale(group) ? group : newById.get(group.id);
   });
 
   for (const group of newGroups) {
     if (!seen.has(group.id)) merged.push(group);
   }
 
-  return merged;
+  return { groups: merged, refreshed };
+}
+
+export function mergeAbsPullGroups(prevGroups, newGroups) {
+  return mergeAbsPull(prevGroups, newGroups).groups;
 }
 
 export function useScan() {
-  const { setGroups } = useApp();
+  const { groups: currentGroups, setGroups } = useApp();
+  const groupsRef = useRef(currentGroups);
+  groupsRef.current = currentGroups;
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState({
     current: 0,
@@ -502,15 +517,17 @@ export function useScan() {
         const request = options.enrichWithCustomProviders
           ? { enrich_with_custom_providers: true }
           : null;
+        let refreshed = 0;
         const result = await callBackend('import_from_abs', { request });
 
         if (result && result.groups) {
           // L1(pages): don't blow away staged local edits with a wholesale
           // replace, merge the fresh ABS pull in instead.
+          refreshed = mergeAbsPull(groupsRef.current || [], result.groups).refreshed;
           setGroups(prevGroups => mergeAbsPullGroups(prevGroups, result.groups));
         }
 
-        return { success: true, count: result?.total_imported || 0 };
+        return { success: true, count: result?.total_imported || 0, refreshed };
 
       } finally {
         if (unlisten) unlisten();

@@ -354,7 +354,7 @@ export async function pushAbsItems(items, { request, cfg = {} }) {
 /**
  * v2.2.3: request items for push_abs_imports. `original` is the snapshot taken
  * at import (group.abs_original) that the push diffs against; null when the
- * group predates snapshots (the push then falls back non-destructively).
+ * group predates snapshots (such a book is skipped, never pushed).
  */
 export function buildPushItems(groups) {
   return (groups || []).map((g) => ({

@@ -6,7 +6,7 @@
 // pickPath landmine), extracting pure logic gives these fixes a real,
 // non-hanging test seam.
 import { describe, it, expect } from 'vitest';
-import { getParentDir, buildRescanGroups, mergeAbsPullGroups } from './useScan.js';
+import { getParentDir, buildRescanGroups, mergeAbsPullGroups, mergeAbsPull } from './useScan.js';
 
 describe('getParentDir (L-11)', () => {
   it('returns the parent directory for a POSIX path', () => {
@@ -131,5 +131,46 @@ describe('mergeAbsPullGroups (L1/pages)', () => {
     const result = mergeAbsPullGroups(prevGroups, newGroups);
     expect(result).toContainEqual(brandNew);
     expect(result.find(g => g.id === 'g1')).toBe(staged);
+  });
+});
+
+describe('mergeAbsPull and needs_reimport groups (H-4)', () => {
+  const fresh = (id) => ({ id, total_changes: 0, files: [], abs_original: { title: 'fresh' } });
+
+  it('replaces a flagged group that has staged edits', () => {
+    const flagged = { id: 'g1', needs_reimport: true, total_changes: 2, files: [] };
+    const other = { id: 'g2', total_changes: 0, files: [] };
+    const news = [fresh('g1'), fresh('g2')];
+    const { groups, refreshed } = mergeAbsPull([flagged, other], news);
+    expect(groups.find(g => g.id === 'g1')).toBe(news[0]);
+    expect(refreshed).toBe(1);
+  });
+
+  it('replaces a flagged group with no staged edits', () => {
+    const flagged = { id: 'g1', needs_reimport: true, total_changes: 0, files: [] };
+    const staged = { id: 'g2', total_changes: 1, files: [] };
+    const news = [fresh('g1'), fresh('g2')];
+    const { groups, refreshed } = mergeAbsPull([flagged, staged], news);
+    expect(groups.find(g => g.id === 'g1')).toBe(news[0]);
+    expect(refreshed).toBe(1);
+  });
+
+  it('keeps an unflagged group with staged edits and counts nothing', () => {
+    const staged = { id: 'g1', total_changes: 2, files: [] };
+    const news = [fresh('g1')];
+    const { groups, refreshed } = mergeAbsPull([staged], news);
+    expect(groups[0]).toBe(staged);
+    expect(refreshed).toBe(0);
+  });
+
+  it('counts every replaced flagged group, and not ones missing from the result', () => {
+    const a = { id: 'a', needs_reimport: true, total_changes: 1, files: [] };
+    const b = { id: 'b', needs_reimport: true, total_changes: 0, files: [] };
+    const gone = { id: 'gone', needs_reimport: true, total_changes: 1, files: [] };
+    const news = [fresh('a'), fresh('b')];
+    const { groups, refreshed } = mergeAbsPull([a, b, gone], news);
+    expect(refreshed).toBe(2);
+    expect(groups).toContain(gone);
+    expect(mergeAbsPullGroups([a, b, gone], news)).toEqual(groups);
   });
 });
