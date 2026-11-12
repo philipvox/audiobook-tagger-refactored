@@ -46,8 +46,7 @@ describe('genres at the push boundary', () => {
     expect(payload.metadata.genres).toEqual(['LitRPG']);
   });
 
-  it('OFF (explicit): an unapproved AI-added genre is dropped by policy, existing kept', async () => {
-    setConfig({ preserve_existing_genres: false });
+  it('OFF (default): an unapproved AI-added genre is dropped by policy, existing kept', async () => {
     const payload = await pushAndGetPayload(
       { genres: ['LitRPG', 'Zzzz Custom Shelf', 'Fantasy'] },
       snap({ genres: ['LitRPG'] }),
@@ -55,11 +54,11 @@ describe('genres at the push boundary', () => {
     expect(payload.metadata.genres).toEqual(['LitRPG', 'Fantasy']);
   });
 
-  it('ON: unapproved added genres survive with their original casing, no cap', async () => {
+  it('preserve_existing_genres ON does not bypass policy or cap for additions', async () => {
     setConfig({ preserve_existing_genres: true });
     const genres = ['Horror', 'Thriller', 'Mystery', 'Zzzz Custom Shelf'];
     const payload = await pushAndGetPayload({ genres }, snap({}));
-    expect(payload.metadata.genres).toEqual(genres);
+    expect(payload.metadata.genres).toEqual(['Horror', 'Thriller', 'Mystery']);
   });
 
   it('case-insensitive dedup keeps the first-seen casing', async () => {
@@ -69,7 +68,7 @@ describe('genres at the push boundary', () => {
   });
 
   it('genre_enforcement disabled: additions unmapped, capped to three in total', async () => {
-    setConfig({ genre_enforcement: false, preserve_existing_genres: false });
+    setConfig({ genre_enforcement: false });
     const payload = await pushAndGetPayload({ genres: ['A', 'B', 'C', 'D'] }, snap({}));
     expect(payload.metadata.genres).toEqual(['A', 'B', 'C']);
   });
@@ -96,7 +95,7 @@ describe('tags at the push boundary', () => {
   });
 
   it('the two flags are independent: tags-only preservation leaves added genres on policy', async () => {
-    setConfig({ preserve_existing_tags: true, preserve_existing_genres: false });
+    setConfig({ preserve_existing_tags: true });
     const payload = await pushAndGetPayload({ genres: ['Zzzz Custom Shelf', 'Fantasy'], tags: ['Sci-Fi'] }, snap({}));
     expect(payload.metadata.genres).toEqual(['Fantasy']);
     expect(payload.tags).toEqual(['Sci-Fi']);

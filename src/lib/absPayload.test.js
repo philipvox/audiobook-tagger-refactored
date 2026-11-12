@@ -41,40 +41,49 @@ describe('diff against the import snapshot', () => {
   });
 });
 
-const cfgPolicy = { preserve_existing_genres: false };
-
 describe('genres', () => {
   it('policy applies to AI-added genres only; existing ones are kept verbatim', () => {
     const meta = { ...base, genres: ['LitRPG', 'Zzzz Custom Shelf', 'sci-fi'] };
-    const payload = buildAbsPayload(meta, orig(), cfgPolicy);
+    const payload = buildAbsPayload(meta, orig(), cfg);
     expect(payload.metadata.genres).toEqual(['LitRPG', 'Zzzz Custom Shelf', 'Science Fiction']);
   });
 
   it('an AI genre the policy rejects is dropped without touching existing ones', () => {
     const meta = { ...base, genres: ['LitRPG', 'Zzzz Custom Shelf', 'Qqqq Nonsense'] };
-    const payload = buildAbsPayload(meta, orig(), cfgPolicy);
+    const payload = buildAbsPayload(meta, orig(), cfg);
     expect(payload.metadata).not.toHaveProperty('genres');
   });
 
   it('never sends genres: [] just because the policy emptied the additions', () => {
-    const payload = buildAbsPayload({ ...base, genres: ['Qqqq Nonsense'] }, snapshotAbsMetadata({ ...base, genres: [] }), cfgPolicy);
+    const payload = buildAbsPayload({ ...base, genres: ['Qqqq Nonsense'] }, snapshotAbsMetadata({ ...base, genres: [] }), cfg);
     expect(payload.metadata).not.toHaveProperty('genres');
   });
 
-  it('sends genres: [] when the user explicitly cleared them', () => {
-    const payload = buildAbsPayload({ ...base, genres: [] }, orig(), cfgPolicy);
+  it('sends no genres key for an empty list without the user_cleared flag', () => {
+    const payload = buildAbsPayload({ ...base, genres: [] }, orig(), cfg);
+    expect(payload.metadata).not.toHaveProperty('genres');
+  });
+
+  it('sends genres: [] only when user_cleared includes genres', () => {
+    const payload = buildAbsPayload({ ...base, genres: [], user_cleared: ['genres'] }, orig(), cfg);
     expect(payload.metadata.genres).toEqual([]);
   });
 
   it('a user-removed genre is removed', () => {
-    const payload = buildAbsPayload({ ...base, genres: ['LitRPG'] }, orig(), cfgPolicy);
+    const payload = buildAbsPayload({ ...base, genres: ['LitRPG'] }, orig(), cfg);
     expect(payload.metadata.genres).toEqual(['LitRPG']);
   });
 
-  it('with preserve_existing_genres on, additions are not policy-mapped', () => {
-    const meta = { ...base, genres: ['LitRPG', 'Qqqq Nonsense'] };
+  it('preserve_existing_genres does not switch off the policy for additions', () => {
+    const meta = { ...base, genres: ['LitRPG', 'Zzzz Custom Shelf', 'Qqqq Nonsense'] };
     const payload = buildAbsPayload(meta, orig(), { preserve_existing_genres: true });
-    expect(payload.metadata.genres).toEqual(['LitRPG', 'Qqqq Nonsense']);
+    expect(payload.metadata).not.toHaveProperty('genres');
+  });
+
+  it('the cap applies to additions only, never trimming kept genres', () => {
+    const o = snapshotAbsMetadata({ ...base, genres: ['A1', 'A2', 'A3', 'A4'] });
+    const payload = buildAbsPayload({ ...base, genres: ['A1', 'A2', 'A3', 'A4', 'Fantasy'] }, o, {});
+    expect(payload.metadata).not.toHaveProperty('genres');
   });
 });
 
@@ -96,8 +105,13 @@ describe('tags', () => {
     expect(payload).not.toHaveProperty('tags');
   });
 
-  it('sends tags: [] when the user explicitly cleared them', () => {
+  it('sends no tags key for an empty list without the user_cleared flag', () => {
     const payload = buildAbsPayload({ ...base, tags: [] }, orig(), cfg);
+    expect(payload).not.toHaveProperty('tags');
+  });
+
+  it('sends tags: [] only when user_cleared includes tags', () => {
+    const payload = buildAbsPayload({ ...base, tags: [], user_cleared: ['tags'] }, orig(), cfg);
     expect(payload.tags).toEqual([]);
   });
 });

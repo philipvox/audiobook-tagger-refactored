@@ -30,6 +30,7 @@ import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
 import { keepCurrentBooksToast } from '../lib/session.js';
 import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
 import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePush } from '../lib/absPush';
+import { userClearedPatch } from '../lib/userCleared';
 import { applyClassifyResult } from '../lib/applyClassifyResult';
 import { syncAllSeries } from '../lib/absPayload';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
@@ -461,7 +462,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         const changedFileFields = EDIT_MODAL_FILE_FIELDS.filter(
           f => readFileField(newMetadata, f) !== readFileField(group.metadata, f)
         );
-        return applyMetadataToGroup(group, newMetadata, changedFileFields);
+        return applyMetadataToGroup(
+          group,
+          { ...newMetadata, ...userClearedPatch(group.metadata, { genres: newMetadata.genres }) },
+          changedFileFields
+        );
       })
     );
   };
@@ -486,6 +491,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         const newMetadata = syncAllSeries(group.metadata, {
           ...group.metadata,
           ...updates,
+          ...userClearedPatch(group.metadata, updates),
           // Mark source as manual for bulk edited fields. H1: use key presence
           // (not truthiness) so an intentional clear (present null) still marks
           // the field manual rather than being ignored.
@@ -3496,7 +3502,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
               // is a metadata field name; map the genres array to the `genre`
               // file-change field, otherwise the names match 1:1.
               const fileField = field === 'genres' ? 'genre' : field;
-              return applyMetadataToGroup(g, { [field]: value }, [fileField]);
+              return applyMetadataToGroup(g, { [field]: value, ...userClearedPatch(g.metadata, { [field]: value }) }, [fileField]);
             }));
           }}
           validationData={selectedGroup ? validationResults[selectedGroup.id] : null}

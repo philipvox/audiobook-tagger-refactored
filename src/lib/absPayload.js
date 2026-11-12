@@ -141,26 +141,29 @@ export function snapshotAbsMetadata(m = {}) {
 }
 
 // Genres: existing ones verbatim, policy only on additions.
-function diffGenres(cur, orig, cfg) {
+function diffGenres(cur, orig, cfg, userCleared = false) {
   if (sameList(cur, orig)) return undefined;
-  if (cur.length === 0) return orig.length > 0 ? [] : undefined; // explicit clear
+  // An empty list is sent only when the user explicitly emptied it by hand
+  // (meta.user_cleared); never because AI/policy code left it empty.
+  if (cur.length === 0) return orig.length > 0 && userCleared ? [] : undefined;
   const origKeys = new Map(orig.map((g) => [listKey(g), g]));
   const kept = cur.filter((g) => origKeys.has(listKey(g))).map((g) => origKeys.get(listKey(g)));
   const added = cur.filter((g) => !origKeys.has(listKey(g)));
-  const preserve = cfg.preserve_existing_genres !== false;
-  let additions = preserve || cfg.genre_enforcement === false ? added : enforceGenrePolicyWithSplit(added);
+  // Policy and cap apply to additions only; kept (already in ABS) genres are
+  // never filtered or trimmed.
+  let additions = cfg.genre_enforcement === false ? added : enforceGenrePolicyWithSplit(added);
   const keptKeys = new Set(kept.map(listKey));
   additions = dedupe(additions).filter((g) => !keptKeys.has(listKey(g)));
-  if (!preserve) additions = additions.slice(0, Math.max(0, MAX_GENRES - kept.length));
+  additions = additions.slice(0, Math.max(0, MAX_GENRES - kept.length));
   const final = [...kept, ...additions];
   if (final.length === 0 || sameList(final, orig)) return undefined;
   return final;
 }
 
 // Tags: existing ones verbatim (incl. dna:/user tags), policy only on additions.
-function diffTags(cur, orig, cfg) {
+function diffTags(cur, orig, cfg, userCleared = false) {
   if (sameList(cur, orig)) return undefined;
-  if (cur.length === 0) return orig.length > 0 ? [] : undefined; // explicit clear
+  if (cur.length === 0) return orig.length > 0 && userCleared ? [] : undefined;
   const origKeys = new Map(orig.map((t) => [listKey(t), t]));
   const kept = cur.filter((t) => origKeys.has(listKey(t))).map((t) => origKeys.get(listKey(t)));
   const added = cur.filter((t) => !origKeys.has(listKey(t)));
@@ -222,9 +225,10 @@ export function buildAbsPayload(meta = {}, original = null, cfg = {}) {
     if (curGenres.length > 0) metadata.genres = curGenres;
     if (curTags.length > 0) payload.tags = curTags;
   } else {
-    const genres = diffGenres(curGenres, dedupe(o.genres), cfg);
+    const cleared = Array.isArray(m.user_cleared) ? m.user_cleared : [];
+    const genres = diffGenres(curGenres, dedupe(o.genres), cfg, cleared.includes('genres'));
     if (genres !== undefined) metadata.genres = genres;
-    const tags = diffTags(curTags, dedupe(o.tags), cfg);
+    const tags = diffTags(curTags, dedupe(o.tags), cfg, cleared.includes('tags'));
     if (tags !== undefined) payload.tags = tags;
   }
   return payload;
