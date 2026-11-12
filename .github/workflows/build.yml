@@ -48,10 +48,12 @@ jobs:
 
       # libwebkit2gtk-4.1-dev etc. are required build-time dependencies for the tauri crate:
       # cargo test fails at compile time without them, even though scanner tests don't exercise webkit.
+      # ffmpeg (with ffprobe) is a test-time dependency: the writer tests that write tags into real
+      # mp3 and m4b files make their fixtures with it, and skip themselves when it is missing.
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf ffmpeg
 
       - name: Run Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
