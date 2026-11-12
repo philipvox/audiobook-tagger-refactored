@@ -417,11 +417,20 @@ fn get_binary_download_url() -> Result<(&'static str, &'static str), String> {
     Err("Unsupported platform".to_string())
 }
 
+/// Where Homebrew puts `brew`: Apple Silicon, Intel macOS, and Linux
+/// (Linuxbrew's default prefix, which a desktop-launched app's PATH lacks).
+#[cfg(unix)]
+const BREW_LOCATIONS: &[&str] = &[
+    "/opt/homebrew/bin/brew",
+    "/usr/local/bin/brew",
+    "/home/linuxbrew/.linuxbrew/bin/brew",
+];
+
 /// Resolve the Homebrew binary via absolute paths first (GUI apps don't inherit
 /// the shell PATH), then fall back to a PATH lookup.
 #[cfg(unix)]
 fn find_brew() -> Option<PathBuf> {
-    for candidate in &["/opt/homebrew/bin/brew", "/usr/local/bin/brew"] {
+    for candidate in BREW_LOCATIONS {
         let p = PathBuf::from(candidate);
         if p.exists() {
             return Some(p);
@@ -814,6 +823,33 @@ fn install_release_dir(release_dir: &Path, dest: &Path) -> Result<(), String> {
     std::fs::rename(&staging, dest).map_err(|e| format!("Finalize error: {}", e))
 }
 
+/// Run the freshly installed whisper-cli once (`--help`). The prebuilt
+/// Windows binary needs the Microsoft Visual C++ runtime; without it the
+/// process dies in the loader, and the user would otherwise only find out at
+/// the first transcription.
+async fn smoke_test_whisper(binary: &Path) -> Result<(), String> {
+    const HINT: &str = "The Microsoft Visual C++ runtime may be missing: install the latest \"Microsoft Visual C++ Redistributable\" from Microsoft, then install Local Whisper again.";
+    let mut cmd = tokio_command(binary);
+    cmd.arg("--help");
+    let never_cancelled = AtomicBool::new(false);
+    let output = run_child(cmd, Instant::now() + Duration::from_secs(30), &never_cancelled)
+        .await
+        .map_err(|e| match e {
+            StepError::Failed(msg) => format!("whisper-cli was installed but does not start ({}). {}", msg, HINT),
+            StepError::TimedOut => format!("whisper-cli was installed but did not answer within 30 seconds. {}", HINT),
+            StepError::Cancelled => "whisper-cli check was cancelled".to_string(),
+        })?;
+    // Usage text means the program itself ran, whatever its exit code.
+    let printed_usage = [&output.stdout, &output.stderr]
+        .iter()
+        .any(|out| String::from_utf8_lossy(out).to_lowercase().contains("usage"));
+    if output.status.success() || printed_usage {
+        Ok(())
+    } else {
+        Err(format!("whisper-cli was installed but does not start ({}). {}", output.status, HINT))
+    }
+}
+
 async fn download_and_install_binary(url: &str, window: &tauri::Window) -> Result<String, String> {
     use tauri::Emitter;
 
@@ -836,6 +872,12 @@ async fn download_and_install_binary(url: &str, window: &tauri::Window) -> Resul
     let binary_path = bundled_binary_path()?;
     if !binary_path.is_file() {
         return Err(format!("whisper-cli was not installed at {}", binary_path.display()));
+    }
+    // An install that cannot start must not read as installed: say why now,
+    // and leave nothing behind, so the next attempt installs again.
+    if let Err(e) = smoke_test_whisper(&binary_path).await {
+        let _ = std::fs::remove_dir_all(bundled_install_path()?);
+        return Err(e);
     }
 
     let _ = window.emit("whisper_install_progress", serde_json::json!({
@@ -1196,6 +1238,40 @@ mod tests {
             let listed = preset.size_mb as u64 * 1_000_000;
             assert!(model_size_limit(preset) > listed && model_size_limit(preset) <= listed * 12 / 10, "{}", preset.id);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brew_is_looked_for_at_the_linuxbrew_prefix_too() {
+        assert!(BREW_LOCATIONS.contains(&"/home/linuxbrew/.linuxbrew/bin/brew"));
+        assert!(BREW_LOCATIONS.contains(&"/opt/homebrew/bin/brew"));
+    }
+
+    /// A stand-in for whisper-cli: a shell script with the given body.
+    #[cfg(unix)]
+    fn fake_cli(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_smoke_test_tells_a_binary_that_starts_from_one_that_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(smoke_test_whisper(&fake_cli(dir.path(), "ok", "exit 0")).await, Ok(()));
+        // whisper-cli builds that exit non-zero after printing their usage still ran.
+        assert_eq!(smoke_test_whisper(&fake_cli(dir.path(), "usage", "echo 'usage: whisper-cli [options]' >&2; exit 1")).await, Ok(()));
+        // Dies before it can say anything (on Windows: a missing DLL).
+        let err = smoke_test_whisper(&fake_cli(dir.path(), "dies", "exit 53")).await.unwrap_err();
+        assert!(err.contains("does not start") && err.contains("Visual C++ runtime may be missing"), "{err}");
+        // Cannot be started at all.
+        let not_runnable = dir.path().join("whisper-cli.exe");
+        std::fs::write(&not_runnable, b"MZ not really").unwrap();
+        let err = smoke_test_whisper(&not_runnable).await.unwrap_err();
+        assert!(err.contains("does not start") && err.contains("Visual C++"), "{err}");
     }
 
     fn fake_windows_release(root: &Path) -> PathBuf {

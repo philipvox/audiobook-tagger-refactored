@@ -314,7 +314,7 @@ async fn run_intro_passes(
 
                 // On the last pass return whatever we got. Only real transcripts
                 // are cached, so a transient failure isn't remembered forever.
-                if fields_found >= 2 || is_last {
+                if pass_result_is_final(fields_found, is_last, Instant::now() >= deadline) {
                     cache_if_worthwhile(&result);
                     return Ok(result);
                 }
@@ -434,13 +434,8 @@ async fn try_extract_at_offset(
     }));
 
     // Try LLM parsing first (more accurate), fall back to regex
-    let (extracted, method) = match bounded(try_llm_parse(&transcript, request), deadline, &CANCELLED).await? {
-        Ok(info) => (info, "llm"),
-        Err(e) => {
-            println!("   LLM parse failed, using regex: {}", e);
-            (parse_book_info_from_transcript(&transcript), "regex")
-        }
-    };
+    let llm = bounded(try_llm_parse(&transcript, request), deadline, &CANCELLED).await;
+    let (extracted, method) = parsed_or_regex(llm, &transcript)?;
 
     let mut narrators = vec![];
     if let Some(n) = &extracted.narrator { narrators.push(n.clone()); }
@@ -462,6 +457,36 @@ async fn try_extract_at_offset(
         status: status_ok(),
         error: None,
     })
+}
+
+/// The parse of a finished transcript: the LLM's answer, else the regex
+/// parser. The item's time running out during the LLM call (`TimedOut`) is
+/// one more reason to fall back, not a reason to throw the transcript away:
+/// transcription is the expensive step and it is already done. Only Cancel
+/// stops the item here.
+fn parsed_or_regex<E: std::fmt::Display>(
+    llm: Result<Result<ExtractedBookInfo, E>, StepError>,
+    transcript: &str,
+) -> Result<(ExtractedBookInfo, &'static str), StepError> {
+    match llm {
+        Ok(Ok(info)) => Ok((info, "llm")),
+        Ok(Err(e)) => {
+            println!("   LLM parse failed, using regex: {}", e);
+            Ok((parse_book_info_from_transcript(transcript), "regex"))
+        }
+        Err(StepError::TimedOut) => {
+            println!("   LLM parse ran out of time, using regex");
+            Ok((parse_book_info_from_transcript(transcript), "regex"))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether a pass's result is the item's result: it found enough, there is no
+/// further pass, or the item's time is up (a further pass would only time
+/// out and lose the transcript this one produced).
+fn pass_result_is_final(fields_found: usize, is_last: bool, time_is_up: bool) -> bool {
+    fields_found >= 2 || is_last || time_is_up
 }
 
 // ---- Child processes, timeouts and cancellation ----
@@ -1393,6 +1418,43 @@ fn step_error_result(item_id: &str, err: &StepError) -> AudioIntroResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Final review: an LLM parse timeout keeps the transcript ----
+
+    #[test]
+    fn llm_parse_timeout_falls_back_to_regex() {
+        let transcript = "The Hobbit by J.R.R. Tolkien, narrated by Rob Inglis.";
+        let regex = parse_book_info_from_transcript(transcript);
+        assert_eq!(regex.narrator.as_deref(), Some("Rob Inglis"), "the regex parser reads this transcript");
+
+        let timed_out: Result<Result<ExtractedBookInfo, String>, StepError> = Err(StepError::TimedOut);
+        let (info, method) = parsed_or_regex(timed_out, transcript).expect("a timeout must not discard the transcript");
+        assert_eq!(method, "regex");
+        assert_eq!(info.narrator, regex.narrator);
+        assert_eq!(info.author, regex.author);
+
+        // An LLM error falls back the same way; an answer is used as it is.
+        let (_, method) = parsed_or_regex(Ok(Err("HTTP 500".to_string())), transcript).unwrap();
+        assert_eq!(method, "regex");
+        let answer = ExtractedBookInfo { narrator: Some("Someone Else".into()), ..Default::default() };
+        let (info, method) = parsed_or_regex(Ok(Ok::<_, String>(answer)), transcript).unwrap();
+        assert_eq!((info.narrator.as_deref(), method), (Some("Someone Else"), "llm"));
+
+        // Cancel still stops the item.
+        let cancelled: Result<Result<ExtractedBookInfo, String>, StepError> = Err(StepError::Cancelled);
+        assert_eq!(parsed_or_regex(cancelled, transcript).err(), Some(StepError::Cancelled));
+    }
+
+    #[test]
+    fn a_pass_that_ran_out_of_time_is_the_items_result() {
+        // Not enough found and more passes to go: scan deeper.
+        assert!(!pass_result_is_final(1, false, false));
+        // Unless the item's time is up: a further pass would only time out
+        // and lose the transcript.
+        assert!(pass_result_is_final(0, false, true));
+        assert!(pass_result_is_final(2, false, false));
+        assert!(pass_result_is_final(0, true, false));
+    }
 
     // ---- Bounded fetch of the opening of an audio file ----
 
