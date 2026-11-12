@@ -793,11 +793,21 @@ fn pick_metadata(raw_files: &[RawFile], parent_dir: &str, group_name: &str, scan
     // left by missing embedded tags.
     let hierarchy = parse_folder_hierarchy_in(parent_dir, scan_root);
 
+    // The album is the book title (the writer puts a multi-file book's title
+    // there). Without one, the title tag: never a placeholder or a bare
+    // "Track 01" (`is_junk_title`), and for a multi-file book without its
+    // part marker ("Dune Part 1" -> "Dune"). Otherwise the group's name.
+    let multi_file = raw_files.len() > 1;
+    let own_title = first_tags
+        .title
+        .clone()
+        .filter(|t| !is_junk_title(t))
+        .and_then(|t| if multi_file { clean_book_title(&t, false) } else { Some(t) });
     let title = first_tags
         .album
         .clone()
-        .filter(|s| !s.is_empty())
-        .or(first_tags.title.clone())
+        .filter(|s| !is_placeholder_name(s))
+        .or(own_title)
         .unwrap_or_else(|| group_name.to_string());
 
     let author = first_tags
@@ -880,7 +890,25 @@ fn clean_book_title(raw: &str, from_stem: bool) -> Option<String> {
             }
         }
     }
-    if stem_is_generic(&title) { None } else { Some(title) }
+    if stem_is_generic(&title) || is_placeholder_name(&title) { None } else { Some(title) }
+}
+
+/// A title or album tag that names nothing: empty, punctuation only, or a
+/// ripper's stand-in ("Unknown", "Untitled", "Unknown Album").
+fn is_placeholder_name(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    matches!(
+        words.join(" ").as_str(),
+        "" | "unknown" | "untitled" | "unknown title" | "unknown album" | "untitled album" | "no title"
+    )
+}
+
+/// A title tag that does not say which book this is: a placeholder
+/// (`is_placeholder_name`) or nothing but numbering and generic words
+/// ("Track 01", "Chapter 3": `stem_is_generic`).
+fn is_junk_title(title: &str) -> bool {
+    is_placeholder_name(title) || stem_is_generic(title)
 }
 
 /// Whether a string without any letter is a TITLE made of numbers rather than
@@ -915,9 +943,41 @@ fn book_key(raw: &str) -> String {
     }
 }
 
-/// The book key of a file's album tag, if it has a usable one.
+/// The book key of a file's album tag, if it has a usable one (a placeholder
+/// such as "Unknown Album" is none).
 fn album_key(f: &RawFile) -> Option<String> {
-    f.tags.album.as_deref().map(book_key).filter(|k| !k.is_empty())
+    f.tags.album.as_deref().filter(|a| !is_placeholder_name(a)).map(book_key).filter(|k| !k.is_empty())
+}
+
+/// The book key of a file's title tag, when that tag is an identity: not a
+/// placeholder, not a bare "Track 01" or "Chapter 3" (`is_junk_title`). Two
+/// books tagged "Unknown" are not the same book.
+fn title_identity(f: &RawFile) -> Option<String> {
+    let title = f.tags.title.as_deref().filter(|t| !is_junk_title(t))?;
+    Some(book_key(title)).filter(|k| !k.is_empty())
+}
+
+/// The key a filename gives a file that has no title identity. The part
+/// marker is removed (`book_key`), and in front of a part-marked name a
+/// leading track number is numbering too ("01 - Dune Part 1" and "02 - Dune
+/// Part 2" are both "dune"). Without a part marker the leading number stays:
+/// "01 - Discworld" and "02 - Discworld" may be two books of a series. A name
+/// that is only numbering ("01", "Part 2") keys by itself in full, never "".
+fn stem_key(stem: &str) -> String {
+    if part_marker_re().is_match(stem.trim()) {
+        if let Some(key) = clean_book_title(stem, true).map(|t| book_key(&t)).filter(|k| !k.is_empty()) {
+            return key;
+        }
+    }
+    let key = book_key(stem);
+    if key.is_empty() { stem.trim().to_lowercase() } else { key }
+}
+
+/// The title a file's own name carries, as a key: the name without its part
+/// marker and leading track number ("01 - Dune Part 1" -> "dune"). None when
+/// the name is only numbering or generic words.
+fn stem_title_key(f: &RawFile) -> Option<String> {
+    clean_book_title(&file_stem(f), true).map(|t| book_key(&t)).filter(|k| !k.is_empty())
 }
 
 fn file_stem(f: &RawFile) -> String {
@@ -1027,112 +1087,231 @@ fn known_too_long_for_a_track(f: &RawFile) -> bool {
 ///   2. every filename carries a track number (1-3 digits) after the same
 ///      leading text, and per directory those numbers are consecutive
 ///      ("00 intro", "01", "02") or the names are otherwise identical
-///      ("01 - Chapter", "02 - Chapter", gaps allowed).
+///      ("01 - Chapter", "03 - Chapter", gaps allowed); or
+///   3. every file carries the SAME album identity, there are at least three
+///      files, none is known to run longer than `MAX_TRACK_SECS`, and the
+///      files are numbered the looser ways an ordinary chapter folder is
+///      (`loosely_numbered`): distinct track tags or filename numbers with a
+///      gap (a missing chapter), or disc-track names whose track numbers
+///      restart per disc ("1-01", "1-02", "2-01").
 /// Anything else is treated as possibly several books, and its files are told
 /// apart by title or filename: a wrong split is recoverable, a wrong merge
 /// writes one book's tags over another's files.
 ///
-/// A shared album merges mp3/flac/... files ONLY inside a track set; outside
-/// one they split by title, else filename. For m4a/m4b a track set is still
-/// not enough: `file_book_key` keeps a filename's identity
+/// A shared album merges mp3/flac/... files inside a track set, and outside
+/// one only as chapters by duration (`chapter_albums`). For m4a/m4b a track
+/// set is still not enough: `file_book_key` keeps a filename's identity
 /// (`stem_is_generic`), and a shared album beats distinct titles only on the
 /// stronger evidence of `album_overrides_titles`.
 ///
 /// Known remaining merge paths. "Identity" below means a `book_key` that is
 /// not empty: any text, or a number that is a title (`is_number_title`); a
-/// bare track number or part marker ("01", "Part 2") is none.
+/// bare track number or part marker ("01", "Part 2") is none. A title tag is
+/// an identity only when it is also not a placeholder or generic
+/// (`title_identity`: "Unknown" and "Track 01" are none), and an album tag
+/// only when it is not a placeholder (`album_key`).
 ///
 /// Anywhere (track set or not):
-///   - files whose title tags give the same key are one book; so are files
-///     that key by filename (below) and whose filenames give the same key.
-///     Part markers are removed first, so "1984 Part 1" + "1984 Part 2" and
-///     "It Part 1" + "It Part 2" are one book each. A title key and a
-///     filename key that are equal also meet ("a.m4b" titled "Carrie" joins
-///     an untitled "Carrie.m4b").
+///   - files whose title identities are equal are one book, except whole
+///     books with different names (`contested_titles`: each known to run
+///     longer than `MAX_TRACK_SECS`, their filenames naming different
+///     titles), which key by filename. With an unknown or shorter duration
+///     the equal titles still merge.
+///   - files without a title identity key by filename (`stem_key`) and are
+///     one book when those keys are equal. Part markers are removed first, so
+///     "1984 Part 1" + "1984 Part 2" and "It Part 1" + "It Part 2" are one
+///     book each, and so are "01 - Dune Part 1" + "02 - Dune Part 2" (a
+///     leading track number before a part-marked name is dropped).
+///   - all keys share one namespace, so a title key, a filename key and an
+///     album key that are equal meet ("a.m4b" titled "Carrie" joins an
+///     untitled "Carrie.m4b").
 ///   - a folder that does not split is one book: no file has a key, or
-///     exactly one key exists and no keyless file has a title identity.
+///     exactly one key exists and no keyless file has a title tag with any
+///     text of its own.
 /// Only inside a numbered track set (left as is because mp3/flac files are
 /// per-track by nature, and splitting every chapter named after its title
 /// would wrongly split the common case):
 ///   - mp3/flac/... WHOLE books sharing an album identity (even a collection
 ///     album) with consecutive track tags or numbered names ("1 - It.mp3",
-///     "2 - Carrie.mp3") merge on that album;
+///     "2 - Carrie.mp3") merge on that album; under rule 3 so do three or
+///     more with gapped numbering, unless one is known to run longer than
+///     `MAX_TRACK_SECS`;
 ///   - mp3/flac/... without an album identity are keyless: they are one
 ///     group together (album-less whole books numbered like chapters merge),
 ///     and they also join the folder's single keyed book when none of them
-///     has a title identity (an untagged intro track);
+///     has a title tag with text (an untagged intro track);
 ///   - m4a/m4b without a title identity whose filenames are generic and
 ///     equal once the track number is masked ("01.m4b", "02.m4b") merge,
 ///     unless the file is known to run longer than `MAX_TRACK_SECS`;
 ///   - per-track m4a/m4b (`album_overrides_titles`): three or more generically
 ///     named files sharing an album, none known to run over `MAX_TRACK_SECS`,
 ///     merge on that album despite distinct titles.
-/// Outside a track set an album never merges anything.
+/// Only outside a numbered track set:
+///   - mp3/flac/... chapters by duration (`chapter_albums`): three or more
+///     files with one album identity, EVERY one with a known duration of at
+///     most `MAX_TRACK_SECS`, merge on that album whatever their names and
+///     titles. Three or more short whole books (each under two hours) that
+///     share a collection album merge this way. m4a/m4b never do, and with
+///     any unknown duration nothing does.
 fn is_numbered_track_set(files: &[RawFile]) -> bool {
     if files.len() < 2 {
         return false;
     }
-    if let Some(tracks) = files.iter().map(|f| f.tags.track).collect::<Option<Vec<u32>>>() {
-        if numbered_per_dir(files, &tracks, true) {
+    let tracks = files.iter().map(|f| f.tags.track).collect::<Option<Vec<u32>>>();
+    if tracks.as_ref().is_some_and(|t| numbered_per_dir(files, t, true)) {
+        return true;
+    }
+    // Filename numbers, when every name has one after the same leading text.
+    let names = files
+        .iter()
+        .map(|f| stem_number(&file_stem(f)))
+        .collect::<Option<Vec<_>>>()
+        .filter(|parsed| parsed.iter().all(|p| p.prefix == parsed[0].prefix));
+    let numbers: Option<Vec<u32>> = names.as_ref().map(|parsed| parsed.iter().map(|p| p.number).collect());
+    if let (Some(parsed), Some(numbers)) = (&names, &numbers) {
+        let same_pattern = parsed.iter().all(|p| p.pattern == parsed[0].pattern);
+        if numbered_per_dir(files, numbers, true) || (same_pattern && numbered_per_dir(files, numbers, false)) {
             return true;
         }
     }
-    let Some(parsed) = files.iter().map(|f| stem_number(&file_stem(f))).collect::<Option<Vec<_>>>() else {
+    let album = album_key(&files[0]);
+    let one_album = album.is_some() && files.iter().all(|f| album_key(f) == album);
+    one_album
+        && files.len() >= 3
+        && !files.iter().any(known_too_long_for_a_track)
+        && loosely_numbered(files, tracks.as_deref(), numbers.as_deref())
+}
+
+/// The numbering of an ordinary chapter folder that the strict rules of
+/// `is_numbered_track_set` miss. Evidence only together with one shared
+/// album (rule 3 there): distinct track tags, or distinct filename numbers
+/// after the same leading text, per directory (a gap: "01", "02", "04"); or
+/// every filename starting with a disc-track pair, the pairs distinct per
+/// directory ("1-01 ...", "1-02 ...", "2-01 ...": a flattened multi-disc
+/// rip, whose track tags restart on each disc).
+fn loosely_numbered(files: &[RawFile], tracks: Option<&[u32]>, name_numbers: Option<&[u32]>) -> bool {
+    if tracks.is_some_and(|t| numbered_per_dir(files, t, false)) {
+        return true;
+    }
+    if name_numbers.is_some_and(|n| numbered_per_dir(files, n, false)) {
+        return true;
+    }
+    let Some(pairs) = files.iter().map(|f| disc_track_pair(&file_stem(f))).collect::<Option<Vec<_>>>() else {
         return false;
     };
-    if parsed.iter().any(|p| p.prefix != parsed[0].prefix) {
-        return false;
+    let mut seen = std::collections::HashSet::new();
+    files.iter().zip(pairs).all(|(f, pair)| seen.insert((f.parent_dir.as_str(), pair)))
+}
+
+/// The (disc, track) a filename starts with: "1-01 The Boy Who Lived" ->
+/// (1, 1), "2_03" -> (2, 3). 1-2 digits, one separator, 1-3 digits, and no
+/// digit right after.
+fn disc_track_pair(stem: &str) -> Option<(u32, u32)> {
+    use std::sync::OnceLock;
+    static PAIR_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = PAIR_RE.get_or_init(|| regex::Regex::new(r"^(\d{1,2})[-_.](\d{1,3})(?:\D|$)").unwrap());
+    let caps = re.captures(stem.trim())?;
+    Some((caps[1].parse().ok()?, caps[2].parse().ok()?))
+}
+
+/// What a folder's files, taken together, say about how to key each of them.
+struct FolderEvidence {
+    /// `is_numbered_track_set`.
+    track_set: bool,
+    /// `album_overrides_titles`.
+    per_track: bool,
+    /// Albums whose mp3/flac/... files are chapters by duration: at least
+    /// three files carry the album, and EVERY one has a known duration of at
+    /// most `MAX_TRACK_SECS`. An unknown duration is not evidence, and hours
+    /// long files sharing a collection album are whole books. m4a/m4b files
+    /// are not counted and never merge this way: they are usually whole
+    /// books, and three short ones sharing a series album are still three
+    /// books.
+    chapter_albums: std::collections::HashSet<String>,
+    /// Title identities carried by whole books with different names: two or
+    /// more files with that title, each known to run longer than
+    /// `MAX_TRACK_SECS`, whose filenames name different titles
+    /// (`stem_title_key`: "It" and "Carrie", not "It Part 1" and "It Part
+    /// 2"). Such files key by filename, not by the title they share.
+    contested_titles: std::collections::HashSet<String>,
+}
+
+/// A file known to be a whole book that its filename names.
+fn is_named_whole_book(f: &RawFile) -> bool {
+    known_too_long_for_a_track(f) && stem_title_key(f).is_some()
+}
+
+fn folder_evidence(files: &[RawFile]) -> FolderEvidence {
+    let mut by_album: HashMap<String, (usize, bool)> = HashMap::new();
+    let mut names_by_title: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    for f in files {
+        if !is_single_file_book_format(f) {
+            if let Some(album) = album_key(f) {
+                let entry = by_album.entry(album).or_insert((0, true));
+                entry.0 += 1;
+                entry.1 &= f.tags.duration_secs.is_some_and(|s| s <= MAX_TRACK_SECS);
+            }
+        }
+        if is_named_whole_book(f) {
+            if let (Some(title), Some(name)) = (title_identity(f), stem_title_key(f)) {
+                names_by_title.entry(title).or_default().insert(name);
+            }
+        }
     }
-    let numbers: Vec<u32> = parsed.iter().map(|p| p.number).collect();
-    let same_pattern = parsed.iter().all(|p| p.pattern == parsed[0].pattern);
-    numbered_per_dir(files, &numbers, true) || (same_pattern && numbered_per_dir(files, &numbers, false))
+    FolderEvidence {
+        track_set: is_numbered_track_set(files),
+        per_track: album_overrides_titles(files),
+        chapter_albums: by_album.into_iter().filter(|(_, (n, short))| *n >= 3 && *short).map(|(a, _)| a).collect(),
+        contested_titles: names_by_title.into_iter().filter(|(_, names)| names.len() >= 2).map(|(t, _)| t).collect(),
+    }
 }
 
 /// Which book a file belongs to within its folder. "" = no identity of its
 /// own (joins the folder's single keyed book, if there is one).
 ///
 /// - mp3/flac/...: in a numbered track set, the album; without one, no
-///   identity (it is a chapter). Outside a track set the album is not
-///   evidence (a collection album is shared by different books): title, else
-///   filename.
+///   identity (it is a chapter). Outside a track set the album is a key only
+///   for chapters by duration (`FolderEvidence::chapter_albums`); otherwise
+///   it is not evidence (a collection album is shared by different books):
+///   title, else filename.
 /// - m4b/m4a are usually whole books: title, else filename. The album is NOT
 ///   a fallback key: a collection or series album is shared by different
 ///   books, and the filename already separates files of one folder. Only when
 ///   `per_track` (see `album_overrides_titles`) does a shared album win over
-///   their differing track titles. In a numbered track set an untagged one whose
-///   filename is generic keys by that filename with the number masked
-///   ("01.m4a" and "02.m4a" are the same book); a filename with a title keeps
-///   its number ("Harry Potter 1" and "Harry Potter 2" are different books).
+///   their differing track titles. In a numbered track set one without a
+///   title identity whose filename is generic keys by that filename with the
+///   number masked ("01.m4a" and "02.m4a" are the same book); a filename with
+///   a title keeps its number ("Harry Potter 1" and "Harry Potter 2" are
+///   different books).
+/// - "Title" is `title_identity`: a placeholder or generic title tag
+///   ("Unknown", "Track 01", "Chapter 3") is none, and the filename decides.
+///   Neither is a title shared by whole books with different names
+///   (`FolderEvidence::contested_titles`).
 /// - A title or filename that is a number title ("1984", "11-22-63") is an
 ///   identity like any other (`book_key`). A title that is only numbering
 ///   ("01", "Part 2") is none, and the filename decides; a filename that is
-///   only numbering keys by itself in full, never by "".
-fn file_book_key(f: &RawFile, track_set: bool, per_track: bool) -> String {
-    let tag_key = |o: &Option<String>| o.as_deref().map(book_key).filter(|k| !k.is_empty());
+///   only numbering keys by itself in full, never by "" (`stem_key`).
+fn file_book_key(f: &RawFile, ev: &FolderEvidence) -> String {
     let stem = file_stem(f);
-    let stem_key = || {
-        let k = book_key(&stem);
-        // Only numbering ("01", "Part 2"): the whole name tells the files apart.
-        if k.is_empty() { stem.trim().to_lowercase() } else { k }
-    };
+    let title = title_identity(f).filter(|t| !(ev.contested_titles.contains(t) && is_named_whole_book(f)));
     if is_single_file_book_format(f) {
-        if track_set && per_track {
-            if let Some(album) = tag_key(&f.tags.album) {
+        if ev.track_set && ev.per_track {
+            if let Some(album) = album_key(f) {
                 return album;
             }
         }
-        tag_key(&f.tags.title).unwrap_or_else(|| {
-            match stem_number(&stem) {
-                Some(n) if track_set && stem_is_generic(&stem) && !known_too_long_for_a_track(f) => {
-                    book_key(&n.pattern)
-                }
-                _ => stem_key(),
+        title.unwrap_or_else(|| match stem_number(&stem) {
+            Some(n) if ev.track_set && stem_is_generic(&stem) && !known_too_long_for_a_track(f) => {
+                book_key(&n.pattern)
             }
+            _ => stem_key(&stem),
         })
-    } else if track_set {
-        tag_key(&f.tags.album).unwrap_or_default()
+    } else if ev.track_set {
+        album_key(f).unwrap_or_default()
+    } else if let Some(album) = album_key(f).filter(|a| ev.chapter_albums.contains(a)) {
+        album
     } else {
-        tag_key(&f.tags.title).unwrap_or_else(stem_key)
+        title.unwrap_or_else(|| stem_key(&stem))
     }
 }
 
@@ -1140,14 +1319,14 @@ fn file_book_key(f: &RawFile, track_set: bool, per_track: bool) -> String {
 /// numbered set) join the single keyed book when there is exactly one AND they
 /// carry no title of their own (an untagged intro track). A titled keyless
 /// file ("02 - Carrie.mp3", title "Carrie", beside album "It") may be another
-/// book, so the keyless files then form their own group.
+/// book, so the keyless files then form their own group. Any title text
+/// counts here, a generic one too: keeping such a file out is the split side.
 fn split_folder_into_books(raw_files: Vec<RawFile>) -> Vec<(String, Vec<RawFile>)> {
-    let track_set = is_numbered_track_set(&raw_files);
-    let per_track = album_overrides_titles(&raw_files);
+    let evidence = folder_evidence(&raw_files);
     let mut order: Vec<String> = Vec::new();
     let mut buckets: HashMap<String, Vec<RawFile>> = HashMap::new();
     for f in raw_files {
-        let key = file_book_key(&f, track_set, per_track);
+        let key = file_book_key(&f, &evidence);
         if !buckets.contains_key(&key) {
             order.push(key.clone());
         }
@@ -1255,11 +1434,12 @@ pub(crate) fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
             // ("01") is it the folder's name (`own_multi_file_title`).
             let shared_album = split
                 && raw_files.iter().filter_map(album_key).any(|a| a != key && album_books.get(&a).copied().unwrap_or(0) >= 2);
-            let own_title = || raw_files.iter().find_map(|f| f.tags.title.clone().filter(|t| !book_key(t).is_empty()));
+            let own_title =
+                || raw_files.iter().find_map(|f| f.tags.title.clone().filter(|t| !is_junk_title(t) && !book_key(t).is_empty()));
             let album_title = if shared_album {
                 None
             } else {
-                raw_files[0].tags.album.clone().filter(|s| !s.trim().is_empty())
+                raw_files[0].tags.album.clone().filter(|s| !is_placeholder_name(s))
             };
             // The name before any " (n)": also the title fallback.
             let base_name = if !split {
@@ -2136,6 +2316,315 @@ mod tests {
             raw(d, "03 - Carrie.m4b", titled("Carrie")),
         ]);
         assert_eq!(names(&groups), vec!["Carrie", "Frank Herbert"]);
+    }
+
+    // ---- Final review: chapter folders and junk titles (Important 2 and 4) ----
+
+    const HP1: &str = "/audiobooks/J K Rowling/Harry Potter 1";
+
+    /// One file's tags for the probe cases: 25 minutes long unless `secs`
+    /// says otherwise (None = duration unknown).
+    fn probe(album: Option<&str>, title: Option<&str>, track: Option<u32>, secs: Option<u64>) -> EmbeddedTags {
+        EmbeddedTags {
+            album: album.map(Into::into),
+            title: title.map(Into::into),
+            track,
+            duration_secs: secs,
+            ..Default::default()
+        }
+    }
+
+    fn files_of(g: &BookGroup) -> Vec<&str> {
+        g.files.iter().map(|f| f.filename.as_str()).collect()
+    }
+
+    /// Whole books: about 11 hours each.
+    const WHOLE_BOOK_SECS: u64 = 40_000;
+
+    #[test]
+    fn disc_restart_numbering_is_one_book() {
+        // Review case A: a flattened multi-disc rip, track tags restart per disc.
+        for secs in [Some(1500), None] {
+            let t = |title: &str, track: u32| probe(Some("Harry Potter 1"), Some(title), Some(track), secs);
+            let groups = group_files(vec![
+                raw(HP1, "2-02 The Keeper.mp3", t("The Keeper of the Keys", 2)),
+                raw(HP1, "1-01 The Boy Who Lived.mp3", t("The Boy Who Lived", 1)),
+                raw(HP1, "2-01 The Letters.mp3", t("The Letters from No One", 1)),
+                raw(HP1, "1-02 The Vanishing Glass.mp3", t("The Vanishing Glass", 2)),
+            ]);
+            assert_eq!(groups.len(), 1, "secs={secs:?} {groups:?}");
+            assert_eq!(groups[0].metadata.title, "Harry Potter 1");
+            assert_eq!(
+                files_of(&groups[0]),
+                vec!["1-01 The Boy Who Lived.mp3", "1-02 The Vanishing Glass.mp3", "2-01 The Letters.mp3", "2-02 The Keeper.mp3"]
+            );
+        }
+    }
+
+    #[test]
+    fn missing_chapter_is_one_book() {
+        // Review case B: 01, 02, 04.
+        for secs in [Some(1500), None] {
+            let t = |title: &str, track: u32| probe(Some("Harry Potter 1"), Some(title), Some(track), secs);
+            let groups = group_files(vec![
+                raw(HP1, "01 - The Boy Who Lived.mp3", t("The Boy Who Lived", 1)),
+                raw(HP1, "02 - The Vanishing Glass.mp3", t("The Vanishing Glass", 2)),
+                raw(HP1, "04 - The Keeper.mp3", t("The Keeper of the Keys", 4)),
+            ]);
+            assert_eq!(groups.len(), 1, "secs={secs:?} {groups:?}");
+            assert_eq!(groups[0].files.len(), 3);
+            assert_eq!(groups[0].metadata.title, "Harry Potter 1");
+            // The gap in the names alone (no track tags) is enough too.
+            let t = |title: &str| probe(Some("Harry Potter 1"), Some(title), None, secs);
+            let groups = group_files(vec![
+                raw(HP1, "01 - The Boy Who Lived.mp3", t("The Boy Who Lived")),
+                raw(HP1, "02 - The Vanishing Glass.mp3", t("The Vanishing Glass")),
+                raw(HP1, "04 - The Keeper.mp3", t("The Keeper of the Keys")),
+            ]);
+            assert_eq!(groups.len(), 1, "names only, secs={secs:?} {groups:?}");
+        }
+    }
+
+    #[test]
+    fn chapters_sharing_an_album_merge_on_known_durations() {
+        // Review case H: numbered chapters plus unnumbered extras.
+        let case_h = |credits_secs: Option<u64>| {
+            let t = |title: &str, track: Option<u32>, secs| probe(Some("Harry Potter 1"), Some(title), track, secs);
+            group_files(vec![
+                raw(HP1, "Chapter 1 - The Boy.mp3", t("The Boy Who Lived", Some(1), Some(1500))),
+                raw(HP1, "Chapter 2 - The Glass.mp3", t("The Vanishing Glass", Some(2), Some(1500))),
+                raw(HP1, "Epilogue.mp3", t("Epilogue", Some(3), Some(1500))),
+                raw(HP1, "Credits.mp3", t("Credits", None, credits_secs)),
+            ])
+        };
+        let groups = case_h(Some(90));
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].files.len(), 4);
+        assert_eq!(groups[0].metadata.title, "Harry Potter 1");
+        // One unknown duration is not evidence: the files split, as before.
+        assert_eq!(case_h(None).len(), 4);
+
+        // Review case B2: no numbering anywhere, only the album and durations.
+        let case_b2 = |secs: Option<u64>| {
+            let t = |title: &str| probe(Some("Harry Potter 1"), Some(title), None, secs);
+            group_files(vec![
+                raw(HP1, "The Boy Who Lived.mp3", t("The Boy Who Lived")),
+                raw(HP1, "The Vanishing Glass.mp3", t("The Vanishing Glass")),
+                raw(HP1, "The Keeper.mp3", t("The Keeper of the Keys")),
+            ])
+        };
+        let groups = case_b2(Some(1500));
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].metadata.title, "Harry Potter 1");
+        assert_eq!(case_b2(None).len(), 3, "unknown durations split");
+        // A track of exactly the limit is still a track.
+        assert_eq!(case_b2(Some(MAX_TRACK_SECS)).len(), 1);
+
+        // Two books' chapters in one folder: one book per album.
+        let t = |album: &str, title: &str| probe(Some(album), Some(title), None, Some(1500));
+        let d = "/audiobooks/Mixed";
+        let groups = group_files(vec![
+            raw(d, "Prologue.mp3", t("Book One", "Prologue")),
+            raw(d, "The Storm.mp3", t("Book One", "The Storm")),
+            raw(d, "The Calm.mp3", t("Book One", "The Calm")),
+            raw(d, "Arrival.mp3", t("Book Two", "Arrival")),
+            raw(d, "Departure.mp3", t("Book Two", "Departure")),
+            raw(d, "Return.mp3", t("Book Two", "Return")),
+        ]);
+        assert_eq!(names(&groups), vec!["Book One", "Book Two"]);
+        assert!(groups.iter().all(|g| g.files.len() == 3), "{groups:?}");
+    }
+
+    #[test]
+    fn shared_album_does_not_merge_without_chapter_evidence() {
+        let d = "/audiobooks/Stephen King";
+        let album = "Stephen King Collection";
+        let t = |title: &str, secs: Option<u64>| probe(Some(album), Some(title), None, secs);
+        // Whole books: hours long.
+        let groups = group_files(vec![
+            raw(d, "It.mp3", t("It", Some(WHOLE_BOOK_SECS))),
+            raw(d, "Carrie.mp3", t("Carrie", Some(WHOLE_BOOK_SECS))),
+            raw(d, "Misery.mp3", t("Misery", Some(WHOLE_BOOK_SECS))),
+        ]);
+        assert_eq!(names(&groups), vec!["Carrie", "It", "Misery"]);
+        // One file over the limit vetoes the whole album.
+        let groups = group_files(vec![
+            raw(d, "It.mp3", t("It", Some(MAX_TRACK_SECS + 1))),
+            raw(d, "Carrie.mp3", t("Carrie", Some(1500))),
+            raw(d, "Misery.mp3", t("Misery", Some(1500))),
+            raw(d, "Cujo.mp3", t("Cujo", Some(1500))),
+        ]);
+        assert_eq!(groups.len(), 4, "{groups:?}");
+        // Two files are too few, however short.
+        let groups = group_files(vec![raw(d, "It.mp3", t("It", Some(1500))), raw(d, "Carrie.mp3", t("Carrie", Some(1500)))]);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        // m4a/m4b are usually whole books: three short ones sharing a
+        // collection album are still three books.
+        let groups = group_files(vec![
+            raw(d, "It.m4b", t("It", Some(3600))),
+            raw(d, "Carrie.m4b", t("Carrie", Some(3600))),
+            raw(d, "Misery.m4b", t("Misery", Some(3600))),
+        ]);
+        assert_eq!(names(&groups), vec!["Carrie", "It", "Misery"]);
+        // A placeholder album is no album.
+        let u = |title: &str| probe(Some("Unknown Album"), Some(title), None, Some(1500));
+        let groups = group_files(vec![raw(d, "It.mp3", u("It")), raw(d, "Carrie.mp3", u("Carrie")), raw(d, "Misery.mp3", u("Misery"))]);
+        assert_eq!(names(&groups), vec!["Carrie", "It", "Misery"]);
+
+        // Gapped numbering is evidence only for three or more files, none of
+        // them known to be a whole book.
+        let n = |title: &str, track: u32, secs: Option<u64>| probe(Some(album), Some(title), Some(track), secs);
+        let groups = group_files(vec![
+            raw(d, "1 - It.mp3", n("It", 1, Some(WHOLE_BOOK_SECS))),
+            raw(d, "2 - Carrie.mp3", n("Carrie", 2, Some(WHOLE_BOOK_SECS))),
+            raw(d, "4 - Misery.mp3", n("Misery", 4, Some(WHOLE_BOOK_SECS))),
+        ]);
+        assert_eq!(names(&groups), vec!["Carrie", "It", "Misery"]);
+        let groups = group_files(vec![raw(d, "1 - It.mp3", n("It", 1, None)), raw(d, "3 - Carrie.mp3", n("Carrie", 3, None))]);
+        assert_eq!(names(&groups), vec!["Carrie", "It"]);
+        // A disc-track pair is read only from the start of a name; a date-like
+        // name repeats its "pair" on every part, which is not a numbering, and
+        // the parts still meet on their name.
+        assert_eq!(disc_track_pair("1-01 The Boy Who Lived"), Some((1, 1)));
+        assert_eq!(disc_track_pair("2_03"), Some((2, 3)));
+        assert_eq!(disc_track_pair("01 - The Boy"), None);
+        assert_eq!(disc_track_pair("1-2001 A Space Odyssey"), None);
+        let groups = group_files(vec![
+            raw(d, "11-22-63 Part 1.mp3", probe(Some(album), None, None, None)),
+            raw(d, "11-22-63 Part 2.mp3", probe(Some(album), None, None, None)),
+            raw(d, "11-22-63 Part 3.mp3", probe(Some(album), None, None, None)),
+            raw(d, "Carrie.mp3", probe(Some(album), None, None, None)),
+        ]);
+        assert_eq!(names(&groups), vec!["11-22-63", "Carrie"]);
+    }
+
+    #[test]
+    fn junk_title_tags_are_not_an_identity() {
+        // Review case E: two whole books carrying the same junk title tag.
+        let d = "/audiobooks/Stephen King";
+        for junk in ["Unknown", "unknown", "Untitled", "[Unknown Title]", "Track 01", "Chapter 1", "01"] {
+            for secs in [Some(WHOLE_BOOK_SECS), None] {
+                for ext in ["m4b", "mp3"] {
+                    let groups = group_files(vec![
+                        raw(d, &format!("It.{ext}"), probe(None, Some(junk), None, secs)),
+                        raw(d, &format!("Carrie.{ext}"), probe(None, Some(junk), None, secs)),
+                    ]);
+                    assert_eq!(groups.len(), 2, "{junk:?} {secs:?} {ext}: {groups:?}");
+                    assert_eq!(names(&groups), vec!["Carrie", "It"], "{junk:?} {secs:?} {ext}");
+                    for g in &groups {
+                        assert_eq!(g.files.len(), 1);
+                        assert_eq!(g.metadata.author, "Stephen King");
+                    }
+                }
+            }
+        }
+        // Parts of one book still meet on their filenames.
+        let d = "/audiobooks/Stephen King/It";
+        let groups = group_files(vec![
+            raw(d, "It Part 1.m4b", probe(None, Some("Unknown"), None, Some(WHOLE_BOOK_SECS))),
+            raw(d, "It Part 2.m4b", probe(None, Some("Unknown"), None, Some(WHOLE_BOOK_SECS))),
+        ]);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].metadata.title, "It", "the folder name, not the junk tag");
+        // A lone book with a junk title is named by its folder.
+        let groups = group_files(vec![raw(d, "audio.m4b", probe(None, Some("Untitled"), None, None))]);
+        assert_eq!(names(&groups), vec!["It"]);
+
+        assert!(is_placeholder_name("") && is_placeholder_name(" - ") && is_placeholder_name("UNKNOWN"));
+        assert!(!is_placeholder_name("The Unknown") && !is_placeholder_name("It"));
+        assert_eq!(clean_book_title("Unknown", false), None);
+    }
+
+    #[test]
+    fn generic_title_chapters_group_alike_in_m4a_and_mp3() {
+        // Review cases D and D2: the same files must not group by extension.
+        for ext in ["m4a", "mp3"] {
+            let files: Vec<RawFile> = (1..=3)
+                .map(|n| raw(HP1, &format!("{n:02}.{ext}"), probe(None, Some(&format!("Chapter {n}")), Some(n), Some(1500))))
+                .collect();
+            let groups = group_files(files);
+            assert_eq!(groups.len(), 1, "{ext}: {groups:?}");
+            assert_eq!(groups[0].files.len(), 3);
+            assert_eq!(groups[0].metadata.title, "Harry Potter 1", "{ext}: the folder, not \"Chapter 1\"");
+        }
+    }
+
+    #[test]
+    fn equal_titles_on_differently_named_whole_books_split() {
+        let d = "/audiobooks/Stephen King";
+        let t = |secs: Option<u64>| probe(None, Some("Stephen King Audiobook"), None, secs);
+        let groups = group_files(vec![raw(d, "It.m4b", t(Some(WHOLE_BOOK_SECS))), raw(d, "Carrie.m4b", t(Some(WHOLE_BOOK_SECS)))]);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        let mut gnames: Vec<&str> = groups.iter().map(|g| g.group_name.as_str()).collect();
+        gnames.sort();
+        assert_eq!(gnames, vec!["Carrie", "It"]);
+        // The same for mp3 whole books outside a track set.
+        let groups = group_files(vec![raw(d, "It.mp3", t(Some(WHOLE_BOOK_SECS))), raw(d, "Carrie.mp3", t(Some(WHOLE_BOOK_SECS)))]);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        // Not known to be whole books: the equal title still decides.
+        for secs in [None, Some(1500)] {
+            let groups = group_files(vec![raw(d, "It.m4b", t(secs)), raw(d, "Carrie.m4b", t(secs))]);
+            assert_eq!(groups.len(), 1, "{secs:?} {groups:?}");
+        }
+        // One long file is not two whole books.
+        let groups = group_files(vec![raw(d, "It.m4b", t(Some(WHOLE_BOOK_SECS))), raw(d, "Carrie.m4b", t(Some(1500)))]);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+
+        // Parts of one book name the same title: they stay one book.
+        let it = |title: &str| probe(None, Some(title), None, Some(WHOLE_BOOK_SECS));
+        let groups = group_files(vec![raw(d, "It Part 1.m4b", it("It")), raw(d, "It Part 2.m4b", it("It"))]);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        let groups = group_files(vec![raw(d, "01 - Dune.m4b", it("Dune")), raw(d, "02 - Dune.m4b", it("Dune"))]);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        // Generic names say nothing against the shared title.
+        let groups = group_files(vec![raw(d, "01.m4b", it("Dune")), raw(d, "02.m4b", it("Dune"))]);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        // Three files, two books.
+        let groups = group_files(vec![
+            raw(d, "It Part 1.m4b", t(Some(WHOLE_BOOK_SECS))),
+            raw(d, "It Part 2.m4b", t(Some(WHOLE_BOOK_SECS))),
+            raw(d, "Carrie.m4b", t(Some(WHOLE_BOOK_SECS))),
+        ]);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!(groups.iter().map(|g| g.files.len()).max(), Some(2));
+    }
+
+    #[test]
+    fn unsplit_multi_part_title_loses_its_part_marker() {
+        // Review case F.
+        let d = "/audiobooks/Frank Herbert/Dune";
+        let big = |title: &str| probe(None, Some(title), None, Some(WHOLE_BOOK_SECS));
+        let groups = group_files(vec![raw(d, "Dune Part 1.m4b", big("Dune Part 1")), raw(d, "Dune Part 2.m4b", big("Dune Part 2"))]);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].files.len(), 2);
+        assert_eq!(groups[0].metadata.title, "Dune");
+        // A single file keeps its own title as tagged.
+        let groups = group_files(vec![raw(d, "Dune Part 1.m4b", big("Dune Part 1"))]);
+        assert_eq!(groups[0].metadata.title, "Dune Part 1");
+    }
+
+    #[test]
+    fn leading_track_number_is_dropped_only_before_a_part_marker() {
+        let d = "/audiobooks/Mixed";
+        let groups = group_files(vec![
+            raw(d, "01 - Dune Part 1.m4b", EmbeddedTags::default()),
+            raw(d, "02 - Dune Part 2.m4b", EmbeddedTags::default()),
+            raw(d, "Carrie.m4b", EmbeddedTags::default()),
+        ]);
+        assert_eq!(names(&groups), vec!["Carrie", "Dune"]);
+        // Without a part marker the number may be a book number: kept apart.
+        for title in [None, Some("Unknown")] {
+            let groups = group_files(vec![
+                raw(d, "01 - Discworld.m4b", probe(None, title, None, None)),
+                raw(d, "02 - Discworld.m4b", probe(None, title, None, None)),
+            ]);
+            assert_eq!(groups.len(), 2, "{title:?} {groups:?}");
+        }
+        assert_eq!(stem_key("01 - Dune Part 1"), "dune");
+        assert_eq!(stem_key("01 - Discworld"), "01 - discworld");
+        assert_eq!(stem_key("300 Part 1"), "300 part 1");
+        assert_eq!(stem_key("11-22-63 Part 2"), "11-22-63");
+        assert_eq!(stem_key("02"), "02");
     }
 
     #[test]
