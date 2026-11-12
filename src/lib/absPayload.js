@@ -305,3 +305,79 @@ export function applyPayloadToSnapshot(original, meta, payload) {
   if ('tags' in (payload || {})) next.tags = [...payload.tags];
   return next;
 }
+
+/**
+ * H-5: apply the local delta to the live list. Returns
+ * live + (local - snapshot) - (snapshot - local), compared case-insensitively
+ * (listKey), keeping the live order and casing and appending additions in
+ * local order. A null snapshot means nothing counts as removed.
+ */
+export function rebaseArrayOnLive(snapshotArr, localArr, liveArr) {
+  const snapshot = dedupe(snapshotArr);
+  const local = dedupe(localArr);
+  const live = dedupe(liveArr);
+  const snapKeys = new Set(snapshot.map(listKey));
+  const localKeys = new Set(local.map(listKey));
+  const removed = new Set(snapshot.filter((v) => !localKeys.has(listKey(v))).map(listKey));
+  const kept = live.filter((v) => !removed.has(listKey(v)));
+  const keptKeys = new Set(kept.map(listKey));
+  const added = local.filter((v) => !snapKeys.has(listKey(v)) && !keptKeys.has(listKey(v)));
+  return [...kept, ...added];
+}
+
+/**
+ * The tags and genres of a live item from GET /api/items/:id?expanded=1, or
+ * null when the response does not carry them (the caller must then send
+ * nothing, since it cannot tell what is on the server).
+ */
+export function readLiveLists(item) {
+  const media = item?.media;
+  if (!media || typeof media !== 'object') return null;
+  const tags = media.tags;
+  const genres = media.metadata?.genres;
+  if (!Array.isArray(tags) || !Array.isArray(genres)) return null;
+  return { tags: dedupe(tags), genres: dedupe(genres) };
+}
+
+/**
+ * H-5: rebase a payload's tags and genres on the live lists. Lists the
+ * payload carries are rebased (rebaseArrayOnLive) against `original`; a list
+ * that then equals the live one is dropped, and so is one the rebase emptied
+ * unless the user cleared that field (meta.user_cleared). Added genres are
+ * capped against the live genres (MAX_GENRES); live genres are never trimmed.
+ *
+ * Returns { payload, lists } where `lists` is { tags, genres } as they will be
+ * on the server once the payload is applied.
+ */
+export function rebasePayloadOnLive(payload, original, live, meta = {}) {
+  const cleared = Array.isArray(meta?.user_cleared) ? meta.user_cleared : [];
+  const md = { ...(payload?.metadata || {}) };
+  const out = { metadata: md };
+  if (payload && 'tags' in payload) out.tags = payload.tags;
+  const lists = { tags: [...live.tags], genres: [...live.genres] };
+
+  const rebase = (field, localArr, cap) => {
+    let next = rebaseArrayOnLive(original ? original[field] : null, localArr, live[field]);
+    if (cap != null) {
+      const liveKeys = new Set(live[field].map(listKey));
+      const fromLive = next.filter((v) => liveKeys.has(listKey(v)));
+      const additions = next.filter((v) => !liveKeys.has(listKey(v)));
+      next = [...fromLive, ...additions.slice(0, Math.max(0, cap - fromLive.length))];
+    }
+    if (sameList(next, live[field])) return undefined;
+    if (next.length === 0 && !cleared.includes(field)) return undefined;
+    return next;
+  };
+
+  if ('genres' in md) {
+    const next = rebase('genres', md.genres, MAX_GENRES);
+    if (next === undefined) delete md.genres;
+    else { md.genres = next; lists.genres = [...next]; }
+  }
+  if ('tags' in out) {
+    const next = rebase('tags', out.tags, null);
+    if (next === undefined) delete out.tags;
+    else { out.tags = next; lists.tags = [...next]; }
+  }
+  return { payload: out, lists };
+}

@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import { callBackend } from '../api';
 import { useApp } from '../context/AppContext';
 import { buildWritePayload } from '../lib/writePayload';
-import { getAbsId, normalizePushResult } from '../lib/absPush';
+import { getAbsId, normalizePushResult, mergePushResults } from '../lib/absPush';
 
 export function useTagOperations() {
   const { config, groups, updateFileStatuses, setWriteProgress } = useApp();
@@ -156,10 +156,9 @@ const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
     
     // CHUNK INTO BATCHES OF 50
     const CHUNK_SIZE = 50;
-    let totalUpdated = 0;
-    let totalFailed = 0;
+    // Task 5 (M-9): per-book { updated, skipped, failed } entries.
+    let totals = { updated: [], skipped: [], failed: [] };
     const totalUnmatched = [];
-    const totalErrors = [];
     
     for (let i = 0; i < allItems.length; i += CHUNK_SIZE) {
       const chunk = allItems.slice(i, i + CHUNK_SIZE);
@@ -170,12 +169,7 @@ const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
           request: { items: chunk } 
         });
         
-        // #60: push_abs_updates returns counts ({success, failed, errors});
-        // normalise instead of spreading a number (which threw a TypeError).
-        const n = normalizePushResult(result);
-        totalUpdated += n.updated;
-        totalFailed += n.failed;
-        totalErrors.push(...n.errors);
+        totals = mergePushResults(totals, normalizePushResult(result));
         if (Array.isArray(result?.unmatched)) totalUnmatched.push(...result.unmatched);
         
         // Small delay between chunks
@@ -184,8 +178,10 @@ const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
         }
       } catch (error) {
         console.error(`Push chunk ${chunkNum} failed:`, error);
-        totalFailed += chunk.length;
-        totalErrors.push(String(error?.message || error));
+        const message = String(error?.message || error);
+        totals = mergePushResults(totals, {
+          failed: chunk.map(item => ({ id: item.group_id, title: item.metadata?.title || '', error: message })),
+        });
       }
     }
     
@@ -193,9 +189,7 @@ const pushToAudiobookShelf = useCallback(async (selectedFiles) => {
     setPushing(false);
     return {
       attempted: allItems.length,
-      updated: totalUpdated,
-      failed: totalFailed,
-      errors: totalErrors,
+      ...totals,
       unmatched: totalUnmatched
     };
   } catch (error) {

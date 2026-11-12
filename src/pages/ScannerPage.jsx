@@ -773,7 +773,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const reportAutoPush = (result) => {
     if (!result?.push) return;
     const n = normalizePushResult(result.push);
-    const summary = summarizePush(n, n.updated + n.failed);
+    const summary = summarizePush(n, n.updated.length + n.skipped.length + n.failed.length);
     (toast[summary.type] || toast.info)(summary.title, summary.message);
   };
 
@@ -3353,9 +3353,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         books: outcome.attempted,
         byId: outcome.absCount,
         byPath: outcome.localCount,
-        updated: outcome.updated,
-        failed: outcome.failed,
-        errors: outcome.errors.slice(0, 5),
+        updated: outcome.updated.length,
+        skipped: outcome.skipped.length,
+        failed: outcome.failed.length,
+        failedBooks: outcome.failed.slice(0, 5),
       });
     } catch (error) {
       console.error('Push failed:', error);

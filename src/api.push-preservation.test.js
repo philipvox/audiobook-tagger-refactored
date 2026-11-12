@@ -29,12 +29,22 @@ beforeEach(() => {
   localStorage.clear();
   setConfig();
   vi.resetAllMocks();
-  absApi.mockResolvedValue({});
+  serveLive();
 });
 
+// Task 5: every push GETs the live item before the PATCH. Serve one whose
+// tags and genres are `live` (by default: empty, i.e. an unchanged server).
+function serveLive(live = {}) {
+  absApi.mockImplementation(async (_base, _token, _path, opts) => (
+    opts?.method === 'PATCH' ? {} : { media: { tags: live.tags || [], metadata: { genres: live.genres || [] } } }
+  ));
+}
+
+// The live item matches the import snapshot (nothing changed in ABS since).
 async function pushAndGetPayload(meta, original) {
+  serveLive(original || {});
   const result = await callBackend('push_abs_updates', { items: [{ abs_id: 'item-1', metadata: meta, original }] });
-  expect(result.success).toBe(1);
+  expect(result.updated).toHaveLength(1);
   return absApi.mock.calls.at(-1)?.[3]?.body;
 }
 
@@ -103,12 +113,14 @@ describe('tags at the push boundary', () => {
 });
 
 describe('diff push end to end', () => {
-  it('an unchanged book is not PATCHed at all but still counts as pushed', async () => {
+  // Task 5 (M-9): a no-op used to count as an update; it is now skipped.
+  it('an unchanged book is not PATCHed at all and is reported as skipped', async () => {
     const meta = { title: 'Dune', genres: ['LitRPG'], tags: ['dna:x:y'] };
     const result = await callBackend('push_abs_imports', { items: [{ id: 'g1', abs_id: 'item-1', metadata: meta, original: snap(meta) }] });
-    expect(result.updated).toBe(1);
+    expect(result.updated).toEqual([]);
+    expect(result.skipped).toEqual([{ id: 'g1', title: 'Dune', reason: 'no changes' }]);
     expect(absApi).not.toHaveBeenCalled();
-    expect(result.snapshots.g1).toBeTruthy();
+    expect(result.snapshots).not.toHaveProperty('g1');
   });
 
   it('returns the advanced snapshot for each pushed book', async () => {

@@ -168,7 +168,7 @@ describe('useTagOperations.pushToAudiobookShelf (minor fix: line 114 guard)', ()
       metadata: { title: 'Imported' },
       files: [{ id: 'li-9-f0', path: '/audiobooks/x.m4b' }],
     }];
-    mockCallBackend.mockResolvedValue({ success: 1, failed: 0, errors: [] });
+    mockCallBackend.mockResolvedValue({ updated: [{ id: 'li-9', title: 'Imported' }], skipped: [], failed: [] });
 
     const { result } = renderHook(() => useTagOperations());
     let out;
@@ -179,7 +179,8 @@ describe('useTagOperations.pushToAudiobookShelf (minor fix: line 114 guard)', ()
     expect(mockCallBackend).toHaveBeenCalledWith('push_abs_updates', {
       request: { items: [{ path: '/audiobooks/x.m4b', metadata: { title: 'Imported' }, group_id: 'li-9', original: null, abs_id: 'li-9' }] },
     });
-    expect(out).toMatchObject({ updated: 1, failed: 0, errors: [] });
+    // Task 5 (M-9): per-book entries instead of counts.
+    expect(out).toMatchObject({ updated: [{ id: 'li-9', title: 'Imported' }], skipped: [], failed: [] });
   });
 
   it('#60: numeric failed counts from push_abs_updates do not throw and are reported', async () => {
@@ -194,6 +195,25 @@ describe('useTagOperations.pushToAudiobookShelf (minor fix: line 114 guard)', ()
       out = await result.current.pushToAudiobookShelf(new Set(['f1']));
     });
 
-    expect(out).toMatchObject({ updated: 0, failed: 1, errors: ['Missing item ID'] });
+    expect(out.updated).toEqual([]);
+    expect(out.failed).toHaveLength(1);
+    expect(out.failed[0].error).toBe('Missing item ID');
+  });
+
+  it('Task 5: a failed chunk names every book in it', async () => {
+    mockGroups = [{
+      id: 'g1', metadata: { title: 'Book' }, files: [{ id: 'f1', path: '/a/1.m4b' }],
+    }];
+    mockCallBackend.mockRejectedValue(new Error('network down'));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { result } = renderHook(() => useTagOperations());
+    let out;
+    await act(async () => {
+      out = await result.current.pushToAudiobookShelf(new Set(['f1']));
+    });
+
+    expect(out.failed).toEqual([{ id: 'g1', title: 'Book', error: 'network down' }]);
+    consoleError.mockRestore();
   });
 });

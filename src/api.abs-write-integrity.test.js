@@ -21,15 +21,23 @@ beforeEach(() => {
     abs_api_token: 'token',
   }));
   vi.resetAllMocks();
-  absApi.mockResolvedValue({});
+  serveLive();
 });
+
+// Task 5: every push GETs the live item before the PATCH. Serve one whose
+// tags and genres are `live` (by default: empty, i.e. an unchanged server).
+function serveLive(live = {}) {
+  absApi.mockImplementation(async (_base, _token, _path, opts) => (
+    opts?.method === 'PATCH' ? {} : { media: { tags: live.tags || [], metadata: { genres: live.genres || [] } } }
+  ));
+}
 
 async function pushUpdatesAndGetPayload(meta, idField = 'abs_id') {
   const item = { metadata: meta };
   item[idField] = 'item-1';
   const result = await callBackend('push_abs_updates', { items: [item] });
-  expect(result.success).toBe(1);
-  expect(result.failed).toBe(0);
+  expect(result.updated).toHaveLength(1);
+  expect(result.failed).toEqual([]);
   const options = absApi.mock.calls.at(-1)[3];
   return options.body;
 }
@@ -63,7 +71,6 @@ describe('CR-4a: buildAbsPayload omits series key when there is no series info',
 
 describe('J: push handlers unify on item.abs_id || item.id', () => {
   it('push_abs_updates uses abs_id when both abs_id and id are present', async () => {
-    absApi.mockResolvedValue({});
     await callBackend('push_abs_updates', {
       items: [{ abs_id: 'correct-id', id: 'wrong-id', metadata: { title: 'X' } }],
     });
@@ -73,7 +80,6 @@ describe('J: push handlers unify on item.abs_id || item.id', () => {
   });
 
   it('push_abs_imports uses abs_id when both abs_id and id are present', async () => {
-    absApi.mockResolvedValue({});
     await callBackend('push_abs_imports', {
       items: [{ abs_id: 'correct-id', id: 'wrong-id', metadata: { title: 'X' } }],
     });
@@ -83,7 +89,6 @@ describe('J: push handlers unify on item.abs_id || item.id', () => {
   });
 
   it('push_abs_imports falls back to id when abs_id is absent', async () => {
-    absApi.mockResolvedValue({});
     await callBackend('push_abs_imports', {
       items: [{ id: 'only-id', metadata: { title: 'X' } }],
     });
@@ -133,25 +138,27 @@ describe('L: sequence 0 is preserved, empty-string sequence is treated as absent
 });
 
 describe('Q: push handlers fast-fail when ABS is not configured', () => {
-  it('push_abs_updates returns a single failure result without calling absApi', async () => {
+  // Task 5 (M-9): still no requests, but every book is named as failed so
+  // the summary can list them (was a single anonymous failure).
+  it('push_abs_updates fails every book without calling absApi', async () => {
     localStorage.setItem('audiobook_tagger_config', JSON.stringify({}));
     const result = await callBackend('push_abs_updates', {
       items: [{ abs_id: 'a' }, { abs_id: 'b' }, { abs_id: 'c' }],
     });
     expect(absApi).not.toHaveBeenCalled();
-    expect(result.success).toBe(0);
-    expect(result.failed).toBe(1);
-    expect(result.errors).toHaveLength(1);
+    expect(result.updated).toEqual([]);
+    expect(result.failed.map((f) => f.id)).toEqual(['a', 'b', 'c']);
+    expect(result.failed.every((f) => /not configured/.test(f.error))).toBe(true);
   });
 
-  it('push_abs_imports returns a single failure result without calling absApi', async () => {
+  it('push_abs_imports fails every book without calling absApi', async () => {
     localStorage.setItem('audiobook_tagger_config', JSON.stringify({ abs_base_url: 'http://abs.local' }));
     const result = await callBackend('push_abs_imports', {
-      items: [{ abs_id: 'a' }, { abs_id: 'b' }],
+      items: [{ id: 'g1', abs_id: 'a', metadata: { title: 'One' } }, { abs_id: 'b' }],
     });
     expect(absApi).not.toHaveBeenCalled();
-    expect(result.updated).toBe(0);
-    expect(result.failed).toBe(1);
-    expect(result.errors).toHaveLength(1);
+    expect(result.updated).toEqual([]);
+    expect(result.failed.map((f) => [f.id, f.title])).toEqual([['g1', 'One'], ['b', '']]);
+    expect(result.failed.every((f) => /not configured/.test(f.error))).toBe(true);
   });
 });

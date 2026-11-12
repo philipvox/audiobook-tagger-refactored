@@ -2,7 +2,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { callBackend, subscribe, pickPath } from '../api';
 import { useApp } from '../context/AppContext';
-import { getAbsId, normalizePushResult, buildPushItems, applyPushSnapshots } from '../lib/absPush';
+import { getAbsId, normalizePushResult, buildPushItems, applyPushSnapshots, failedPushResult } from '../lib/absPush';
 import { logEvent } from '../lib/logEvent';
 
 // ============================================================================
@@ -539,7 +539,7 @@ export function useScan() {
   // Push ABS-imported books back to ABS library
   const handlePushAbsImports = useCallback(async (groupsToPush) => {
     if (!groupsToPush || groupsToPush.length === 0) {
-      return { success: false, updated: 0 };
+      return { success: false, attempted: 0, updated: [], skipped: [], failed: [] };
     }
 
     let unlisten = null;
@@ -574,32 +574,32 @@ export function useScan() {
 
       const raw = await callBackend('push_abs_imports', { request });
       const result = normalizePushResult(raw);
+      // H-5: pushed books take the server's tags/genres and drop staged state.
       if (raw?.snapshots) setGroups(prev => applyPushSnapshots(prev, raw.snapshots));
 
-      if (result.errors.length > 0) {
+      if (result.failed.length > 0) {
         // Group errors by type
         const errorTypes = {};
-        result.errors.forEach(err => {
-          const match = String(err).match(/HTTP (\d+)|timeout|connection|dns/i);
+        result.failed.forEach(f => {
+          const match = String(f.error).match(/HTTP (\d+)|timeout|connection|dns/i);
           const type = match ? match[0] : 'other';
           errorTypes[type] = (errorTypes[type] || 0) + 1;
         });
         console.warn('Push error breakdown:', errorTypes);
-        console.warn('Sample errors:', result.errors.slice(0, 10));
-        logEvent('push', 'ABS push errors', { breakdown: errorTypes, sample: result.errors.slice(0, 5) });
+        console.warn('Sample errors:', result.failed.slice(0, 10));
+        logEvent('push', 'ABS push errors', { breakdown: errorTypes, sample: result.failed.slice(0, 5) });
       }
       logEvent('push', 'ABS push (by id) complete', {
         books: groupsToPush.length,
-        updated: result.updated,
-        failed: result.failed,
+        updated: result.updated.length,
+        skipped: result.skipped.length,
+        failed: result.failed.length,
       });
 
       return {
-        success: result.failed === 0,
+        success: result.failed.length === 0,
         attempted: groupsToPush.length,
-        updated: result.updated,
-        failed: result.failed,
-        errors: result.errors,
+        ...result,
       };
 
     } catch (error) {
@@ -699,7 +699,7 @@ export function useScan() {
             );
           } catch (pushError) {
             console.error('Auto-push failed:', pushError);
-            pushOutcome = { updated: 0, failed: result.groups.length, errors: [String(pushError?.message || pushError)] };
+            pushOutcome = failedPushResult(result.groups, pushError);
           }
         }
       }
@@ -818,7 +818,7 @@ export function useScan() {
             pushOutcome = await handlePushAbsImports(groupsToPush);
           } catch (pushError) {
             console.error('Auto-push failed:', pushError);
-            pushOutcome = { updated: 0, failed: groupsToPush.length, errors: [String(pushError?.message || pushError)] };
+            pushOutcome = failedPushResult(groupsToPush, pushError);
           }
         }
       }

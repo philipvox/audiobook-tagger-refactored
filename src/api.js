@@ -7,7 +7,7 @@ import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
 import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor } from './lib/normalize';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit } from './lib/genres';
-import { buildAbsPayload as buildAbsPayloadPure, isEmptyPayload, applyPayloadToSnapshot, snapshotAbsMetadata } from './lib/absPayload.js';
+import { pushAbsItems } from './lib/absPush.js';
 import { absItemsToBookGroups } from './lib/absGroup.js';
 import { isTauri } from './lib/platform.js';
 import { makeErrorDetail, errorDetailFromException } from './lib/errorDetail.js';
@@ -266,21 +266,35 @@ function convertDnaToTags(dna) {
 // ============================================================================
 
 // buildAbsPayload lives in ./lib/absPayload.js (v2.2.3 diff-based push).
-// Thin wrapper: reads the config the policy flags come from.
-function buildAbsPayload(meta, original = null) {
-  return buildAbsPayloadPure(meta, original, getLocalConfig());
-}
+// Both push commands go through pushAbsItems (lib/absPush.js): per book it
+// diffs against the import snapshot, re-reads the live item, rebases tags and
+// genres on it (H-5) and reports { updated, skipped, failed } (M-9), running
+// config.concurrency_abs_push books at a time (H-11).
+async function pushAbsHandler(args) {
+  const config = getLocalConfig();
+  const { abs_base_url: baseUrl, abs_api_token: token } = config;
+  const items = args.request?.items || args.items || [];
 
-// Push one item: diff against its import snapshot, skip the request when
-// nothing changed, and report the advanced snapshot for the caller to store.
-async function pushOneAbsItem(baseUrl, token, absId, meta, original) {
-  const payload = buildAbsPayload(meta, original || null);
-  if (original && isEmptyPayload(payload)) return { skipped: true, snapshot: original };
-  await absApi(baseUrl, token, `/api/items/${absId}/media`, {
-    method: 'PATCH',
-    body: payload,
+  // Q: fail fast without issuing N doomed requests when ABS isn't
+  // configured, but still name every book that was not pushed.
+  if (!baseUrl || !token) {
+    const error = 'ABS is not configured: missing base URL or API token';
+    return {
+      updated: [],
+      skipped: [],
+      failed: items.map((item) => ({
+        id: item?.id ?? item?.group_id ?? item?.abs_id ?? null,
+        title: item?.metadata?.title || '',
+        error,
+      })),
+      snapshots: {},
+    };
+  }
+
+  return pushAbsItems(items, {
+    request: (path, options) => absApi(baseUrl, token, path, options),
+    cfg: config,
   });
-  return { skipped: false, snapshot: applyPayloadToSnapshot(original || snapshotAbsMetadata(meta), meta, payload) };
 }
 
 // ============================================================================
@@ -339,75 +353,10 @@ const HANDLERS = {
     return { groups, total: groups.length };
   },
 
-  // === ABS Push ===
-  push_abs_updates: async (args) => {
-    const config = getLocalConfig();
-    const { abs_base_url: baseUrl, abs_api_token: token } = config;
-    const items = args.request?.items || args.items || [];
-    let success = 0, failed = 0;
-    const errors = [];
-    const snapshots = {};
-
-    // Q: fail fast with a single result instead of issuing N doomed requests
-    // when ABS isn't configured.
-    if (!baseUrl || !token) {
-      return {
-        success: 0,
-        failed: 1,
-        errors: [{ id: 'config', error: 'ABS is not configured: missing base URL or API token' }],
-      };
-    }
-
-    for (const item of items) {
-      try {
-        const absId = item.abs_id || item.id;
-        if (!absId) { failed++; errors.push({ id: 'unknown', error: 'Missing item ID' }); continue; }
-        const meta = item.metadata || item;
-        const out = await pushOneAbsItem(baseUrl, token, absId, meta, item.original);
-        snapshots[item.id || absId] = out.snapshot;
-        success++;
-      } catch (err) {
-        failed++;
-        errors.push({ id: item.abs_id || item.id, error: err.message });
-      }
-    }
-    return { success, failed, errors, snapshots };
-  },
-
-  // === ABS Push Imports (same formatting, different return shape) ===
-  push_abs_imports: async (args) => {
-    const config = getLocalConfig();
-    const { abs_base_url: baseUrl, abs_api_token: token } = config;
-    const items = args.request?.items || args.items || [];
-    let updated = 0, failed = 0;
-    const errors = [];
-    const snapshots = {};
-
-    // Q: fail fast with a single result instead of issuing N doomed requests
-    // when ABS isn't configured.
-    if (!baseUrl || !token) {
-      return {
-        updated: 0,
-        failed: 1,
-        errors: ['ABS is not configured: missing base URL or API token'],
-      };
-    }
-
-    for (const item of items) {
-      try {
-        const absId = item.abs_id || item.id;
-        if (!absId) { failed++; errors.push('Missing item ID'); continue; }
-        const meta = item.metadata || {};
-        const out = await pushOneAbsItem(baseUrl, token, absId, meta, item.original);
-        snapshots[item.id || absId] = out.snapshot;
-        updated++;
-      } catch (err) {
-        failed++;
-        errors.push(err.message);
-      }
-    }
-    return { updated, failed, errors, snapshots };
-  },
+  // === ABS Push === (single-book / by-path push and the batch push share
+  // one per-book path and one result shape, see pushAbsHandler)
+  push_abs_updates: (args) => pushAbsHandler(args),
+  push_abs_imports: (args) => pushAbsHandler(args),
 
   // === ABS Chapters ===
   get_abs_chapters: async (args) => {

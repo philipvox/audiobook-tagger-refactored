@@ -20,16 +20,24 @@ beforeEach(() => {
     abs_api_token: 'token',
   }));
   vi.resetAllMocks();
-  absApi.mockResolvedValue({});
+  serveLive();
 });
+
+// Task 5: every push GETs the live item before the PATCH. Serve one whose
+// tags and genres are `live` (by default: empty, i.e. an unchanged server).
+function serveLive(live = {}) {
+  absApi.mockImplementation(async (_base, _token, _path, opts) => (
+    opts?.method === 'PATCH' ? {} : { media: { tags: live.tags || [], metadata: { genres: live.genres || [] } } }
+  ));
+}
 
 // Push one book and return the series array from the PATCH payload
 async function pushAndGetSeries(meta) {
   const result = await callBackend('push_abs_updates', {
     items: [{ abs_id: 'item-1', metadata: meta }],
   });
-  expect(result.success).toBe(1);
-  expect(result.failed).toBe(0);
+  expect(result.updated).toHaveLength(1);
+  expect(result.failed).toEqual([]);
   const options = absApi.mock.calls.at(-1)[3];
   return options.body.metadata.series;
 }
