@@ -32,7 +32,7 @@ import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
 import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePush } from '../lib/absPush';
 import { userClearedPatch } from '../lib/userCleared';
 import { applyClassifyResult } from '../lib/applyClassifyResult';
-import { mergeClassifyTags } from '../lib/mergeClassifyTags';
+import { applyTagsResultToGroup, applyDnaResultToGroup, normalizeResults } from '../lib/applyTagResults';
 import { syncAllSeries } from '../lib/absPayload';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
@@ -2346,6 +2346,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     let successCount = 0;
     let failedCount = 0;
+    let tagsPartialCount = 0; // books whose DNA step failed or whose answer was empty
 
     // Listen for per-book progress events within each chunk
     let tagChunkOffset = 0;
@@ -2379,33 +2380,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         if (result.results && result.results.length > 0) {
           setGroups(prevGroups => {
             return prevGroups.map(g => {
-              const tagResult = result.results.find(r => r.id === g.id);
-              if (tagResult && tagResult.success && ((tagResult.tags || []).length > 0 || (tagResult.dna_tags || []).length > 0)) {
-                // Merge, never replace (audit C-2): curated ABS tags survive.
-                const existing = g.metadata?.tags || [];
-                const merged = mergeClassifyTags(
-                  existing,
-                  { tags: tagResult.tags, dna_tags: tagResult.dna_tags },
-                  g.abs_original?.tags ?? existing
-                );
-                let next = merged.changed
-                  ? applyMetadataToGroup(g, { tags: merged.tags }, ['tags'])
-                  : g;
-                if (tagResult.dna_error) {
-                  next = {
-                    ...next,
-                    lastError: { stage: 'tags', kind: 'dna', message: `DNA tags were not updated: ${tagResult.dna_error}`, severity: 'error' },
-                  };
-                }
-                return next;
-              }
-              if (tagResult && tagResult.success === false && tagResult.error) {
-                return {
-                  ...g,
-                  lastError: { stage: 'tags', kind: 'ai', message: tagResult.error, severity: 'error' },
-                };
-              }
-              return g;
+              const { group: next, outcome } = applyTagsResultToGroup(g, result.results.find(r => r.id === g.id));
+              if (outcome === 'partial' || outcome === 'empty') tagsPartialCount++;
+              return next;
             });
           });
 
@@ -2502,7 +2479,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       books: selectedGroups.length,
       succeeded: successCount,
       failed: failedCount,
+      partial: tagsPartialCount,
     });
+    if (tagsPartialCount > 0) {
+      toast.warning('Tags partly applied', `${tagsPartialCount} book${tagsPartialCount > 1 ? 's' : ''} got no DNA tags or no new tags; see the book error. Existing tags were kept.`);
+    }
 
     // Clear progress after a short delay
     batch.end('tags', 1500);
@@ -2562,22 +2543,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
       // Merge new dna: tags into existing tags (audit C-2). A failed or empty
       // answer leaves tags untouched and shows a per-book error.
-      const dnaResults = Array.isArray(results) ? results : (results?.results || []);
-      setGroups(prevGroups => {
-        return prevGroups.map(g => {
-          const result = dnaResults.find(r => r.id === g.id);
-          if (!result) return g;
-          if (result.success) {
-            const existing = g.metadata?.tags || [];
-            const merged = mergeClassifyTags(existing, { dna_tags: result.dna_tags }, existing);
-            return merged.changed ? applyMetadataToGroup(g, { tags: merged.tags }, ['tags']) : g;
-          }
-          return {
-            ...g,
-            lastError: { stage: 'dna', kind: 'ai', message: result.error || 'DNA generation returned nothing.', severity: 'error' },
-          };
-        });
-      });
+      const dnaResults = normalizeResults(results);
+      setGroups(prevGroups => prevGroups.map(g =>
+        applyDnaResultToGroup(g, dnaResults.find(r => r.id === g.id)).group
+      ));
 
       unlisten();
 

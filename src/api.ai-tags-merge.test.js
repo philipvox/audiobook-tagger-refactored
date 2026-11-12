@@ -30,7 +30,7 @@ describe('AI Tags merge (C-2)', () => {
     const r = out.results[0];
     expect(r.dna_error).toBe('dna boom');
     const merged = mergeClassifyTags(EXISTING, { tags: r.tags, dna_tags: r.dna_tags }, EXISTING);
-    expect(merged.tags).toEqual(expect.arrayContaining(['favorite', 'kids-bedtime', 'dna:pacing:fast', 'fast-paced']));
+    expect([...merged.tags].sort()).toEqual(['dna:pacing:fast', 'fast-paced', 'favorite', 'kids-bedtime']);
   });
 });
 
