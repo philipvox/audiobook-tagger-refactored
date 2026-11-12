@@ -15,7 +15,18 @@ const OPS = Object.freeze({
   description: { v1Title: 'Description Processing Complete', v2v3Title: 'Description Processing', verb: 'processed' },
   authors:     { v1Title: 'Fix Authors Complete',         v2v3Title: 'Fix Authors',         verb: 'fixed' },
   years:       { v1Title: 'Fix Years Complete',           v2v3Title: 'Fix Years',           verb: 'fixed' },
+  titles:      { v1Title: 'Fix Titles Complete',          v2v3Title: 'Fix Titles',          verb: 'fixed' },
+  series:      { v1Title: 'Fix Series Complete',          v2v3Title: 'Fix Series',          verb: 'fixed', skippedLabel: 'unchanged or skipped' },
+  subtitles:   { v1Title: 'Fix Subtitles Complete',       v2v3Title: 'Fix Subtitles',       verb: 'fixed' },
+  genres:      { v1Title: 'Genre Cleanup Complete',       v2v3Title: 'Genre Cleanup',       verb: 'cleaned' },
+  age:         { v1Title: 'Age Lookup Complete',          v2v3Title: 'Age Lookup',          verb: 'rated' },
+  audio_check: { v1Title: 'Audio Check Complete',         v2v3Title: 'Audio Check',         verb: 'updated', skippedLabel: 'nothing new' },
+  isbn:        { v1Title: 'ISBN Lookup Complete',         v2v3Title: 'ISBN Lookup',         verb: 'found', skippedLabel: 'already had ISBN', warningLabel: 'not found' },
 });
+
+// Per-op wording for the skipped and warning counts.
+const skippedText = (meta, n) => `${n} ${meta.skippedLabel || 'already ok'}`;
+const warningText = (meta, n) => `${n} ${meta.warningLabel || 'warnings'}`;
 
 // Returns null if nothing to report (zero succeeded AND zero skipped AND no
 // errors). Returns { type: 'success'|'warning'|'error', title, message,
@@ -30,7 +41,7 @@ export function summarizeBatch({ op, succeeded = 0, skipped = 0, warnings = 0, f
   if (warnings === 0 && failed === 0) {
     const parts = [];
     if (succeeded > 0) parts.push(`${succeeded} ${meta.verb}`);
-    if (skipped > 0) parts.push(`${skipped} already ok`);
+    if (skipped > 0) parts.push(skippedText(meta, skipped));
     return {
       type: 'success',
       title: meta.v1Title,
@@ -45,9 +56,9 @@ export function summarizeBatch({ op, succeeded = 0, skipped = 0, warnings = 0, f
   const titleParts = [];
   if (succeeded > 0) titleParts.push(`${succeeded} ${meta.verb}`);
   if (failed > 0) titleParts.push(`${failed} failed`);
-  if (warnings > 0) titleParts.push(`${warnings} warnings`);
+  if (warnings > 0) titleParts.push(warningText(meta, warnings));
   const title = `${meta.v2v3Title}: ${titleParts.join(', ')}`;
-  const message = skipped > 0 ? `${skipped} already ok` : undefined;
+  const message = skipped > 0 ? skippedText(meta, skipped) : undefined;
 
   return {
     type,

@@ -100,16 +100,17 @@ describe('resolve_title / resolve_series drop placeholder answers', () => {
   it('resolve_series turns "N/A" into null so callers keep their value', async () => {
     callAI.mockResolvedValueOnce(JSON.stringify({ series: 'N/A', sequence: '2', confidence: 80 }));
     const r = await callBackend('resolve_series', { request: { title: 'X', author: 'Y', current_series: 'Discworld' } });
-    expect(r.series).toBeNull();
-    expect(r.sequence).toBeNull();
+    // H-3: the answer now sits under `result` (the shape the callers read).
+    expect(r.result.series).toBeNull();
+    expect(r.result.sequence).toBeNull();
   });
 
   it('resolve_title turns a placeholder series and subtitle into null', async () => {
     callAI.mockResolvedValueOnce(JSON.stringify({ title: 'X', author: 'Y', subtitle: 'None', series: 'N/A', sequence: '1', confidence: 80 }));
     const r = await callBackend('resolve_title', { request: { current_title: 'X', current_author: 'Y' } });
-    expect(r.subtitle).toBeNull();
-    expect(r.series).toBeNull();
-    expect(r.sequence).toBeNull();
+    expect(r.result.subtitle).toBeNull();
+    expect(r.result.series).toBeNull();
+    expect(r.result.sequence).toBeNull();
   });
 });
 

@@ -12,6 +12,7 @@ import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePo
 import { pushAbsItems } from './lib/absPush.js';
 import { absItemsToBookGroups } from './lib/absGroup.js';
 import { isTauri } from './lib/platform.js';
+import { mapAgeCategory } from './lib/ageCategory.js';
 import { makeErrorDetail, errorDetailFromException } from './lib/errorDetail.js';
 
 /** Safely serialize a value for AI prompts (escapes quotes/newlines). */
@@ -216,6 +217,124 @@ function withoutPlaceholders(parsed) {
   // sequence with it. (A missing series is left to the caller's fallback.)
   if (String(clean.series ?? '').trim() && isPlaceholderSeries(clean.series)) { delete clean.series; delete clean.sequence; }
   return clean;
+}
+
+// ============================================================================
+// RESOLVE RESULT (batch and single-book metadata resolution)
+// ============================================================================
+
+// Helper: did the AI produce any non-null value across the fields we asked
+// about? Partial results count as useful, we don't want to double-surface
+// what the changedFields diff already shows (AI returned data but nothing
+// changed is a distinct signal, tracked separately).
+function aiReturnedNothingUseful(parsed) {
+  if (!parsed || typeof parsed !== 'object') return true;
+  const fields = ['title', 'author', 'subtitle', 'series', 'sequence', 'narrator'];
+  return !fields.some((f) => {
+    const v = parsed[f];
+    return v !== null && v !== undefined && String(v).trim() !== '';
+  });
+}
+
+// Helper: is a value "present" for fallback purposes? Missing (undefined),
+// explicit null, and empty string all count as "the AI didn't say anything".
+const hasValue = (v) => v !== undefined && v !== null && v !== '';
+
+// Helper: compare two values as strings, collapsing null/undefined to ''
+// first so numeric 3 vs "3" (or null vs undefined) isn't a spurious change.
+const strEq = (a, b) => (a == null ? '' : String(a)) === (b == null ? '' : String(b));
+
+// M-3: an answer below this confidence changes nothing.
+const MIN_CONFIDENCE = 60;
+
+// Build a resolve result from parsed metadata. Shared by the batch handler
+// and resolve_title so the single-book path has the same confidence gate and
+// placeholder fallbacks.
+function buildResolveResult(book, rawParsed, rawResponse) {
+  const confidence = Number(rawParsed?.confidence);
+  if (rawParsed && typeof rawParsed === 'object' && !aiReturnedNothingUseful(rawParsed)
+      && Number.isFinite(confidence) && confidence < MIN_CONFIDENCE) {
+    return {
+      id: book.id,
+      title: book.current_title,
+      author: book.current_author,
+      subtitle: book.current_subtitle ?? null,
+      series: book.current_series ?? null,
+      sequence: book.current_sequence ?? null,
+      narrator: book.current_narrator ?? null,
+      confidence,
+      changed: false,
+      errorDetail: makeErrorDetail({
+        stage: 'resolve',
+        kind: 'empty-content',
+        message: `AI confidence ${confidence} is below ${MIN_CONFIDENCE}; kept the current metadata.`,
+        responsePreview: rawResponse,
+      }),
+    };
+  }
+  const parsed = withoutPlaceholders(rawParsed || {});
+  const title = parsed.title || book.current_title;
+  const author = parsed.author || book.current_author;
+  // item 12: a missing OR null subtitle in the AI response must fall back
+  // to the book's current subtitle, same as title/author/series/sequence/
+  // narrator - an AI response can't clear a curated subtitle.
+  const subtitle = hasValue(parsed.subtitle) ? parsed.subtitle : (book.current_subtitle ?? null);
+  // CR-4b: a missing OR null series/sequence in the AI response must fall
+  // back to the book's current series/sequence, exactly like title/author
+  // do: never to null. An AI response can't clear a series. (0 is a valid
+  // sequence value, so we check presence rather than truthiness.)
+  const series = hasValue(parsed.series) ? parsed.series : (book.current_series ?? null);
+  const sequence = hasValue(parsed.sequence) ? parsed.sequence : (book.current_sequence ?? null);
+  console.log(`[series-fix] GPT returned for "${title}": series="${series}" sequence="${sequence}"`);
+  if (series && /[#]|\bbook\b|\bvol/i.test(series)) {
+    console.warn(`[series-fix] WARNING: GPT returned embedded sequence in series name: "${series}"`);
+  }
+  // Data-preservation: an AI response that omits narrator shouldn't wipe a
+  // curated one either.
+  const narrator = hasValue(parsed.narrator) ? parsed.narrator : (book.current_narrator ?? null);
+  const changed = title !== book.current_title || author !== book.current_author
+    || !strEq(subtitle, book.current_subtitle)
+    || series !== (book.current_series || null)
+    || !strEq(sequence, book.current_sequence)
+    || !strEq(narrator, book.current_narrator);
+  const result = { id: book.id, title, author, subtitle, series, sequence, narrator, confidence: parsed.confidence || 75, changed };
+  // Silent-success surfacing: the caller already selected this book for
+  // resolution (missing/bad author/title/series), so an empty AI response
+  // means the model had no grounded signal. Amber pill so the user knows
+  // it ran and yielded nothing, not "nothing happened". Checked on the
+  // cleaned answer: an all-placeholder answer is as empty as all-null.
+  if (aiReturnedNothingUseful(parsed)) {
+    result.errorDetail = makeErrorDetail({
+      stage: 'resolve',
+      kind: 'empty-content',
+      message: 'AI returned no usable metadata for this book.',
+      responsePreview: rawResponse,
+    });
+  }
+  return result;
+}
+
+// Age tags from a classifier age_rating (object or a numeric age). Shared by
+// classify_books_batch and resolve_book_age_rating.
+function ageTagsFromRating(ageRating) {
+  const age_tags = [];
+  if (ageRating && typeof ageRating === 'object') {
+    age_tags.push(ageRating.intended_for_kids === true ? 'for-kids' : 'not-for-kids');
+    const catMap = { "Children's 0-2": 'age-childrens', "Children's 3-5": 'age-childrens', "Children's 6-8": 'age-childrens', "Children's 9-12": 'age-childrens', 'Teen 13-17': 'age-teens', 'Young Adult': 'age-young-adult', 'Adult': 'age-adult', 'Middle Grade': 'age-middle-grade' };
+    if (catMap[ageRating.age_category]) age_tags.push(catMap[ageRating.age_category]);
+    const ratingMap = { 'G': 'rated-g', 'PG': 'rated-pg', 'PG-13': 'rated-pg13', 'R': 'rated-r', 'X': 'rated-x' };
+    if (ratingMap[ageRating.content_rating]) age_tags.push(ratingMap[ageRating.content_rating]);
+    const recMap = { "Children's 0-2": 'age-rec-0', "Children's 3-5": 'age-rec-3', "Children's 6-8": 'age-rec-6', "Children's 9-12": 'age-rec-10', 'Teen 13-17': 'age-rec-14', 'Young Adult': 'age-rec-16', 'Adult': 'age-rec-18', 'Middle Grade': 'age-rec-8' };
+    if (recMap[ageRating.age_category]) age_tags.push(recMap[ageRating.age_category]);
+  } else if (typeof ageRating === 'number') {
+    if (ageRating <= 6) age_tags.push('age-childrens', 'for-kids', 'rated-g', 'age-rec-0');
+    else if (ageRating <= 9) age_tags.push('age-childrens', 'for-kids', 'rated-g', 'age-rec-6');
+    else if (ageRating <= 12) age_tags.push('age-middle-grade', 'for-kids', 'rated-pg', 'age-rec-10');
+    else if (ageRating <= 15) age_tags.push('age-teens', 'for-teens', 'rated-pg13', 'age-rec-14');
+    else if (ageRating <= 17) age_tags.push('age-young-adult', 'for-ya', 'rated-pg13', 'age-rec-16');
+    else age_tags.push('age-adult', 'not-for-kids', 'rated-r', 'age-rec-18');
+  }
+  return age_tags;
 }
 
 // ============================================================================
@@ -641,95 +760,6 @@ const HANDLERS = {
     const results = [];
     let completed = 0;
 
-    // Helper: did the AI produce any non-null value across the fields we asked
-    // about? Partial results count as useful, we don't want to double-surface
-    // what the changedFields diff already shows (AI returned data but nothing
-    // changed is a distinct signal, tracked separately).
-    const aiReturnedNothingUseful = (parsed) => {
-      if (!parsed || typeof parsed !== 'object') return true;
-      const fields = ['title', 'author', 'subtitle', 'series', 'sequence', 'narrator'];
-      return !fields.some((f) => {
-        const v = parsed[f];
-        return v !== null && v !== undefined && String(v).trim() !== '';
-      });
-    };
-
-    // Helper: is a value "present" for fallback purposes? Missing (undefined),
-    // explicit null, and empty string all count as "the AI didn't say anything".
-    const hasValue = (v) => v !== undefined && v !== null && v !== '';
-
-    // Helper: compare two values as strings, collapsing null/undefined to ''
-    // first so numeric 3 vs "3" (or null vs undefined) isn't a spurious change.
-    const strEq = (a, b) => (a == null ? '' : String(a)) === (b == null ? '' : String(b));
-
-    // M-3: an answer below this confidence changes nothing.
-    const MIN_CONFIDENCE = 60;
-
-    // Helper: build result from parsed metadata
-    const buildMetaResult = (book, rawParsed, rawResponse) => {
-      const confidence = Number(rawParsed?.confidence);
-      if (rawParsed && typeof rawParsed === 'object' && !aiReturnedNothingUseful(rawParsed)
-          && Number.isFinite(confidence) && confidence < MIN_CONFIDENCE) {
-        return {
-          id: book.id,
-          title: book.current_title,
-          author: book.current_author,
-          subtitle: book.current_subtitle ?? null,
-          series: book.current_series ?? null,
-          sequence: book.current_sequence ?? null,
-          narrator: book.current_narrator ?? null,
-          confidence,
-          changed: false,
-          errorDetail: makeErrorDetail({
-            stage: 'resolve',
-            kind: 'empty-content',
-            message: `AI confidence ${confidence} is below ${MIN_CONFIDENCE}; kept the current metadata.`,
-            responsePreview: rawResponse,
-          }),
-        };
-      }
-      const parsed = withoutPlaceholders(rawParsed || {});
-      const title = parsed.title || book.current_title;
-      const author = parsed.author || book.current_author;
-      // item 12: a missing OR null subtitle in the AI response must fall back
-      // to the book's current subtitle, same as title/author/series/sequence/
-      // narrator - an AI response can't clear a curated subtitle.
-      const subtitle = hasValue(parsed.subtitle) ? parsed.subtitle : (book.current_subtitle ?? null);
-      // CR-4b: a missing OR null series/sequence in the AI response must fall
-      // back to the book's current series/sequence, exactly like title/author
-      // do: never to null. An AI response can't clear a series. (0 is a valid
-      // sequence value, so we check presence rather than truthiness.)
-      const series = hasValue(parsed.series) ? parsed.series : (book.current_series ?? null);
-      const sequence = hasValue(parsed.sequence) ? parsed.sequence : (book.current_sequence ?? null);
-      console.log(`[series-fix] GPT returned for "${title}": series="${series}" sequence="${sequence}"`);
-      if (series && /[#]|\bbook\b|\bvol/i.test(series)) {
-        console.warn(`[series-fix] WARNING: GPT returned embedded sequence in series name: "${series}"`);
-      }
-      // Data-preservation: an AI response that omits narrator shouldn't wipe a
-      // curated one either.
-      const narrator = hasValue(parsed.narrator) ? parsed.narrator : (book.current_narrator ?? null);
-      const changed = title !== book.current_title || author !== book.current_author
-        || !strEq(subtitle, book.current_subtitle)
-        || series !== (book.current_series || null)
-        || !strEq(sequence, book.current_sequence)
-        || !strEq(narrator, book.current_narrator);
-      const result = { id: book.id, title, author, subtitle, series, sequence, narrator, confidence: parsed.confidence || 75, changed };
-      // Silent-success surfacing: the caller already selected this book for
-      // resolution (missing/bad author/title/series), so an empty AI response
-      // means the model had no grounded signal. Amber pill so the user knows
-      // it ran and yielded nothing, not "nothing happened". Checked on the
-      // cleaned answer: an all-placeholder answer is as empty as all-null.
-      if (aiReturnedNothingUseful(parsed)) {
-        result.errorDetail = makeErrorDetail({
-          stage: 'resolve',
-          kind: 'empty-content',
-          message: 'AI returned no usable metadata for this book.',
-          responsePreview: rawResponse,
-        });
-      }
-      return result;
-    };
-
     if (isLocalAI && books.length > 1) {
       // LOCAL AI: Batch 5 books per prompt
       for (let i = 0; i < books.length; i += BATCH_SIZE) {
@@ -755,7 +785,7 @@ const HANDLERS = {
             const idMatch = parsedArray.find(p => p && p.id !== undefined && String(p.id) === String(book.id));
             const positionEligible = !idMatch && parsedArray.length === batch.length;
             const parsed = idMatch || (positionEligible ? parsedArray[j] : undefined) || {};
-            results.push(buildMetaResult(book, parsed, response));
+            results.push(buildResolveResult(book, parsed, response));
             completed++;
             emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
           }
@@ -765,7 +795,7 @@ const HANDLERS = {
             try {
               const prompt = buildMetadataPrompt(book);
               const response = await callAI(config, getSystemPrompt(config), prompt, 1500);
-              results.push(buildMetaResult(book, parseAIJson(response), response));
+              results.push(buildResolveResult(book, parseAIJson(response), response));
             } catch (e) {
               results.push({
                 id: book.id,
@@ -786,7 +816,7 @@ const HANDLERS = {
           emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: `Resolving: ${book.current_title}...` });
           const prompt = buildMetadataPrompt(book);
           const response = await callAI(config, getSystemPrompt(config), prompt, 1500);
-          const result = buildMetaResult(book, parseAIJson(response), response);
+          const result = buildResolveResult(book, parseAIJson(response), response);
           completed++;
           emitEvent('batch-progress', { call_type: 'metadata', current: completed, total: books.length, title: book.current_title });
           return result;
@@ -814,25 +844,39 @@ const HANDLERS = {
   },
 
   // === GPT: Metadata Resolution (single) ===
+  // H-3: returns { success, result, errorDetail? } (the shape the Fix Titles
+  // caller reads), built by the same buildResolveResult as the batch handler.
   resolve_title: async (args) => {
     const config = getLocalConfig();
     const input = args.request || args;
-    const prompt = buildMetadataPrompt(input);
-    const response = await callAI(config, getSystemPrompt(config), prompt, 1500);
-    const parsed = withoutPlaceholders(parseAIJson(response));
-    return {
-      title: parsed.title || input.current_title,
-      author: parsed.author || input.current_author,
-      subtitle: parsed.subtitle || null,
-      series: parsed.series || null,
-      sequence: parsed.sequence || null,
-      narrator: parsed.narrator || null,
-      confidence: parsed.confidence || 75,
-      notes: parsed.notes || null,
-    };
+    try {
+      const prompt = buildMetadataPrompt(input);
+      const response = await callAI(config, getSystemPrompt(config), prompt, 1500);
+      const r = buildResolveResult(input, parseAIJson(response), response);
+      const out = {
+        success: true,
+        changed: r.changed,
+        result: {
+          title: r.title,
+          author: r.author,
+          subtitle: r.subtitle,
+          series: r.series,
+          sequence: r.sequence,
+          narrator: r.narrator,
+          confidence: r.confidence,
+        },
+      };
+      if (r.errorDetail) out.errorDetail = r.errorDetail;
+      return out;
+    } catch (err) {
+      return { success: false, error: err.message, errorDetail: errorDetailFromException(err, { stage: 'resolve' }) };
+    }
   },
 
   // === GPT: Series Resolution ===
+  // H-3: returns { success, result: { series, sequence, confidence } }. A null
+  // series means "no answer" (standalone, placeholder or low confidence): the
+  // caller keeps the book's current series.
   resolve_series: async (args) => {
     const config = getLocalConfig();
     const input = args.request || args;
@@ -843,16 +887,38 @@ ${input.current_series ? `Current series: ${safe(input.current_series)}` : ''}
 
 Return JSON: {"series":null,"sequence":null,"confidence":0,"source":"gpt"}
 If it's part of a series, fill in the name and book number. If standalone, use null.`;
-    const response = await callAI(config, getSystemPrompt(config), prompt, 500);
-    const parsed = withoutPlaceholders(parseAIJson(response));
-    // A placeholder series answer comes back as null, so callers keep theirs.
-    parsed.series = parsed.series ?? null;
-    parsed.sequence = parsed.sequence ?? null;
-    console.log(`[series-fix] resolve_series for "${input.title}": series="${parsed.series}" sequence="${parsed.sequence}"`);
-    if (parsed.series && /[#]|\bbook\b|\bvol/i.test(parsed.series)) {
-      console.warn(`[series-fix] WARNING: GPT returned embedded sequence in series name: "${parsed.series}"`);
+    try {
+      const response = await callAI(config, getSystemPrompt(config), prompt, 500);
+      const raw = parseAIJson(response);
+      const confidence = Number(raw?.confidence);
+      // M-3: same gate as resolve_metadata_batch.
+      if (hasValue(raw?.series) && Number.isFinite(confidence) && confidence < MIN_CONFIDENCE) {
+        return {
+          success: true,
+          result: { series: null, sequence: null, confidence },
+          errorDetail: makeErrorDetail({
+            stage: 'resolve',
+            kind: 'empty-content',
+            message: `AI confidence ${confidence} is below ${MIN_CONFIDENCE}; kept the current series.`,
+            responsePreview: response,
+          }),
+        };
+      }
+      const parsed = withoutPlaceholders(raw || {});
+      // A placeholder series answer comes back as null, so callers keep theirs.
+      const series = hasValue(parsed.series) ? parsed.series : null;
+      const sequence = series && hasValue(parsed.sequence) ? parsed.sequence : null;
+      console.log(`[series-fix] resolve_series for "${input.title}": series="${series}" sequence="${sequence}"`);
+      if (series && /[#]|\bbook\b|\bvol/i.test(series)) {
+        console.warn(`[series-fix] WARNING: GPT returned embedded sequence in series name: "${series}"`);
+      }
+      return {
+        success: true,
+        result: { series, sequence, confidence: Number.isFinite(confidence) ? confidence : null },
+      };
+    } catch (err) {
+      return { success: false, error: err.message, errorDetail: errorDetailFromException(err, { stage: 'resolve' }) };
     }
-    return parsed;
   },
 
   // === GPT: Classification (genres + tags + age + DNA + themes/tropes) ===
@@ -865,31 +931,9 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const BATCH_SIZE = isLocal ? 3 : 1; // Local: batch 3 books per prompt (small models struggle with 5+)
     const results = [];
 
-    // Helper: parse age_rating into tags
-    const parseAgeTags = (ageRating) => {
-      const age_tags = [];
-      if (ageRating && typeof ageRating === 'object') {
-        age_tags.push(ageRating.intended_for_kids === true ? 'for-kids' : 'not-for-kids');
-        const catMap = { "Children's 0-2": 'age-childrens', "Children's 3-5": 'age-childrens', "Children's 6-8": 'age-childrens', "Children's 9-12": 'age-childrens', 'Teen 13-17': 'age-teens', 'Young Adult': 'age-young-adult', 'Adult': 'age-adult', 'Middle Grade': 'age-middle-grade' };
-        if (catMap[ageRating.age_category]) age_tags.push(catMap[ageRating.age_category]);
-        const ratingMap = { 'G': 'rated-g', 'PG': 'rated-pg', 'PG-13': 'rated-pg13', 'R': 'rated-r', 'X': 'rated-x' };
-        if (ratingMap[ageRating.content_rating]) age_tags.push(ratingMap[ageRating.content_rating]);
-        const recMap = { "Children's 0-2": 'age-rec-0', "Children's 3-5": 'age-rec-3', "Children's 6-8": 'age-rec-6', "Children's 9-12": 'age-rec-10', 'Teen 13-17': 'age-rec-14', 'Young Adult': 'age-rec-16', 'Adult': 'age-rec-18', 'Middle Grade': 'age-rec-8' };
-        if (recMap[ageRating.age_category]) age_tags.push(recMap[ageRating.age_category]);
-      } else if (typeof ageRating === 'number') {
-        if (ageRating <= 6) age_tags.push('age-childrens', 'for-kids', 'rated-g', 'age-rec-0');
-        else if (ageRating <= 9) age_tags.push('age-childrens', 'for-kids', 'rated-g', 'age-rec-6');
-        else if (ageRating <= 12) age_tags.push('age-middle-grade', 'for-kids', 'rated-pg', 'age-rec-10');
-        else if (ageRating <= 15) age_tags.push('age-teens', 'for-teens', 'rated-pg13', 'age-rec-14');
-        else if (ageRating <= 17) age_tags.push('age-young-adult', 'for-ya', 'rated-pg13', 'age-rec-16');
-        else age_tags.push('age-adult', 'not-for-kids', 'rated-r', 'age-rec-18');
-      }
-      return age_tags;
-    };
-
     // Helper: build result from parsed classification
     const buildResult = (book, parsed, dna_tags = []) => {
-      const age_tags = parseAgeTags(parsed.age_rating);
+      const age_tags = ageTagsFromRating(parsed.age_rating);
       // Empty AI answer (no genres, tags, dna or age tags): report a failure
       // rather than a success the applier could mistake for "clear everything".
       if (!(parsed.genres || []).length && !(parsed.tags || []).length && !dna_tags.length && !age_tags.length) {
@@ -1206,20 +1250,36 @@ RULES:
 Return JSON: {"genres":["Genre1","Genre2"]}`;
         const response = await callAI(config, getSystemPrompt(config), prompt, 500);
         const parsed = parseAIJson(response);
+        const aiGenres = (Array.isArray(parsed.genres) ? parsed.genres : [])
+          .filter((g) => typeof g === 'string' && g.trim());
         // Enforce genre policy on AI output if enabled
-        const genres = config.genre_enforcement !== false
-          ? enforceGenrePolicyWithSplit(parsed.genres || [])
-          : (parsed.genres || []).slice(0, 3);
+        const cleaned = config.genre_enforcement !== false
+          ? enforceGenrePolicyWithSplit(aiGenres)
+          : aiGenres.slice(0, 3);
         completed++;
         emitEvent('batch-progress', { call_type: 'genres', current: completed, total: books.length, title: book.title });
-        results.push({ id: book.id, success: true, genres });
+        const original = book.genres || [];
+        if (cleaned.length === 0) {
+          // An empty answer is a failure, never "clear the genres".
+          results.push({ id: book.id, success: false, changed: false, cleaned_genres: original, original_genres: original, error: 'The AI returned no approved genres.' });
+          continue;
+        }
+        // Same order-insensitive comparison as the static cleanup_genres.
+        const changed = JSON.stringify([...cleaned].sort()) !== JSON.stringify([...original].sort());
+        results.push({ id: book.id, success: true, changed, cleaned_genres: cleaned, original_genres: original });
       } catch (err) {
         completed++;
         emitEvent('batch-progress', { call_type: 'genres', current: completed, total: books.length, title: book.title });
-        results.push({ id: book.id, success: false, error: err.message });
+        results.push({ id: book.id, success: false, changed: false, error: err.message });
       }
     }
-    return { results };
+    // H-3: the item and total names the Clean Genres caller reads.
+    return {
+      results,
+      total_cleaned: results.filter((r) => r.success && r.changed).length,
+      total_unchanged: results.filter((r) => r.success && !r.changed).length,
+      total_failed: results.filter((r) => !r.success).length,
+    };
   },
 
   // === GPT: Tag Assignment (standard tags + DNA, matching desktop classify_book) ===
@@ -1310,17 +1370,26 @@ ${book.series ? `Series: ${safe(book.series)}` : ''}
 Return JSON: {"subtitle":null}
 If the book has a well-known subtitle (e.g., "Dune: The Desert Planet"), include it. Otherwise null.`;
         const response = await callAI(config, getSystemPrompt(config), prompt, 300);
-        const parsed = parseAIJson(response);
+        const parsed = withoutPlaceholders(parseAIJson(response));
         completed++;
         emitEvent('batch-progress', { call_type: 'subtitles', current: completed, total: books.length, title: book.title });
-        results.push({ id: book.id, success: true, subtitle: parsed.subtitle || null });
+        const subtitle = hasValue(parsed.subtitle) ? String(parsed.subtitle).trim() || null : null;
+        // H-3: `fixed` is what the Fix Subtitles caller reads. A null or
+        // placeholder answer, or the subtitle the book already has, is no fix.
+        const fixed = !!subtitle && !strEq(subtitle, book.current_subtitle);
+        results.push({ id: book.id, success: true, fixed, subtitle });
       } catch (err) {
         completed++;
         emitEvent('batch-progress', { call_type: 'subtitles', current: completed, total: books.length, title: book.title });
-        results.push({ id: book.id, success: false, error: err.message });
+        results.push({ id: book.id, success: false, fixed: false, error: err.message });
       }
     }
-    return { results };
+    return {
+      results,
+      total_fixed: results.filter((r) => r.fixed).length,
+      total_skipped: results.filter((r) => r.success && !r.fixed).length,
+      total_failed: results.filter((r) => !r.success).length,
+    };
   },
 
   // === GPT: Author Fix ===
@@ -1568,7 +1637,22 @@ Return JSON: {"year":"2005"}`;
       const prompt = buildClassificationPrompt(book);
       const response = await callAI(config, getSystemPrompt(config), prompt, 1000);
       const parsed = parseAIJson(response);
-      return { success: true, age_rating: parsed.age_rating, age_rating_reason: parsed.age_rating_reason };
+      // H-3: the fields Lookup Age (ScannerPage, EditMetadataModal) reads.
+      const rating = parsed.age_rating;
+      const age_tags = ageTagsFromRating(rating);
+      const age_category = rating && typeof rating === 'object' && hasValue(rating.age_category) ? rating.age_category : null;
+      if (!age_category && age_tags.length === 0) {
+        return { success: false, error: 'The AI returned no age rating.' };
+      }
+      return {
+        success: true,
+        age_category,
+        age_tags,
+        age_rating: mapAgeCategory(age_category),
+        content_rating: rating && typeof rating === 'object' ? (rating.content_rating || null) : null,
+        intended_for_kids: rating && typeof rating === 'object' ? rating.intended_for_kids === true : false,
+        reasoning: parsed.age_rating_reason || null,
+      };
     } catch (err) {
       return { success: false, error: err.message };
     }
