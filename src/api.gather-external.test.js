@@ -82,11 +82,17 @@ describe('gather_external_data — Audnexus (cluster 1)', () => {
       return new Response(JSON.stringify({ docs: [] }), { status: 200 });
     });
 
-    const result = await callBackend('gather_external_data', {
+    // M-2: a 429 is now retried twice (1 s, then 3 s) before it surfaces.
+    vi.useFakeTimers();
+    const pending = callBackend('gather_external_data', {
       books: [{ id: 'b1', asin: 'B01234567X', title: 'Dune', author: 'Herbert' }],
     });
+    await vi.advanceTimersByTimeAsync(4000);
+    const result = await pending;
+    vi.useRealTimers();
 
     const r = result.results[0];
+    expect(fetchSpy.mock.calls.filter(([url]) => String(url).includes('audnex.us'))).toHaveLength(3);
     expect(r.gathered).toBe(false);
     expect(r.errorDetail).toBeDefined();
     expect(r.errorDetail.stage).toBe('gather-audnexus');

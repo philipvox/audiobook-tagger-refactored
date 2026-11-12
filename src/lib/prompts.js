@@ -151,12 +151,15 @@ export function buildMetadataPrompt(input) {
 
   const hasAudible = input.audible_title || input.audible_series;
   if (hasAudible) {
-    context += '\n--- Audible/ABS Data ---\n';
-    if (input.audible_title) context += `Audible title: ${safe(input.audible_title)}\n`;
-    if (input.audible_author) context += `Audible author: ${safe(input.audible_author)}\n`;
-    if (input.audible_subtitle) context += `Audible subtitle: ${safe(input.audible_subtitle)}\n`;
-    if (input.audible_series) context += `Audible series: ${safe(input.audible_series)}\n`;
-    if (input.audible_sequence) context += `Audible sequence: ${safe(input.audible_sequence)}\n`;
+    // M-3: the audible_* fields carry whichever lookup answered. Label them by
+    // their real source so the model weighs OpenLibrary data as OpenLibrary.
+    const label = input.external_source === 'openlibrary' ? 'OpenLibrary' : 'Audible';
+    context += label === 'OpenLibrary' ? '\n--- OpenLibrary Data ---\n' : '\n--- Audible/ABS Data ---\n';
+    if (input.audible_title) context += `${label} title: ${safe(input.audible_title)}\n`;
+    if (input.audible_author) context += `${label} author: ${safe(input.audible_author)}\n`;
+    if (input.audible_subtitle) context += `${label} subtitle: ${safe(input.audible_subtitle)}\n`;
+    if (input.audible_series) context += `${label} series: ${safe(input.audible_series)}\n`;
+    if (input.audible_sequence) context += `${label} sequence: ${safe(input.audible_sequence)}\n`;
   }
 
   // When the external lookup was ambiguous (e.g. OpenLibrary title-only search

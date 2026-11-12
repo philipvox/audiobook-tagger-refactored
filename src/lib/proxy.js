@@ -1,60 +1,125 @@
 // src/lib/proxy.js
-// Smart fetch — tries direct first, falls back to CORS proxy if blocked.
-// This way it works both locally (direct) and on GitHub Pages (via proxy).
+// Network helpers for ABS, the cloud AI providers and the public lookups.
+// Every request carries a real timeout (an AbortController signal in `init`,
+// the only form the Tauri HTTP plugin honours). In the browser build a failed
+// ABS/lookup request may be retried through a CORS proxy, but only when
+// VITE_PROXY_URL is configured and only for a genuine CORS/network failure.
 
 import { isTauri, getTauriFetch } from './platform.js';
 
-const PROXY_URL = import.meta.env.VITE_PROXY_URL || 'https://audiobook-tagger-proxy.workers.dev';
+/** Default timeout for ABS and lookup requests. */
+export const DEFAULT_TIMEOUT_MS = 30000;
+/** Timeout for the cloud AI calls (OpenAI / Anthropic). */
+export const AI_TIMEOUT_MS = 90000;
 
-/**
- * Fetch with an AbortController timeout.
- * @param {string} url
- * @param {object} options - standard fetch options
- * @param {number} timeoutMs - timeout in milliseconds
- * @returns {Promise<Response>}
- */
-function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(url, { ...options, signal: controller.signal })
-    .finally(() => clearTimeout(id));
+// 429 retry policy: two retries, 1 s then 3 s unless Retry-After says
+// otherwise, never waiting longer than 30 s.
+const RETRY_DELAYS_MS = [1000, 3000];
+const MAX_RETRY_AFTER_MS = 30000;
+
+// Read at call time so the configured value (or its absence) is what counts.
+// There is deliberately no default: an unset VITE_PROXY_URL means no proxy.
+function configuredProxyUrl() {
+  return String(import.meta.env.VITE_PROXY_URL || '').trim().replace(/\/+$/, '');
+}
+
+function hostOf(url) {
+  try { return new URL(url, 'http://localhost').host; } catch { return String(url); }
+}
+
+function timeoutError(url, timeoutMs) {
+  // Deliberately a plain Error, never a TypeError: a timeout must not trigger
+  // the proxy fallback.
+  const err = new Error(`Request to ${hostOf(url)} timed out after ${Math.round(timeoutMs / 1000)}s`);
+  err.name = 'TimeoutError';
+  err.code = 'ETIMEDOUT';
+  return err;
 }
 
 /**
- * Fetch a URL, trying direct first, then falling back to the CORS proxy.
+ * Run `fetchFn(url, init)` with a timeout. The AbortController signal is
+ * passed in `init` (so the Tauri plugin and the browser can cancel the
+ * request), and the returned promise rejects at `timeoutMs` even if the fetch
+ * implementation ignores the signal.
+ */
+export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS, fetchFn = null) {
+  const doFetch = fetchFn || globalThis.fetch.bind(globalThis);
+  const controller = new AbortController();
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      // Reject first so the caller sees the timeout, not the AbortError the
+      // abort below causes.
+      reject(timeoutError(url, timeoutMs));
+      controller.abort();
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([doFetch(url, { ...options, signal: controller.signal }), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function retryDelayMs(res, attempt) {
+  const header = res.headers?.get?.('Retry-After');
+  if (header != null && String(header).trim() !== '') {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
+  }
+  return RETRY_DELAYS_MS[attempt];
+}
+
+/**
+ * Call `doRequest()` and retry it while it answers 429, up to 2 times. For the
+ * cloud AI calls and the public lookups only; ABS requests are never retried.
+ * Returns the last response (still a 429 if every attempt was rate limited).
+ */
+export async function retryOn429(doRequest) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await doRequest();
+    if (res.status !== 429 || attempt >= RETRY_DELAYS_MS.length) return res;
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs(res, attempt)));
+  }
+}
+
+/** Fetch directly (Tauri plugin or browser fetch) with a timeout. Never proxied. */
+async function directFetch(url, options, timeoutMs) {
+  const fetchFn = isTauri() ? await getTauriFetch() : globalThis.fetch.bind(globalThis);
+  return fetchWithTimeout(url, options, timeoutMs, fetchFn);
+}
+
+/**
+ * Fetch an ABS or lookup URL. Desktop: direct through the Tauri HTTP plugin.
+ * Browser: direct first; when VITE_PROXY_URL is set and the direct request
+ * failed with a TypeError (the browser's CORS/network failure), retry it
+ * through that proxy. A timeout or any other error is thrown as-is.
  * @param {string} targetUrl - The actual API URL to call
  * @param {object} options - { method, headers, body }
  * @param {number} timeoutMs - timeout in milliseconds (default 30000)
- * @returns {Promise<Response>} - The response
+ * @returns {Promise<Response>}
  */
-export async function proxyFetch(targetUrl, options = {}, timeoutMs = 30000) {
+export async function proxyFetch(targetUrl, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const { method = 'GET', headers = {}, body = null } = options;
+  const directOpts = { method, headers: { ...headers } };
+  if (body && method !== 'GET' && method !== 'HEAD') {
+    directOpts.body = typeof body === 'string' ? body : JSON.stringify(body);
+  }
 
-  // In Tauri, always use direct fetch (HTTP plugin bypasses CORS)
+  // In Tauri, always go direct (the HTTP plugin bypasses CORS).
   if (isTauri()) {
-    const tauriFetch = await getTauriFetch();
-    const directOpts = { method, headers: { ...headers } };
-    if (body && method !== 'GET' && method !== 'HEAD') {
-      directOpts.body = typeof body === 'string' ? body : JSON.stringify(body);
-    }
-    return tauriFetch(targetUrl, directOpts);
+    return fetchWithTimeout(targetUrl, directOpts, timeoutMs, await getTauriFetch());
   }
 
-  // Browser: try direct fetch first, fall back to CORS proxy
-  // Try direct fetch first (works same-origin or if server allows CORS)
+  let proxyUrl;
   try {
-    const directOpts = { method, headers: { ...headers }, credentials: 'omit' };
-    if (body && method !== 'GET' && method !== 'HEAD') {
-      directOpts.body = typeof body === 'string' ? body : JSON.stringify(body);
-    }
-    const res = await fetchWithTimeout(targetUrl, directOpts, timeoutMs);
-    return res;
+    return await fetchWithTimeout(targetUrl, { ...directOpts, credentials: 'omit' }, timeoutMs);
   } catch (directError) {
-    // Direct failed (likely CORS) — try proxy
+    proxyUrl = configuredProxyUrl();
+    if (!proxyUrl || !(directError instanceof TypeError)) throw directError;
   }
 
-  // Fall back to CORS proxy
-  const res = await fetchWithTimeout(`${PROXY_URL}/proxy`, {
+  return fetchWithTimeout(`${proxyUrl}/proxy`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -64,8 +129,6 @@ export async function proxyFetch(targetUrl, options = {}, timeoutMs = 30000) {
       body,
     }),
   }, timeoutMs);
-
-  return res;
 }
 
 /**
@@ -109,7 +172,8 @@ export async function callOpenAI(apiKey, model, systemPrompt, userPrompt, maxTok
   const isGpt5 = model.startsWith('gpt-5');
   const useResponsesApi = isGpt5;
 
-  // Route through Caddy proxy if on same origin, otherwise use proxyFetch
+  // Browser + official API: the same-origin /api/openai reverse proxy. Any
+  // other case goes direct; AI calls never use the CORS proxy.
   const useLocalProxy = !isTauri() && typeof window !== 'undefined' && baseUrl === 'https://api.openai.com';
   const apiBase = useLocalProxy ? '/api/openai' : baseUrl;
 
@@ -140,15 +204,14 @@ export async function callOpenAI(apiKey, model, systemPrompt, userPrompt, maxTok
     };
   }
 
-  const fetchFn = isTauri() ? await getTauriFetch() : (useLocalProxy ? fetchWithTimeout : proxyFetch);
-  const res = await fetchFn(endpoint, {
+  const res = await retryOn429(() => directFetch(endpoint, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
     body: typeof body === 'string' ? body : JSON.stringify(body),
-  }, 90000);
+  }, AI_TIMEOUT_MS));
 
   if (!res.ok) {
     const text = await res.text();
@@ -161,8 +224,12 @@ export async function callOpenAI(apiKey, model, systemPrompt, userPrompt, maxTok
 
   const data = await res.json();
 
-  // Parse response based on API type
+  // M-1: a cut-off answer is never usable, however much of it parses.
   if (useResponsesApi) {
+    if (data.status === 'incomplete') {
+      const reason = data.incomplete_details?.reason || 'incomplete';
+      throw new Error(`OpenAI response was truncated (${reason}); nothing was applied.`);
+    }
     if (data.output_text) return data.output_text.trim();
     const text = data.output
       ?.find(item => item.type === 'message')
@@ -171,6 +238,9 @@ export async function callOpenAI(apiKey, model, systemPrompt, userPrompt, maxTok
     if (text) return text.trim();
     throw new Error('No text in OpenAI Responses API response');
   } else {
+    if (data.choices?.[0]?.finish_reason === 'length') {
+      throw new Error('OpenAI response was truncated (max_tokens); nothing was applied.');
+    }
     const content = data.choices?.[0]?.message?.content;
     if (content) return content.trim();
     throw new Error('No content in OpenAI Chat response');
@@ -186,12 +256,12 @@ export async function callOpenAI(apiKey, model, systemPrompt, userPrompt, maxTok
  * @param {number} maxTokens - Max output tokens
  */
 export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, maxTokens = 2000) {
-  // Route through Caddy proxy to avoid CORS
+  // Browser: the same-origin /api/anthropic reverse proxy. Desktop: direct.
+  // AI calls never use the CORS proxy.
   const useLocalProxy = !isTauri() && typeof window !== 'undefined';
   const endpoint = useLocalProxy ? '/api/anthropic/v1/messages' : 'https://api.anthropic.com/v1/messages';
-  const fetchFn = isTauri() ? await getTauriFetch() : (useLocalProxy ? fetchWithTimeout : proxyFetch);
 
-  const res = await fetchFn(endpoint, {
+  const res = await retryOn429(() => directFetch(endpoint, {
     method: 'POST',
     headers: {
       'x-api-key': apiKey,
@@ -212,7 +282,7 @@ export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, max
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     }),
-  }, 90000);
+  }, AI_TIMEOUT_MS));
 
   if (!res.ok) {
     const errText = await res.text();
@@ -234,6 +304,9 @@ export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, max
   }
 
   const data = await res.json();
+  if (data.stop_reason === 'max_tokens') {
+    throw new Error('Anthropic response was truncated (max_tokens); nothing was applied.');
+  }
   const text = data.content?.find(c => c.type === 'text')?.text;
   if (text) return text.trim();
   throw new Error('No text in Anthropic response');
@@ -327,6 +400,9 @@ export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b',
 
   console.log(`[Ollama] DONE in ${elapsed}s — load=${loadTime}s, prompt_eval=${promptEvalTime}s (${promptTokens} tokens), gen=${evalTime}s (${tokens} tokens, ${speed} tok/s)`);
 
+  if (data?.done_reason === 'length') {
+    throw new Error(`Ollama response was truncated (num_predict ${maxTokens}); nothing was applied.`);
+  }
   const content = data?.message?.content;
   if (!content) throw new Error('Empty response from Ollama');
   return content.trim();
@@ -404,57 +480,21 @@ function extractBalancedBlock(text, startIndex) {
   return null; // never balanced - truncated/garbage input
 }
 
-// Sentinel distinguishing "no parseable block found" from a block that
-// legitimately parses to JSON `undefined` (which cannot happen: JSON has no
-// undefined literal, but a dedicated sentinel keeps the intent explicit).
-const NO_BLOCK_FOUND = Symbol('no-parseable-block');
+// Small local models sometimes open with a reasoning block. It is prose, not
+// the answer, so it is dropped before looking for the JSON.
+const LEADING_REASONING_BLOCK = /^\s*<(think|thinking)>[\s\S]*?<\/\1>/i;
 
 /**
- * Scan `text` for balanced `{...}` / `[...]` blocks (in order of where they
- * open) and return the parsed value of the first one that is actually valid
- * JSON. A block can balance its brackets without being valid JSON (e.g. a
- * stray `{fantasy}` in prose before the real payload) - those are skipped
- * rather than treated as the final answer, so JSON appearing after
- * non-JSON bracket noise (a `<thinking>` block, for example) still gets
- * found. Returns NO_BLOCK_FOUND if nothing in the text parses.
- */
-function findFirstParseableBlock(text) {
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === '{' || ch === '[') {
-      const block = extractBalancedBlock(text, i);
-      if (block) {
-        try {
-          return JSON.parse(block);
-        } catch {
-          // Balanced but not valid JSON - keep scanning for a later block.
-        }
-      }
-    }
-  }
-  return NO_BLOCK_FOUND;
-}
-
-/**
- * Parse a JSON response from AI, handling markdown code blocks, prose the
- * model wrapped around the JSON, and trailing commentary. Strategy, tried
- * in order:
- *   1. JSON.parse the raw (trimmed) text as-is - the fast path when the
- *      model returned clean JSON with no wrapping.
- *   2. If the ENTIRE text is wrapped in a single pair of ``` fences at the
- *      very start and very end, strip just those two wrapping delimiters
- *      (never a global replace across the whole text) and parse the
- *      interior. This is anchored on purpose: a global "delete every ```
- *      substring" would also corrupt a legitimate ``` sequence that
- *      appears inside a JSON string value elsewhere in the response.
- *   3. Fall back to scanning the ORIGINAL, unstripped text for balanced
- *      {...} / [...] blocks (respecting strings/escapes) and parsing each
- *      in turn, returning the first one that is actually valid JSON. This
- *      naturally skips over fence markers and surrounding prose (they're
- *      just ordinary characters to the scanner) without ever deleting or
- *      mutating any character of the payload itself, including fence-like
- *      sequences that legitimately live inside a string value.
- *   4. Throw only if nothing in the text was parseable.
+ * Parse a JSON answer from an AI model (M-1). The rule is strict on purpose:
+ * a truncated answer must fail, never be salvaged as a fragment.
+ *   1. JSON.parse the trimmed text as-is (clean JSON, the common case).
+ *   2. Otherwise find the FIRST `{` or `[` in the text and take the balanced
+ *      block that starts there (string- and escape-aware). Prose, ```json
+ *      fences and trailing commentary around that block are ignored.
+ *   3. If that block never closes, or is not valid JSON, throw. There is no
+ *      fallback to a later or nested block: a DNA answer cut mid-array used
+ *      to come back as just its first complete inner array.
+ * A leading <think>...</think> reasoning block is skipped first.
  */
 export function parseAIJson(text) {
   const raw = String(text);
@@ -462,17 +502,18 @@ export function parseAIJson(text) {
 
   try {
     return JSON.parse(trimmed);
-  } catch (e) {
-    const wrapped = trimmed.match(/^```(?:json)?\s*([\s\S]*)\s*```$/i);
-    if (wrapped) {
-      try {
-        return JSON.parse(wrapped[1]);
-      } catch { /* not valid JSON even unwrapped - fall through to the scan */ }
+  } catch {
+    const body = raw.replace(LEADING_REASONING_BLOCK, '');
+    const start = body.search(/[{[]/);
+    const block = start >= 0 ? extractBalancedBlock(body, start) : null;
+    if (block === null) {
+      const why = start >= 0 ? 'the JSON never closes (truncated answer)' : 'no JSON found';
+      throw new Error(`Failed to parse AI response as JSON: ${why}\nResponse was: ${trimmed.substring(0, 200)}`);
     }
-
-    const result = findFirstParseableBlock(raw);
-    if (result !== NO_BLOCK_FOUND) return result;
-
-    throw new Error(`Failed to parse AI response as JSON: ${e.message}\nResponse was: ${trimmed.substring(0, 200)}`);
+    try {
+      return JSON.parse(block);
+    } catch (blockError) {
+      throw new Error(`Failed to parse AI response as JSON: ${blockError.message}\nResponse was: ${trimmed.substring(0, 200)}`);
+    }
   }
 }

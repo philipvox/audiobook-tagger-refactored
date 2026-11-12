@@ -2020,6 +2020,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         audible_series: gathered?.abs_series || null,
         audible_sequence: gathered?.abs_sequence || null,
         audible_candidates: gathered?.abs_candidates || null,
+        external_source: gathered?.source || null,
       };
     });
 

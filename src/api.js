@@ -3,9 +3,11 @@
 // All API calls go through the Cloudflare Worker CORS proxy.
 // Config lives in browser localStorage.
 
-import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
+import { absApi, callAI, parseAIJson, proxyFetch, retryOn429 } from './lib/proxy';
 import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
-import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor } from './lib/normalize';
+import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor, isPlaceholderTitle } from './lib/normalize';
+import { isPlaceholderSeries } from './lib/absPayload.js';
+import { lookupHitMatches, hasRealAuthor } from './lib/lookupMatch.js';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit } from './lib/genres';
 import { pushAbsItems } from './lib/absPush.js';
 import { absItemsToBookGroups } from './lib/absGroup.js';
@@ -200,6 +202,20 @@ export async function callBackend(cmd, args = {}) {
   err.code = 'NOT_IMPLEMENTED';
   err.command = cmd;
   throw err;
+}
+
+// M-3: a placeholder answer ("N/A", "Unknown", ...) is no answer. It must
+// never be staged over the current value, so drop it before the merge.
+function withoutPlaceholders(parsed) {
+  const clean = { ...parsed };
+  if (isPlaceholderTitle(clean.title)) delete clean.title;
+  if (isPlaceholderAuthor(clean.author)) delete clean.author;
+  if (isPlaceholderAuthor(clean.narrator)) delete clean.narrator;
+  if (isPlaceholderSeries(clean.subtitle)) delete clean.subtitle;
+  // The sequence belongs to the series: a placeholder series takes its
+  // sequence with it. (A missing series is left to the caller's fallback.)
+  if (String(clean.series ?? '').trim() && isPlaceholderSeries(clean.series)) { delete clean.series; delete clean.sequence; }
+  return clean;
 }
 
 // ============================================================================
@@ -476,10 +492,11 @@ const HANDLERS = {
       try {
         // M: route through proxyFetch (like get_abs_author_image etc. do) so
         // the Tauri HTTP plugin bypasses CORS natively and the 30s timeout
-        // applies uniformly, instead of a bare unbounded fetch().
-        const res = await proxyFetch(url, {
+        // applies uniformly, instead of a bare unbounded fetch(). A 429 is
+        // retried with backoff (M-2).
+        const res = await retryOn429(() => proxyFetch(url, {
           headers: { 'Accept': 'application/json' },
-        });
+        }));
         if (!res.ok) {
           const preview = await res.text().catch(() => '');
           return { _error: makeErrorDetail({
@@ -509,7 +526,7 @@ const HANDLERS = {
 
     const lookupByTitle = async (title, author) => {
       if (!title || !String(title).trim()) return null;
-      const hasAuthor = author && String(author).trim() && !/^unknown$/i.test(author);
+      const hasAuthor = hasRealAuthor(author);
       const params = new URLSearchParams({
         title: String(title).trim(),
         limit: '5',
@@ -519,9 +536,9 @@ const HANDLERS = {
       const url = `https://openlibrary.org/search.json?${params}`;
       try {
         // M: route through proxyFetch - see lookupByAsin above.
-        const res = await proxyFetch(url, {
+        const res = await retryOn429(() => proxyFetch(url, {
           headers: { 'Accept': 'application/json' },
-        });
+        }));
         if (!res.ok) {
           const preview = await res.text().catch(() => '');
           return { _error: makeErrorDetail({
@@ -541,7 +558,10 @@ const HANDLERS = {
           year: doc.first_publish_year ? String(doc.first_publish_year) : null,
           isbn: (doc.isbn || []).find(i => i.length === 13) || (doc.isbn || [])[0] || null,
           publisher: Array.isArray(doc.publisher) ? doc.publisher[0] : (doc.publisher || null),
-        })).filter(c => c.author);
+        })).filter(c => c.author)
+          // M-3: a hit for another book is no result. Title must match, and
+          // the author surname too when the book has a real author.
+          .filter(c => lookupHitMatches({ title, author }, { title: c.title, authors: c.author }));
 
         if (candidates.length === 0) return null;
 
@@ -642,8 +662,33 @@ const HANDLERS = {
     // first so numeric 3 vs "3" (or null vs undefined) isn't a spurious change.
     const strEq = (a, b) => (a == null ? '' : String(a)) === (b == null ? '' : String(b));
 
+    // M-3: an answer below this confidence changes nothing.
+    const MIN_CONFIDENCE = 60;
+
     // Helper: build result from parsed metadata
-    const buildMetaResult = (book, parsed, rawResponse) => {
+    const buildMetaResult = (book, rawParsed, rawResponse) => {
+      const confidence = Number(rawParsed?.confidence);
+      if (rawParsed && typeof rawParsed === 'object' && !aiReturnedNothingUseful(rawParsed)
+          && Number.isFinite(confidence) && confidence < MIN_CONFIDENCE) {
+        return {
+          id: book.id,
+          title: book.current_title,
+          author: book.current_author,
+          subtitle: book.current_subtitle ?? null,
+          series: book.current_series ?? null,
+          sequence: book.current_sequence ?? null,
+          narrator: book.current_narrator ?? null,
+          confidence,
+          changed: false,
+          errorDetail: makeErrorDetail({
+            stage: 'resolve',
+            kind: 'empty-content',
+            message: `AI confidence ${confidence} is below ${MIN_CONFIDENCE}; kept the current metadata.`,
+            responsePreview: rawResponse,
+          }),
+        };
+      }
+      const parsed = withoutPlaceholders(rawParsed || {});
       const title = parsed.title || book.current_title;
       const author = parsed.author || book.current_author;
       // item 12: a missing OR null subtitle in the AI response must fall back
@@ -672,7 +717,8 @@ const HANDLERS = {
       // Silent-success surfacing: the caller already selected this book for
       // resolution (missing/bad author/title/series), so an empty AI response
       // means the model had no grounded signal. Amber pill so the user knows
-      // it ran and yielded nothing, not "nothing happened".
+      // it ran and yielded nothing, not "nothing happened". Checked on the
+      // cleaned answer: an all-placeholder answer is as empty as all-null.
       if (aiReturnedNothingUseful(parsed)) {
         result.errorDetail = makeErrorDetail({
           stage: 'resolve',
@@ -773,7 +819,7 @@ const HANDLERS = {
     const input = args.request || args;
     const prompt = buildMetadataPrompt(input);
     const response = await callAI(config, getSystemPrompt(config), prompt, 1500);
-    const parsed = parseAIJson(response);
+    const parsed = withoutPlaceholders(parseAIJson(response));
     return {
       title: parsed.title || input.current_title,
       author: parsed.author || input.current_author,
@@ -798,7 +844,10 @@ ${input.current_series ? `Current series: ${safe(input.current_series)}` : ''}
 Return JSON: {"series":null,"sequence":null,"confidence":0,"source":"gpt"}
 If it's part of a series, fill in the name and book number. If standalone, use null.`;
     const response = await callAI(config, getSystemPrompt(config), prompt, 500);
-    const parsed = parseAIJson(response);
+    const parsed = withoutPlaceholders(parseAIJson(response));
+    // A placeholder series answer comes back as null, so callers keep theirs.
+    parsed.series = parsed.series ?? null;
+    parsed.sequence = parsed.sequence ?? null;
     console.log(`[series-fix] resolve_series for "${input.title}": series="${parsed.series}" sequence="${parsed.sequence}"`);
     if (parsed.series && /[#]|\bbook\b|\bvol/i.test(parsed.series)) {
       console.warn(`[series-fix] WARNING: GPT returned embedded sequence in series name: "${parsed.series}"`);
@@ -1770,41 +1819,55 @@ Return JSON: {"year":"2005"}`;
 
     let isbn = null;
     let asin = null;
-
-    // ASIN via Audible public catalog API
-    try {
-      const titleParam = encodeURIComponent(title);
-      const authorParam = encodeURIComponent(author || '');
-      // Audible catalog (Tauri http plugin bypasses CORS; web variant deferred, see issue #53)
-      const audibleRes = await proxyFetch(`https://api.audible.com/1.0/catalog/products?title=${titleParam}&author=${authorParam}&num_results=3&response_groups=product_desc`);
-      if (audibleRes.ok) {
-        const data = await audibleRes.json();
-        const products = data.products || [];
-        if (products.length > 0) {
-          const titleLower = title.toLowerCase();
-          const match = products.find(p => p.title?.toLowerCase() === titleLower) || products[0];
-          asin = match.asin;
+    // M-3: a failed lookup is reported, not swallowed as "Not found".
+    const errors = [];
+    const book = { title, author };
+    const lookup = async (source, url, pick) => {
+      try {
+        const res = await retryOn429(() => proxyFetch(url, { headers: { 'Accept': 'application/json' } }));
+        if (!res.ok) {
+          errors.push(makeErrorDetail({
+            stage: 'lookup-isbn', kind: 'http', statusCode: res.status, url,
+            message: `${source} lookup failed: HTTP ${res.status}`,
+          }));
+          return;
         }
+        pick(await res.json());
+      } catch (err) {
+        errors.push(errorDetailFromException(err, { stage: 'lookup-isbn', url }));
       }
-    } catch {}
+    };
 
-    // ISBN via Open Library
-    try {
-      const query = encodeURIComponent(`${title} ${author || ''}`);
-      const olRes = await proxyFetch(`https://openlibrary.org/search.json?q=${query}&limit=5&fields=isbn,title,author_name`);
-      if (olRes.ok) {
-        const data = await olRes.json();
-        for (const doc of (data.docs || [])) {
-          if (doc.isbn?.length > 0) {
-            isbn = doc.isbn.find(i => i.length === 13) || doc.isbn[0];
-            break;
-          }
-        }
-      }
-    } catch {}
+    // ASIN via Audible public catalog API (Tauri http plugin bypasses CORS;
+    // web variant deferred, see issue #53). Only a hit for this book counts.
+    const titleParam = encodeURIComponent(title);
+    const authorParam = encodeURIComponent(author || '');
+    await lookup('Audible', `https://api.audible.com/1.0/catalog/products?title=${titleParam}&author=${authorParam}&num_results=3&response_groups=product_desc,contributors`, (data) => {
+      const match = (data.products || []).find(p => p.asin && lookupHitMatches(book, {
+        title: p.title,
+        authors: (p.authors || []).map(a => a?.name).filter(Boolean),
+      }));
+      if (match) asin = match.asin;
+    });
+
+    // ISBN via Open Library: the first hit for this book that has an ISBN.
+    const query = encodeURIComponent(`${title} ${author || ''}`);
+    await lookup('OpenLibrary', `https://openlibrary.org/search.json?q=${query}&limit=5&fields=isbn,title,author_name`, (data) => {
+      const doc = (data.docs || []).find(d => d.isbn?.length > 0
+        && lookupHitMatches(book, { title: d.title, authors: d.author_name || [] }));
+      if (doc) isbn = doc.isbn.find(i => i.length === 13) || doc.isbn[0];
+    });
 
     if (isbn || asin) {
       return { success: true, isbn, asin };
+    }
+    if (errors.length > 0) {
+      const message = errors.map(e => e.message).join('; ');
+      return {
+        success: false,
+        error: message,
+        errorDetail: makeErrorDetail({ stage: 'lookup-isbn', kind: errors[0].kind, message }),
+      };
     }
     return { success: false, error: 'Not found' };
   },
