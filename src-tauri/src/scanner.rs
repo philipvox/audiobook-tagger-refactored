@@ -808,15 +808,20 @@ fn pick_metadata(raw_files: &[RawFile], parent_dir: &str, group_name: &str, scan
     let hierarchy = parse_folder_hierarchy_in(parent_dir, scan_root);
 
     // The album is the book title (the writer puts a multi-file book's title
-    // there). Without one, the title tag: never a placeholder or a bare
-    // "Track 01" (`is_junk_title`), and for a multi-file book without its
-    // part marker ("Dune Part 1" -> "Dune"). Otherwise the group's name.
-    let multi_file = raw_files.len() > 1;
-    let own_title = first_tags
-        .title
-        .clone()
-        .filter(|t| !is_junk_title(t))
-        .and_then(|t| if multi_file { clean_book_title(&t, false) } else { Some(t) });
+    // there). Without one, the title tag, never a placeholder or a bare
+    // "Track 01" (`is_junk_title`). Its part marker is removed when it numbers
+    // this book's files ("Dune Part 1" beside "Dune Part 2" -> "Dune"): that
+    // is, when another file carries the same title with another marker. A
+    // marker every file shares is part of the title ("Henry IV, Part 2").
+    // Otherwise the group's name.
+    let own_title = first_tags.title.clone().filter(|t| !is_junk_title(t)).map(|title| {
+        let cleaned = clean_book_title(&title, false);
+        let numbers_the_files = cleaned.is_some()
+            && raw_files.iter().filter_map(|f| f.tags.title.as_deref()).any(|other| {
+                other.trim() != title.trim() && clean_book_title(other, false) == cleaned
+            });
+        if numbers_the_files { cleaned.unwrap_or(title) } else { title }
+    });
     let title = first_tags
         .album
         .clone()
@@ -1140,8 +1145,9 @@ fn known_too_long_for_a_track(f: &RawFile) -> bool {
 ///     album key that are equal meet ("a.m4b" titled "Carrie" joins an
 ///     untitled "Carrie.m4b").
 ///   - a folder that does not split is one book: no file has a key, or
-///     exactly one key exists and no keyless file has a title tag with any
-///     text of its own.
+///     exactly one key exists and no keyless file has a title tag of its own
+///     (any text counts there, "Track 01" too; only a bare number or part
+///     marker does not).
 /// Only inside a numbered track set (left as is because mp3/flac files are
 /// per-track by nature, and splitting every chapter named after its title
 /// would wrongly split the common case):
@@ -1153,7 +1159,7 @@ fn known_too_long_for_a_track(f: &RawFile) -> bool {
 ///   - mp3/flac/... without an album identity are keyless: they are one
 ///     group together (album-less whole books numbered like chapters merge),
 ///     and they also join the folder's single keyed book when none of them
-///     has a title tag with text (an untagged intro track);
+///     has a title tag of its own, as above (an untagged intro track);
 ///   - m4a/m4b without a title identity whose filenames are generic and
 ///     equal once the track number is masked ("01.m4b", "02.m4b") merge,
 ///     unless the file is known to run longer than `MAX_TRACK_SECS`;
@@ -1334,7 +1340,8 @@ fn file_book_key(f: &RawFile, ev: &FolderEvidence) -> String {
 /// carry no title of their own (an untagged intro track). A titled keyless
 /// file ("02 - Carrie.mp3", title "Carrie", beside album "It") may be another
 /// book, so the keyless files then form their own group. Any title text
-/// counts here, a generic one too: keeping such a file out is the split side.
+/// counts here, a generic one ("Track 01") too, since keeping such a file out
+/// is the split side; only a bare number or part marker is no title.
 fn split_folder_into_books(raw_files: Vec<RawFile>) -> Vec<(String, Vec<RawFile>)> {
     let evidence = folder_evidence(&raw_files);
     let mut order: Vec<String> = Vec::new();
@@ -2615,6 +2622,14 @@ mod tests {
         // A single file keeps its own title as tagged.
         let groups = group_files(vec![raw(d, "Dune Part 1.m4b", big("Dune Part 1"))]);
         assert_eq!(groups[0].metadata.title, "Dune Part 1");
+        // A marker every file shares does not number the files: it is the title.
+        let d = "/audiobooks/William Shakespeare/Henry IV 2";
+        let groups = group_files(vec![
+            raw(d, "01.mp3", probe(None, Some("Henry IV, Part 2"), Some(1), Some(1500))),
+            raw(d, "02.mp3", probe(None, Some("Henry IV, Part 2"), Some(2), Some(1500))),
+        ]);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].metadata.title, "Henry IV, Part 2");
     }
 
     #[test]
