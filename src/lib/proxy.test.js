@@ -120,7 +120,8 @@ describe('429 retry for cloud AI calls (M-2)', () => {
 
   it('gives up after 2 retries and reports the rate limit', async () => {
     vi.useFakeTimers();
-    tauriFetch.mockResolvedValue(status(429));
+    // A fresh response per attempt: discarded 429 bodies are cancelled.
+    tauriFetch.mockImplementation(async () => status(429));
     const p = callAnthropic('key', 'claude-haiku-4-5', 's', 'u', 100);
     const assertion = expect(p).rejects.toThrow(/rate limit/i);
     await vi.advanceTimersByTimeAsync(4000);
@@ -190,5 +191,67 @@ describe('browser proxy fallback (H-6)', () => {
     await expect(callOpenAI('sk', 'gpt-4o-mini', 's', 'u', 100, 'https://custom-llm.example')).rejects.toThrow();
     expect(spy).toHaveBeenCalledTimes(1);
     expect(String(spy.mock.calls[0][0])).toBe('https://custom-llm.example/v1/chat/completions');
+  });
+});
+
+// A 200 whose body never finishes arriving.
+const stalledBody = () => new Response(new ReadableStream({ start() {} }), { status: 200 });
+
+describe('the deadline covers reading the body (fix round 1)', () => {
+  beforeEach(() => { platform.isTauri.mockReturnValue(true); });
+
+  it('absApi rejects at 30 s when the body read never resolves', async () => {
+    vi.useFakeTimers();
+    tauriFetch.mockImplementation(async () => stalledBody());
+    const p = absApi('https://abs.example', 'tok', '/api/libraries');
+    const assertion = expect(p).rejects.toThrow(/timed out after 30s/);
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(tauriFetch.mock.calls[0][1].signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await assertion;
+    expect(tauriFetch.mock.calls[0][1].signal.aborted).toBe(true);
+  });
+
+  it('a lookup body read through proxyFetch rejects at the deadline', async () => {
+    vi.useFakeTimers();
+    tauriFetch.mockImplementation(async () => stalledBody());
+    const res = await proxyFetch('https://openlibrary.org/search.json?q=x', {}, 2000);
+    const assertion = expect(res.text()).rejects.toThrow(/timed out after 2s/);
+    await vi.advanceTimersByTimeAsync(2000);
+    await assertion;
+  });
+
+  it('OpenAI and Anthropic reject at 90 s when the body read never resolves', async () => {
+    vi.useFakeTimers();
+    tauriFetch.mockImplementation(async () => stalledBody());
+    const ea = expect(callOpenAI('sk', 'gpt-5-nano', 's', 'u', 100)).rejects.toThrow(/timed out after 90s/);
+    const eb = expect(callAnthropic('key', 'claude-haiku-4-5', 's', 'u', 100)).rejects.toThrow(/timed out after 90s/);
+    await vi.advanceTimersByTimeAsync(90000);
+    await ea;
+    await eb;
+  });
+
+  it('a body that arrives in time is returned normally', async () => {
+    tauriFetch.mockResolvedValue(json({ id: 'me' }));
+    await expect(absApi('https://abs.example', 'tok', '/api/me')).resolves.toEqual({ id: 'me' });
+  });
+});
+
+describe('a discarded 429 releases its body (fix round 1)', () => {
+  beforeEach(() => { platform.isTauri.mockReturnValue(true); });
+
+  it('cancels the 429 body before sleeping', async () => {
+    vi.useFakeTimers();
+    const limited = status(429);
+    const cancel = vi.spyOn(limited.body, 'cancel');
+    tauriFetch
+      .mockResolvedValueOnce(limited)
+      .mockResolvedValueOnce(json({ output_text: '{"ok":true}' }));
+    const p = callOpenAI('sk', 'gpt-5-nano', 's', 'u', 100);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(tauriFetch).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(p).resolves.toBe('{"ok":true}');
   });
 });

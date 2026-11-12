@@ -112,3 +112,73 @@ describe('lookup_book_isbn: checked hits, visible errors', () => {
     expect(r).toEqual({ success: false, error: 'Not found' });
   });
 });
+
+describe('exact title beats containment (fix round 1)', () => {
+  it('lookup_book_isbn takes "Dune" over "Dune Messiah" listed first', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (String(url).includes('audible.com')) {
+        return ok({ products: [
+          { asin: 'B0MESSIAH', title: 'Dune Messiah', authors: [{ name: 'Frank Herbert' }] },
+          { asin: 'B0DUNE', title: 'Dune', authors: [{ name: 'Frank Herbert' }] },
+        ] });
+      }
+      return ok({ docs: [
+        { title: 'Dune Messiah', author_name: ['Frank Herbert'], isbn: ['9780593098233'] },
+        { title: 'Dune', author_name: ['Frank Herbert'], isbn: ['9780441013593'] },
+      ] });
+    });
+    const r = await callBackend('lookup_book_isbn', { request: { title: 'Dune', author: 'Frank Herbert' } });
+    expect(r).toMatchObject({ success: true, asin: 'B0DUNE', isbn: '9780441013593' });
+  });
+
+  it('gather takes "Dune" over "Dune Messiah" listed first', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok({ docs: [
+      { title: 'Dune Messiah', author_name: ['Frank Herbert'], isbn: ['9780593098233'] },
+      { title: 'Dune', author_name: ['Frank Herbert'], isbn: ['9780441013593'] },
+    ] }));
+    const r = (await callBackend('gather_external_data', {
+      books: [{ id: 'b1', title: 'Dune', author: 'Frank Herbert' }],
+    })).results[0];
+    expect(r.abs_title).toBe('Dune');
+    expect(r.abs_isbn).toBe('9780441013593');
+  });
+
+  it('gather rejects a sequel-only hit when the author is a placeholder', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(ok({ docs: [
+      { title: 'Dune Messiah', author_name: ['Frank Herbert'], isbn: ['9780593098233'] },
+    ] }));
+    const r = (await callBackend('gather_external_data', {
+      books: [{ id: 'b1', title: 'Dune', author: 'Unknown' }],
+    })).results[0];
+    expect(r.gathered).toBe(false);
+  });
+});
+
+describe('gather_external_data: Audnexus record must match the book', () => {
+  it('ignores an ASIN record for another book and falls back to OpenLibrary', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (String(url).includes('audnex.us')) {
+        return ok({ title: 'The Dosadi Experiment', authors: [{ name: 'Frank Herbert' }] });
+      }
+      return ok({ docs: [{ title: 'Dune', author_name: ['Frank Herbert'], isbn: ['9780441013593'] }] });
+    });
+    const r = (await callBackend('gather_external_data', {
+      books: [{ id: 'b1', asin: 'B0WRONG', title: 'Dune', author: 'Frank Herbert' }],
+    })).results[0];
+    expect(r.gathered).toBe(true);
+    expect(r.source).toBe('openlibrary');
+    expect(r.abs_title).toBe('Dune');
+  });
+
+  it('accepts a matching Audnexus record', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => (
+      String(url).includes('audnex.us')
+        ? ok({ title: 'Dune', authors: [{ name: 'Frank Herbert' }] })
+        : ok({ docs: [] })
+    ));
+    const r = (await callBackend('gather_external_data', {
+      books: [{ id: 'b1', asin: 'B0DUNE', title: 'Dune', author: 'Frank Herbert' }],
+    })).results[0];
+    expect(r.source).toBe('audnexus');
+  });
+});

@@ -7,7 +7,7 @@ import { absApi, callAI, parseAIJson, proxyFetch, retryOn429 } from './lib/proxy
 import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor, isPlaceholderTitle } from './lib/normalize';
 import { isPlaceholderSeries } from './lib/absPayload.js';
-import { lookupHitMatches, hasRealAuthor } from './lib/lookupMatch.js';
+import { lookupHitMatch, lookupHitMatches, pickLookupHit, hasRealAuthor } from './lib/lookupMatch.js';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit } from './lib/genres';
 import { pushAbsItems } from './lib/absPush.js';
 import { absItemsToBookGroups } from './lib/absGroup.js';
@@ -266,7 +266,7 @@ function buildResolveResult(book, rawParsed, rawResponse) {
       changed: false,
       errorDetail: makeErrorDetail({
         stage: 'resolve',
-        kind: 'empty-content',
+        kind: 'low-confidence',
         message: `AI confidence ${confidence} is below ${MIN_CONFIDENCE}; kept the current metadata.`,
         responsePreview: rawResponse,
       }),
@@ -606,7 +606,7 @@ const HANDLERS = {
       return names.length ? names.join(', ') : null;
     };
 
-    const lookupByAsin = async (asin) => {
+    const lookupByAsin = async (asin, book) => {
       const url = `https://api.audnex.us/books/${encodeURIComponent(asin)}`;
       try {
         // M: route through proxyFetch (like get_abs_author_image etc. do) so
@@ -625,6 +625,11 @@ const HANDLERS = {
           }) };
         }
         const d = await res.json();
+        // M-3: an ASIN can be wrong too. A record for another book is no
+        // result, so the title lookup gets its turn.
+        if (!lookupHitMatches(book, { title: d.title, authors: (d.authors || []).map(a => a?.name || a) })) {
+          return null;
+        }
         return {
           abs_title: d.title || null,
           abs_subtitle: d.subtitle || null,
@@ -678,9 +683,13 @@ const HANDLERS = {
           isbn: (doc.isbn || []).find(i => i.length === 13) || (doc.isbn || [])[0] || null,
           publisher: Array.isArray(doc.publisher) ? doc.publisher[0] : (doc.publisher || null),
         })).filter(c => c.author)
-          // M-3: a hit for another book is no result. Title must match, and
-          // the author surname too when the book has a real author.
-          .filter(c => lookupHitMatches({ title, author }, { title: c.title, authors: c.author }));
+          // M-3: a hit for another book is no result (see lookupMatch.js).
+          // Exact title matches come first, so the top hit is never a
+          // containment match while an exact one exists.
+          .map(c => ({ c, quality: lookupHitMatch({ title, author }, { title: c.title, authors: c.author }) }))
+          .filter(x => x.quality)
+          .sort((a, b) => (a.quality === 'exact' ? 0 : 1) - (b.quality === 'exact' ? 0 : 1))
+          .map(x => x.c);
 
         if (candidates.length === 0) return null;
 
@@ -722,7 +731,7 @@ const HANDLERS = {
       let found = null;
       let errorDetail = null;
       if (book.asin) {
-        const res = await lookupByAsin(book.asin);
+        const res = await lookupByAsin(book.asin, { title: book.title, author: book.author });
         if (res?._error) errorDetail = res._error;
         else if (res) found = res;
       }
@@ -898,7 +907,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
           result: { series: null, sequence: null, confidence },
           errorDetail: makeErrorDetail({
             stage: 'resolve',
-            kind: 'empty-content',
+            kind: 'low-confidence',
             message: `AI confidence ${confidence} is below ${MIN_CONFIDENCE}; kept the current series.`,
             responsePreview: response,
           }),
@@ -1927,18 +1936,18 @@ Return JSON: {"year":"2005"}`;
     const titleParam = encodeURIComponent(title);
     const authorParam = encodeURIComponent(author || '');
     await lookup('Audible', `https://api.audible.com/1.0/catalog/products?title=${titleParam}&author=${authorParam}&num_results=3&response_groups=product_desc,contributors`, (data) => {
-      const match = (data.products || []).find(p => p.asin && lookupHitMatches(book, {
+      const match = pickLookupHit(book, data.products, p => ({
         title: p.title,
         authors: (p.authors || []).map(a => a?.name).filter(Boolean),
-      }));
+      }), p => !!p.asin);
       if (match) asin = match.asin;
     });
 
     // ISBN via Open Library: the first hit for this book that has an ISBN.
     const query = encodeURIComponent(`${title} ${author || ''}`);
     await lookup('OpenLibrary', `https://openlibrary.org/search.json?q=${query}&limit=5&fields=isbn,title,author_name`, (data) => {
-      const doc = (data.docs || []).find(d => d.isbn?.length > 0
-        && lookupHitMatches(book, { title: d.title, authors: d.author_name || [] }));
+      const doc = pickLookupHit(book, data.docs, d => ({ title: d.title, authors: d.author_name || [] }),
+        d => d.isbn?.length > 0);
       if (doc) isbn = doc.isbn.find(i => i.length === 13) || doc.isbn[0];
     });
 

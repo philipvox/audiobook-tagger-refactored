@@ -45,6 +45,7 @@ describe('resolve_metadata_batch confidence gate', () => {
     expect(r.series).toBe('Discworld');
     expect(r.sequence).toBe('8');
     expect(r.errorDetail?.message).toMatch(/confidence 55/);
+    expect(r.errorDetail?.kind).toBe('low-confidence');
   });
 
   it('accepts a result at confidence 60', async () => {

@@ -36,17 +36,21 @@ function timeoutError(url, timeoutMs) {
   return err;
 }
 
+const BODY_READERS = ['json', 'text', 'arrayBuffer', 'blob'];
+
 /**
- * Run `fetchFn(url, init)` with a timeout. The AbortController signal is
- * passed in `init` (so the Tauri plugin and the browser can cancel the
- * request), and the returned promise rejects at `timeoutMs` even if the fetch
- * implementation ignores the signal.
+ * Run `fetchFn(url, init)` with a timeout that covers the whole request,
+ * body included. The AbortController signal is passed in `init` (so the
+ * Tauri plugin and the browser can cancel the request). The returned promise,
+ * and any later `json()` / `text()` / `arrayBuffer()` / `blob()` read on the
+ * response, reject at the same deadline even if the fetch implementation
+ * ignores the signal. The timer stops once the body has been read.
  */
 export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS, fetchFn = null) {
   const doFetch = fetchFn || globalThis.fetch.bind(globalThis);
   const controller = new AbortController();
   let timer;
-  const timeout = new Promise((_, reject) => {
+  const deadline = new Promise((_, reject) => {
     timer = setTimeout(() => {
       // Reject first so the caller sees the timeout, not the AbortError the
       // abort below causes.
@@ -54,11 +58,25 @@ export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TI
       controller.abort();
     }, timeoutMs);
   });
+  // The deadline may fire after the caller stopped listening (a response
+  // whose body is never read); that is not an unhandled rejection.
+  deadline.catch(() => {});
+
+  let res;
   try {
-    return await Promise.race([doFetch(url, { ...options, signal: controller.signal }), timeout]);
-  } finally {
+    res = await Promise.race([doFetch(url, { ...options, signal: controller.signal }), deadline]);
+  } catch (err) {
     clearTimeout(timer);
+    throw err;
   }
+
+  for (const name of BODY_READERS) {
+    const read = res?.[name];
+    if (typeof read !== 'function') continue;
+    res[name] = (...args) => Promise.race([read.apply(res, args), deadline])
+      .finally(() => clearTimeout(timer));
+  }
+  return res;
 }
 
 function retryDelayMs(res, attempt) {
@@ -79,6 +97,8 @@ export async function retryOn429(doRequest) {
   for (let attempt = 0; ; attempt++) {
     const res = await doRequest();
     if (res.status !== 429 || attempt >= RETRY_DELAYS_MS.length) return res;
+    // This response is discarded: release its body before waiting.
+    try { await res.body?.cancel?.(); } catch { /* already consumed or not cancellable */ }
     await new Promise((resolve) => setTimeout(resolve, retryDelayMs(res, attempt)));
   }
 }

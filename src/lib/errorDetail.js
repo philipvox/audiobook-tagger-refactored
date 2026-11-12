@@ -22,6 +22,7 @@ export const ERROR_KINDS = Object.freeze([
   'empty-response', // AI returned 200 + empty/nullish content
   'empty-content',  // AI returned structured JSON but all expected fields null/missing
   'schema',         // AI returned content that doesn't match the expected schema
+  'low-confidence', // AI answered below the confidence gate; nothing was applied
 ]);
 
 // Suggested render severity per kind. Callers pass severity to ErrorPill
@@ -70,6 +71,7 @@ export function severityForKind(kind) {
   switch (kind) {
     case 'empty-response':
     case 'empty-content':
+    case 'low-confidence':
       return 'warn';
     case 'network':
     case 'http':
@@ -88,7 +90,9 @@ export function errorDetailFromException(err, { stage, kind, url, responsePrevie
   const msg = err?.message || String(err);
   let resolvedKind = kind;
   if (!resolvedKind) {
-    if (/HTTP \d|status \d|error \d{3}/i.test(msg)) resolvedKind = 'http';
+    // A cut-off AI answer (M-1) is an unusable body, i.e. a parse failure.
+    if (/\btruncated\b/i.test(msg)) resolvedKind = 'parse';
+    else if (/HTTP \d|status \d|error \d{3}/i.test(msg)) resolvedKind = 'http';
     // Auth failures ("Invalid API key", "Invalid key", "unauthorized") are
     // effectively an HTTP-level rejection even when the message doesn't
     // include a literal status code - classify before the network fallback

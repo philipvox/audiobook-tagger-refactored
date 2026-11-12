@@ -88,3 +88,20 @@ describe('AI provider truncation signals (M-1)', () => {
     await expect(callAnthropic('key', 'claude-haiku-4-5', 's', 'u', 100)).resolves.toBe('{"b":2}');
   });
 });
+
+describe('error kinds (fix round 1)', async () => {
+  const { errorDetailFromException, severityForKind } = await import('./errorDetail.js');
+
+  it('a truncated answer is reported as a parse failure, not a network one', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ stop_reason: 'max_tokens', content: [{ type: 'text', text: '{' }] }));
+    const err = await callAnthropic('key', 'claude-haiku-4-5', 's', 'u', 100).catch(e => e);
+    const detail = errorDetailFromException(err, { stage: 'classify' });
+    expect(detail.kind).toBe('parse');
+    expect(severityForKind(detail.kind)).toBe('error');
+    vi.restoreAllMocks();
+  });
+
+  it('low-confidence is a warning kind', () => {
+    expect(severityForKind('low-confidence')).toBe('warn');
+  });
+});

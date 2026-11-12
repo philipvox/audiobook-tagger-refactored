@@ -64,9 +64,9 @@ describe('makeErrorDetail', () => {
     expect(d.statusCode).toBeUndefined();
   });
 
-  it('exposes the 10 stages and 6 kinds frozen', () => {
+  it('exposes the 10 stages and 7 kinds frozen', () => {
     expect(ERROR_STAGES).toHaveLength(10);
-    expect(ERROR_KINDS).toHaveLength(6);
+    expect(ERROR_KINDS).toHaveLength(7);
     expect(Object.isFrozen(ERROR_STAGES)).toBe(true);
     expect(Object.isFrozen(ERROR_KINDS)).toBe(true);
   });
