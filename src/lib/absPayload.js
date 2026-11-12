@@ -147,7 +147,7 @@ function diffGenres(cur, orig, cfg) {
   const origKeys = new Map(orig.map((g) => [listKey(g), g]));
   const kept = cur.filter((g) => origKeys.has(listKey(g))).map((g) => origKeys.get(listKey(g)));
   const added = cur.filter((g) => !origKeys.has(listKey(g)));
-  const preserve = cfg.preserve_existing_genres === true;
+  const preserve = cfg.preserve_existing_genres !== false;
   let additions = preserve || cfg.genre_enforcement === false ? added : enforceGenrePolicyWithSplit(added);
   const keptKeys = new Set(kept.map(listKey));
   additions = dedupe(additions).filter((g) => !keptKeys.has(listKey(g)));

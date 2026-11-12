@@ -1,10 +1,10 @@
 // mergeGenres - pure helper for the classify handler's genre merge (#54).
 //
-// Default (preserve=false) is the legacy behavior the classify block has always
-// had: the AI's genres REPLACE the book's genres whenever the AI returned any,
+// Default is preserve=true (supplement). The legacy behavior (preserve=false,
+// opt-in only) is: the AI's genres REPLACE the book's genres whenever the AI returned any,
 // and are ignored when it returned none.
 //
-// With the `preserve_existing_genres` setting on (preserve=true) the AI's
+// With preserve=true (the default; the `preserve_existing_genres` setting) the AI's
 // genres SUPPLEMENT the existing ones instead (chickenbockbok, #54): the result
 // is a case-insensitive-deduped union with the existing genres first and their
 // original casing intact. Existing genres are NEVER dropped - the genre-count
@@ -26,7 +26,7 @@ const clean = (g) => (typeof g === 'string' ? g.trim() : '');
 // aiGenres:  string[] (the classifier's genres)
 // options:   { preserve?: boolean, max?: number }
 // Returns { genres: string[], changed: boolean }.
-export function mergeGenres(existing, aiGenres, { preserve = false, max = MAX_GENRES } = {}) {
+export function mergeGenres(existing, aiGenres, { preserve = true, max = MAX_GENRES } = {}) {
   const existingList = Array.isArray(existing) ? existing : [];
   const aiList = Array.isArray(aiGenres) ? aiGenres : [];
 

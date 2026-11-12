@@ -47,7 +47,7 @@ const DEFAULT_CONFIG = {
   // #54: when true, AI classification genres SUPPLEMENT the book's existing
   // genres instead of replacing them. Off by default (and an absent key reads
   // as false) so existing users see no change.
-  preserve_existing_genres: false,
+  preserve_existing_genres: true,
   // #54: when true, tags outside the approved vocabulary survive the ABS push
   // with their original casing instead of being dropped by mapTag. Off by
   // default (and an absent key reads as false).
@@ -876,7 +876,13 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     };
 
     // Helper: build result from parsed classification
-    const buildResult = (book, parsed, dna_tags = []) => ({
+    const buildResult = (book, parsed, dna_tags = []) => {
+      // Empty AI answer (no genres and no tags): report a failure rather than a
+      // success the applier could mistake for "clear everything".
+      if (!(parsed.genres || []).length && !(parsed.tags || []).length) {
+        return { id: book.id, success: false, error: 'Empty AI answer', errorDetail: { stage: 'classify', kind: 'parse', message: 'Empty AI answer' } };
+      }
+      return {
       id: book.id, success: true,
       genres: parsed.genres || [], tags: parsed.tags || [],
       age_tags: parseAgeTags(parsed.age_rating), dna_tags,
@@ -884,7 +890,8 @@ If it's part of a series, fill in the name and book number. If standalone, use n
       age_category: parsed.age_rating?.age_category || null,
       content_rating: parsed.age_rating?.content_rating || null,
       intended_for_kids: parsed.age_rating?.intended_for_kids || false,
-    });
+      };
+    };
 
     if (isLocal) {
       // LOCAL AI: Batch multiple books per prompt to reduce prompt eval overhead

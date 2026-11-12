@@ -46,7 +46,8 @@ describe('genres at the push boundary', () => {
     expect(payload.metadata.genres).toEqual(['LitRPG']);
   });
 
-  it('OFF (default): an unapproved AI-added genre is dropped by policy, existing kept', async () => {
+  it('OFF (explicit): an unapproved AI-added genre is dropped by policy, existing kept', async () => {
+    setConfig({ preserve_existing_genres: false });
     const payload = await pushAndGetPayload(
       { genres: ['LitRPG', 'Zzzz Custom Shelf', 'Fantasy'] },
       snap({ genres: ['LitRPG'] }),
@@ -68,7 +69,7 @@ describe('genres at the push boundary', () => {
   });
 
   it('genre_enforcement disabled: additions unmapped, capped to three in total', async () => {
-    setConfig({ genre_enforcement: false });
+    setConfig({ genre_enforcement: false, preserve_existing_genres: false });
     const payload = await pushAndGetPayload({ genres: ['A', 'B', 'C', 'D'] }, snap({}));
     expect(payload.metadata.genres).toEqual(['A', 'B', 'C']);
   });
@@ -95,7 +96,7 @@ describe('tags at the push boundary', () => {
   });
 
   it('the two flags are independent: tags-only preservation leaves added genres on policy', async () => {
-    setConfig({ preserve_existing_tags: true });
+    setConfig({ preserve_existing_tags: true, preserve_existing_genres: false });
     const payload = await pushAndGetPayload({ genres: ['Zzzz Custom Shelf', 'Fantasy'], tags: ['Sci-Fi'] }, snap({}));
     expect(payload.metadata.genres).toEqual(['Fantasy']);
     expect(payload.tags).toEqual(['Sci-Fi']);

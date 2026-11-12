@@ -41,31 +41,33 @@ describe('diff against the import snapshot', () => {
   });
 });
 
+const cfgPolicy = { preserve_existing_genres: false };
+
 describe('genres', () => {
   it('policy applies to AI-added genres only; existing ones are kept verbatim', () => {
     const meta = { ...base, genres: ['LitRPG', 'Zzzz Custom Shelf', 'sci-fi'] };
-    const payload = buildAbsPayload(meta, orig(), cfg);
+    const payload = buildAbsPayload(meta, orig(), cfgPolicy);
     expect(payload.metadata.genres).toEqual(['LitRPG', 'Zzzz Custom Shelf', 'Science Fiction']);
   });
 
   it('an AI genre the policy rejects is dropped without touching existing ones', () => {
     const meta = { ...base, genres: ['LitRPG', 'Zzzz Custom Shelf', 'Qqqq Nonsense'] };
-    const payload = buildAbsPayload(meta, orig(), cfg);
+    const payload = buildAbsPayload(meta, orig(), cfgPolicy);
     expect(payload.metadata).not.toHaveProperty('genres');
   });
 
   it('never sends genres: [] just because the policy emptied the additions', () => {
-    const payload = buildAbsPayload({ ...base, genres: ['Qqqq Nonsense'] }, snapshotAbsMetadata({ ...base, genres: [] }), cfg);
+    const payload = buildAbsPayload({ ...base, genres: ['Qqqq Nonsense'] }, snapshotAbsMetadata({ ...base, genres: [] }), cfgPolicy);
     expect(payload.metadata).not.toHaveProperty('genres');
   });
 
   it('sends genres: [] when the user explicitly cleared them', () => {
-    const payload = buildAbsPayload({ ...base, genres: [] }, orig(), cfg);
+    const payload = buildAbsPayload({ ...base, genres: [] }, orig(), cfgPolicy);
     expect(payload.metadata.genres).toEqual([]);
   });
 
   it('a user-removed genre is removed', () => {
-    const payload = buildAbsPayload({ ...base, genres: ['LitRPG'] }, orig(), cfg);
+    const payload = buildAbsPayload({ ...base, genres: ['LitRPG'] }, orig(), cfgPolicy);
     expect(payload.metadata.genres).toEqual(['LitRPG']);
   });
 

@@ -30,9 +30,8 @@ import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
 import { keepCurrentBooksToast } from '../lib/session.js';
 import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
 import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePush } from '../lib/absPush';
-import { mergeClassifyTags } from '../lib/mergeClassifyTags';
+import { applyClassifyResult } from '../lib/applyClassifyResult';
 import { syncAllSeries } from '../lib/absPayload';
-import { mergeGenres } from '../lib/mergeGenres';
 import { applyMetadataToGroup, readFileField } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
 import { isPlaceholderAuthor, isPlaceholderTitle } from '../lib/normalize';
@@ -2673,43 +2672,26 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             };
           }
 
-          const isForceReset = idsToForceReset?.has(g.id);
-          const updatedMeta = { ...g.metadata };
+          const isForceReset = idsToForceReset?.has(g.id) === true;
 
-          // On a successful force-classify, wipe stale arrays before repopulating so that
-          // books whose AI response is empty/partial don't keep old genres/tags/themes/tropes.
-          if (isForceReset) {
-            updatedMeta.genres = [];
-            updatedMeta.tags = [];
-            updatedMeta.themes = [];
-            updatedMeta.tropes = [];
+          // Genres/tags go through the pure applyClassifyResult (audit C-1/H-1):
+          // an empty AI answer changes nothing, Force only discards an array when
+          // the AI supplied a replacement for it, genres supplement by default,
+          // and curated ABS tags survive via the import snapshot.
+          const applied = applyClassifyResult(g.metadata, r, {
+            force: isForceReset,
+            preserveGenres: config?.preserve_existing_genres !== false,
+            originalTags: g.abs_original?.tags,
+          });
+          if (applied.error === 'empty-answer') {
+            return {
+              ...g,
+              lastError: { stage: 'classify', kind: 'parse', message: 'The AI returned no genres or tags, so nothing was changed.', severity: 'error' },
+            };
           }
-
-          // Genres: #54 - by default the AI's genres replace the book's. With
-          // `preserve_existing_genres` on they SUPPLEMENT them instead (union,
-          // existing first, existing casing kept, capped at MAX_GENRES without
-          // ever dropping an existing genre). See mergeGenres for the rationale
-          // and unit tests. On a Force run updatedMeta.genres was just cleared
-          // above, so Force still wins over the preserve setting.
-          const { genres: mergedGenres, changed: genresChanged } = mergeGenres(
-            updatedMeta.genres,
-            r.genres,
-            { preserve: config?.preserve_existing_genres === true }
-          );
-          updatedMeta.genres = mergedGenres;
-
-          // Tags: H1 - only fully replace tags when the AI returned top-level
-          // classification tags; when only DNA/age tags come back, merge them
-          // additively so curated tags survive. See mergeClassifyTags for the
-          // full rationale and unit tests. The old inline code always did
-          // tags = [...new Set([...r.tags, ...dna, ...age])], which wiped every
-          // curated tag on the common DNA-only sub-step.
-          // v2.2.3: pass the import snapshot so curated ABS tags survive (a
-          // Force run clears updatedMeta.tags above, so it still wipes).
-          const { tags: mergedTags, changed: tagsChanged } = mergeClassifyTags(
-            updatedMeta.tags, r, isForceReset ? undefined : g.abs_original?.tags
-          );
-          updatedMeta.tags = mergedTags;
+          const updatedMeta = { ...applied.metadata };
+          const genresChanged = applied.changedFields.includes('genre');
+          const tagsChanged = applied.changedFields.includes('tags');
 
           // Themes & tropes
           if (r.themes?.length > 0) updatedMeta.themes = r.themes;

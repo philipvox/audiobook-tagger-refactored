@@ -106,21 +106,21 @@ describe('SettingsPage preserve_existing_genres toggle (#54)', () => {
     saveConfigMock.mockResolvedValue({ success: true });
   });
 
-  it('renders unchecked when the config has no preserve_existing_genres key', async () => {
+  it('renders checked when the config has no preserve_existing_genres key (default ON)', async () => {
     renderPage();
-    const toggle = await screen.findByLabelText(/Supplement genres instead of replacing/i);
-    expect(toggle).not.toBeChecked();
+    const toggle = await screen.findByLabelText(/Keep existing genres and add AI suggestions/i);
+    expect(toggle).toBeChecked();
   });
 
-  it('persists the flag as true once toggled on and saved', async () => {
+  it('persists the flag as false once toggled off and saved', async () => {
     renderPage();
-    const toggle = await screen.findByLabelText(/Supplement genres instead of replacing/i);
+    const toggle = await screen.findByLabelText(/Keep existing genres and add AI suggestions/i);
     fireEvent.click(toggle);
 
     fireEvent.click(screen.getByRole('button', { name: /Save Settings/i }));
 
     await waitFor(() => expect(saveConfigMock).toHaveBeenCalled());
-    expect(saveConfigMock.mock.calls[0][0]).toMatchObject({ preserve_existing_genres: true });
+    expect(saveConfigMock.mock.calls[0][0]).toMatchObject({ preserve_existing_genres: false });
   });
 });
 

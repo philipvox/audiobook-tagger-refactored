@@ -4,34 +4,34 @@ import { MAX_GENRES } from './genres';
 
 describe('mergeGenres - preserve OFF (legacy replace behavior, #54)', () => {
   it('replaces the existing genres when the AI returned genres', () => {
-    const { genres, changed } = mergeGenres(['Horror'], ['Fantasy', 'Adventure']);
+    const { genres, changed } = mergeGenres(['Horror'], ['Fantasy', 'Adventure'], { preserve: false });
     expect(genres).toEqual(['Fantasy', 'Adventure']);
     expect(changed).toBe(true);
   });
 
   it('leaves the existing genres untouched when the AI returned none', () => {
     const existing = ['Horror'];
-    const { genres, changed } = mergeGenres(existing, []);
+    const { genres, changed } = mergeGenres(existing, [], { preserve: false });
     expect(genres).toBe(existing);
     expect(changed).toBe(false);
   });
 
   it('does NOT cap or dedup - the off path is byte-identical to the old inline code', () => {
     const ai = ['Fantasy', 'fantasy', 'Adventure', 'Horror'];
-    expect(mergeGenres([], ai).genres).toBe(ai);
+    expect(mergeGenres([], ai, { preserve: false }).genres).toBe(ai);
   });
 
   it('reports changed=true even when the AI genres equal the existing ones', () => {
     // Intentional asymmetry: with preserve OFF, `changed` mirrors the pre-#54
     // signal ("the AI returned genres"), NOT a value comparison, so the
     // default-off classify path stamps the `genre` file change exactly as before.
-    const { changed } = mergeGenres(['Fantasy'], ['Fantasy']);
+    const { changed } = mergeGenres(['Fantasy'], ['Fantasy'], { preserve: false });
     expect(changed).toBe(true);
   });
 
   it('handles null/undefined inputs safely', () => {
-    expect(mergeGenres(null, null).genres).toEqual([]);
-    expect(mergeGenres(undefined, ['Fantasy']).genres).toEqual(['Fantasy']);
+    expect(mergeGenres(null, null, { preserve: false }).genres).toEqual([]);
+    expect(mergeGenres(undefined, ['Fantasy'], { preserve: false }).genres).toEqual(['Fantasy']);
   });
 });
 
@@ -93,5 +93,16 @@ describe('mergeGenres - preserve ON (supplement instead of replace, #54)', () =>
   it('honors an explicit max override', () => {
     const { genres } = mergeGenres(['Horror'], ['Fantasy', 'Adventure'], { preserve: true, max: 2 });
     expect(genres).toEqual(['Horror', 'Fantasy']);
+  });
+});
+
+describe('mergeGenres - preserve is the default', () => {
+  it('supplements when no option is given', () => {
+    expect(mergeGenres(['Cozy Witchy', 'Fantasy'], ['Fantasy', 'Adventure'], {}).genres)
+      .toEqual(['Cozy Witchy', 'Fantasy', 'Adventure']);
+  });
+  it('replaces only with preserve: false', () => {
+    expect(mergeGenres(['Cozy Witchy', 'Fantasy'], ['Fantasy', 'Adventure'], { preserve: false }).genres)
+      .toEqual(['Fantasy', 'Adventure']);
   });
 });

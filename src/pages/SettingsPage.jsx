@@ -1258,9 +1258,9 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                 <p className="text-sm text-gray-400">When enabled, AI genre suggestions are filtered to the approved list only. Disable to allow free-form genres.</p>
 
                 <Toggle
-                  checked={localConfig.preserve_existing_genres === true}
+                  checked={localConfig.preserve_existing_genres !== false}
                   onChange={(v) => setLocalConfig({ ...localConfig, preserve_existing_genres: v })}
-                  label="Supplement genres instead of replacing"
+                  label="Keep existing genres and add AI suggestions (recommended)"
                 />
                 <p className="text-sm text-gray-400">
                   Keep the genres a book already has (e.g. matched from Audible) and add the AI's
