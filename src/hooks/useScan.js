@@ -699,10 +699,12 @@ export function useScan() {
 
       const raw = await callBackend('push_abs_imports', { request, cancel });
       const result = normalizePushResult(raw);
-      // H-5: pushed books take the server's tags/genres and drop staged state.
-      // Books skipped because ABS already matched adopt the server lists too.
+      // H-5: pushed books take the server's tags/genres. D-8: only fields now
+      // in step with ABS drop their staged state (raw.pushed); values that
+      // were not sent stay staged. Books skipped because ABS already matched
+      // adopt the server lists too.
       if (raw?.snapshots || raw?.refreshed) {
-        setGroups(prev => applyRefreshedLists(applyPushSnapshots(prev, raw.snapshots), raw.refreshed));
+        setGroups(prev => applyRefreshedLists(applyPushSnapshots(prev, raw.snapshots, raw.pushed), raw.refreshed));
       }
 
       if (result.failed.length > 0) {

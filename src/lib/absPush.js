@@ -8,8 +8,9 @@
 
 import {
   buildAbsPayload, isEmptyPayload, applyPayloadToSnapshot, snapshotAbsMetadata,
-  readLiveLists, rebasePayloadOnLive,
+  readLiveLists, rebasePayloadOnLive, settledFields, dedupe, listKey, sameList,
 } from './absPayload.js';
+import { mapTag, isDnaTag, enforceGenrePolicyWithSplit, MAX_GENRES } from './genres.js';
 
 const s = (v) => (v == null ? '' : String(v).trim());
 
@@ -78,6 +79,7 @@ function entry(e, extraKey) {
   }
   const out = { id: e.id ?? null, title: e.title ?? '' };
   if (extraKey) out[extraKey] = String(e[extraKey] ?? (extraKey === 'error' ? errorMessage(e) : ''));
+  if (Array.isArray(e.notSent) && e.notSent.length > 0) out.notSent = e.notSent;
   return out;
 }
 
@@ -123,11 +125,60 @@ export function formatTitleList(entries, max = 5) {
   return titles.length > max ? `${head} and ${titles.length - max} more` : head;
 }
 
+// D-8: how a value that was not sent is described, per reason.
+const NOT_SENT_TEXT = {
+  'not-approved': (field, n) => `${n} ${field}${n === 1 ? ' was' : 's were'} not sent because ${n === 1 ? 'it is' : 'they are'} not in the approved list`,
+  'tag-limit': (field, n) => `${n} ${field}${n === 1 ? ' was' : 's were'} not sent because of the limit on new tags`,
+  'genre-limit': (field, n) => `${n} ${field}${n === 1 ? ' was' : 's were'} not sent because the ${MAX_GENRES}-genre limit was reached`,
+  empty: (field, n) => `The ${field}s of ${n} book${n === 1 ? ' were' : 's were'} not sent because the list would be empty`,
+};
+
+/** D-8: one sentence per (list, reason) naming the values a push did not send. */
+export function describeNotSent(entries) {
+  const groups = new Map();
+  for (const e of entries || []) {
+    for (const n of Array.isArray(e?.notSent) ? e.notSent : []) {
+      const k = `${n.field}|${n.reason}`;
+      if (!groups.has(k)) groups.set(k, { field: n.field, reason: n.reason, values: new Map(), books: 0 });
+      const g = groups.get(k);
+      g.books += 1;
+      if (n.value != null) g.values.set(listKey(n.value), n.value);
+    }
+  }
+  const sentences = [];
+  for (const g of groups.values()) {
+    const field = g.field === 'genres' ? 'genre' : 'tag';
+    const text = NOT_SENT_TEXT[g.reason] || NOT_SENT_TEXT['not-approved'];
+    if (g.reason === 'empty') {
+      sentences.push(`${text(field, g.books)}.`);
+      continue;
+    }
+    const values = [...g.values.values()];
+    sentences.push(`${text(field, values.length)}: ${formatTitleList(values.map((v) => ({ title: v })), 8)}.`);
+  }
+  if (sentences.length > 0) sentences.push('They stay staged in the app.');
+  return sentences.join(' ');
+}
+
 /**
  * Build the user-facing summary for a finished push.
  * Returns { type: 'success'|'warning'|'error'|'info', title, message }.
+ * D-8: values a push did not send (tag policy, genre cap, an empty list) are
+ * named, and make an otherwise clean push a warning.
  */
 export function summarizePush(result, attempted) {
+  const base = summarizePushCounts(result, attempted);
+  const { updated, skipped } = normalizePushResult(result);
+  const notSent = describeNotSent([...updated, ...skipped]);
+  if (!notSent) return base;
+  return {
+    ...base,
+    type: base.type === 'success' || base.type === 'info' ? 'warning' : base.type,
+    message: `${base.message} ${notSent}`,
+  };
+}
+
+function summarizePushCounts(result, attempted) {
   const { updated, skipped, failed } = normalizePushResult(result);
   const plural = (n) => (n === 1 ? '' : 's');
   const parts = [];
@@ -310,6 +361,80 @@ function withLists(snapshot, lists) {
   return { ...snapshot, tags: [...lists.tags], genres: [...lists.genres] };
 }
 
+const LIST_FIELDS = ['tags', 'genres'];
+
+// D-8: true when `value`, a local addition, is on the server after the push,
+// as itself or as what the tag/genre policy maps it to.
+function isOnServer(field, value, serverKeys, cfg) {
+  if (serverKeys.has(listKey(value))) return true;
+  if (field === 'tags') {
+    if (isDnaTag(String(value))) return false;
+    const mapped = mapTag(value);
+    return mapped != null && serverKeys.has(listKey(mapped));
+  }
+  if (cfg.genre_enforcement === false) return false;
+  const mapped = enforceGenrePolicyWithSplit([value]);
+  return mapped.length > 0 && mapped.every((g) => serverKeys.has(listKey(g)));
+}
+
+// Why a local addition did not reach the server.
+function notSentReason(field, value, cfg) {
+  if (field === 'tags') {
+    return mapTag(value) == null && cfg.preserve_existing_tags !== true ? 'not-approved' : 'tag-limit';
+  }
+  if (cfg.genre_enforcement !== false && enforceGenrePolicyWithSplit([value]).length === 0) return 'not-approved';
+  return 'genre-limit';
+}
+
+const SKIP_REASON = {
+  'not-approved': (field) => `${field} not in the approved list`,
+  'tag-limit': () => 'new-tag limit reached',
+  'genre-limit': () => `genre limit (${MAX_GENRES}) reached`,
+  empty: (field) => `would leave ${field} empty`,
+};
+
+/** The skip reason for a book whose staged lists could not be sent. */
+function skipReasonFor(notSent) {
+  const reasons = [...new Set(notSent.map((n) => SKIP_REASON[n.reason]?.(n.field) || 'not sent'))];
+  return reasons.join('; ');
+}
+
+/**
+ * D-8: for each staged list (local differs from the snapshot), what the push
+ * did not send. `server` is { tags, genres } as ABS holds them after the push
+ * (the snapshot lists when nothing was read or sent); `intended` the rebased
+ * lists (rebasePayloadOnLive); `live` the lists read before the push.
+ * Returns { notSent: [{ field, value, reason }], unsettled: Set(field) }:
+ * `unsettled` lists the fields that keep their staged state.
+ */
+function listOutcomes({ meta, original, cfg, server, intended = {}, live = null, sentFields }) {
+  const cleared = Array.isArray(meta.user_cleared) ? meta.user_cleared : [];
+  const notSent = [];
+  const unsettled = new Set();
+  for (const field of LIST_FIELDS) {
+    const local = dedupe(meta[field]);
+    const snap = dedupe(original?.[field]);
+    if (sameList(local, snap)) continue;
+    const userCleared = cleared.includes(field);
+    const emptied = (local.length === 0 && snap.length > 0 && !userCleared)
+      || (field in intended && intended[field].length === 0 && live && live[field].length > 0 && !userCleared);
+    if (emptied && !sentFields.has(field)) {
+      notSent.push({ field, value: null, reason: 'empty' });
+      unsettled.add(field);
+      continue;
+    }
+    const snapKeys = new Set(snap.map(listKey));
+    const serverKeys = new Set((server[field] || []).map(listKey));
+    for (const value of local) {
+      if (snapKeys.has(listKey(value))) continue;
+      if (isOnServer(field, value, serverKeys, cfg)) continue;
+      notSent.push({ field, value, reason: notSentReason(field, value, cfg) });
+      unsettled.add(field);
+    }
+  }
+  return { notSent, unsettled };
+}
+
 /**
  * Push one book. H-5: diff against the import snapshot, then re-read the live
  * item and apply only the local tag/genre delta to it, so values added in ABS
@@ -318,9 +443,18 @@ function withLists(snapshot, lists) {
  * in `failed` with its id and title.
  *
  * `request(path, options?)` performs an ABS API call; `cfg` is the app config.
- * Returns { status: 'updated'|'skipped'|'failed', entry, snapshot?, refreshed? }.
- * `refreshed` ({ snapshot, fields }) is set when the rebase left nothing to
- * send: ABS already holds the intended lists, so the caller can adopt them.
+ * Returns { status: 'updated'|'skipped'|'failed', entry, snapshot?, pushed?, refreshed? }.
+ * `refreshed` ({ snapshot, fields, keep }) is set when the rebase left nothing
+ * to send: the caller adopts the server lists for `fields`.
+ *
+ * D-8: a value the push did not send (tag policy, genre cap, a list that
+ * would become empty) is never silently dropped. The entry carries
+ * `notSent: [{ field, value, reason }]`, the skip reason names the cause when
+ * it is why nothing was sent, and the list keeps its staged values: `keep`
+ * ({ tags?, genres? }) is what the group's list must hold afterwards, and the
+ * snapshot keeps its old list for a list that was not sent at all. For an
+ * updated book `pushed` is { fields, keep }: `fields` are the metadata fields
+ * now in step with ABS (the only ones whose staged state may be cleared).
  */
 export async function pushOneAbsItem(item, { request, cfg = {} }) {
   const { absId, id, title } = describeItem(item);
@@ -334,29 +468,65 @@ export async function pushOneAbsItem(item, { request, cfg = {} }) {
     }
 
     const first = buildAbsPayload(meta, original, cfg);
-    if (isEmptyPayload(first)) return { status: 'skipped', entry: { id, title, reason: 'no changes' } };
+    if (isEmptyPayload(first)) {
+      // Nothing to send. Still say why when a staged list was held back.
+      const { notSent } = original
+        ? listOutcomes({ meta, original, cfg, server: original, sentFields: new Set() })
+        : { notSent: [] };
+      if (notSent.length > 0) return { status: 'skipped', entry: { id, title, reason: skipReasonFor(notSent), notSent } };
+      return { status: 'skipped', entry: { id, title, reason: 'no changes' } };
+    }
 
     const live = readLiveLists(await request(`/api/items/${absId}?expanded=1`));
     if (!live) {
       return { status: 'failed', entry: { id, title, error: 'Could not read the current tags and genres from ABS' } };
     }
-    const { payload, lists } = rebasePayloadOnLive(first, original, live, meta);
+    const { payload, lists, intended } = rebasePayloadOnLive(first, original, live, meta);
+    const sentFields = new Set();
+    if ('tags' in payload) sentFields.add('tags');
+    if ('genres' in (payload.metadata || {})) sentFields.add('genres');
+    const { notSent, unsettled } = listOutcomes({ meta, original, cfg, server: lists, intended, live, sentFields });
+
+    // A list that was not sent and still has staged values keeps both its
+    // local values and its old snapshot; a list that was sent shows the
+    // server list plus any value that did not reach it.
+    const keep = {};
+    const holdSnapshot = (snap) => {
+      const out = { ...snap };
+      for (const field of unsettled) {
+        if (sentFields.has(field)) {
+          keep[field] = dedupe([...lists[field], ...notSent.filter((n) => n.field === field && n.value != null).map((n) => n.value)]);
+        } else {
+          keep[field] = [...(meta[field] || [])];
+          out[field] = [...(original?.[field] || [])];
+        }
+      }
+      return out;
+    };
+    const withNotes = (e) => (notSent.length > 0 ? { ...e, notSent } : e);
+
     if (isEmptyPayload(payload)) {
-      // Only lists were staged and ABS already holds them: adopt the server
-      // lists so the book stops showing as changed.
-      const fields = [];
-      if ('tags' in first) fields.push('tags');
-      if ('genres' in (first.metadata || {})) fields.push('genres');
-      const base = snapshotAbsMetadata(original || meta);
+      // Only lists were staged. ABS already holds the ones that are settled:
+      // adopt them so the book stops showing them as changed.
+      const fields = LIST_FIELDS.filter((f) => !unsettled.has(f)
+        && (f === 'tags' ? 'tags' in first : 'genres' in (first.metadata || {})));
+      const snapshot = holdSnapshot(withLists(snapshotAbsMetadata(original || meta), lists));
       return {
         status: 'skipped',
-        entry: { id, title, reason: 'no changes' },
-        refreshed: { snapshot: withLists(base, lists), fields },
+        entry: withNotes({ id, title, reason: notSent.length > 0 ? skipReasonFor(notSent) : 'no changes' }),
+        refreshed: { snapshot, fields, keep },
       };
     }
     await request(`/api/items/${absId}/media`, { method: 'PATCH', body: payload });
-    const snapshot = withLists(applyPayloadToSnapshot(original || snapshotAbsMetadata(meta), meta, payload), lists);
-    return { status: 'updated', entry: { id, title }, snapshot };
+    const snapshot = holdSnapshot(withLists(applyPayloadToSnapshot(original || snapshotAbsMetadata(meta), meta, payload), lists));
+    const after = { ...meta, ...keep };
+    for (const field of LIST_FIELDS) if (!(field in keep)) after[field] = snapshot[field];
+    return {
+      status: 'updated',
+      entry: withNotes({ id, title }),
+      snapshot,
+      pushed: { fields: settledFields(after, snapshot), keep },
+    };
   } catch (err) {
     return { status: 'failed', entry: { id, title, error: String(err?.message || err) } };
   }
@@ -384,12 +554,13 @@ export async function pushAbsItems(items, { request, cfg = {}, shouldStop } = {}
     return { status: 'skipped', entry: { id, title, reason: CANCELLED_REASON }, stopped: true };
   };
   const outcomes = await runPool(items || [], (item) => pushOneAbsItem(item, { request, cfg }), pushConcurrency(cfg), onError, { shouldStop, onStopped });
-  const result = { updated: [], skipped: [], failed: [], snapshots: {}, refreshed: {} };
+  const result = { updated: [], skipped: [], failed: [], snapshots: {}, refreshed: {}, pushed: {} };
   if (outcomes.some((o) => o.stopped)) result.cancelled = true;
   for (const o of outcomes) {
     result[o.status].push(o.entry);
     if (o.entry.id == null) continue;
     if (o.status === 'updated') result.snapshots[o.entry.id] = o.snapshot;
+    if (o.status === 'updated' && o.pushed) result.pushed[o.entry.id] = o.pushed;
     if (o.refreshed) result.refreshed[o.entry.id] = o.refreshed;
   }
   return result;
@@ -411,17 +582,20 @@ export function buildPushItems(groups) {
 }
 
 // changedFields uses metadata names; file.changes uses 'genre' for genres.
-const FILE_FIELDS = { tags: ['tags'], genres: ['genre', 'genres'] };
+const FILE_FIELDS = { tags: ['tags'], genres: ['genre', 'genres'], year: ['year'], published_year: ['year'] };
 
 /**
- * A group with `snapshot` as its abs_original and the server's tags/genres.
+ * A group with `snapshot` as its abs_original and the server's tags/genres
+ * (or, per list, `keep`'s values: D-8, values that were not sent stay).
  * `fields` null clears all staged state (total_changes, changedFields, every
  * file.changes, metadata.user_cleared); otherwise only those fields'.
  */
-function adoptServerState(g, snapshot, fields) {
+function adoptServerState(g, snapshot, fields, keep = {}) {
   const metadata = { ...(g.metadata || {}) };
-  if (Array.isArray(snapshot.tags)) metadata.tags = [...snapshot.tags];
-  if (Array.isArray(snapshot.genres)) metadata.genres = [...snapshot.genres];
+  for (const field of LIST_FIELDS) {
+    if (Array.isArray(keep?.[field])) metadata[field] = [...keep[field]];
+    else if (Array.isArray(snapshot[field])) metadata[field] = [...snapshot[field]];
+  }
   if (fields == null) {
     delete metadata.user_cleared;
     return {
@@ -458,14 +632,21 @@ function adoptServerState(g, snapshot, fields) {
  * Advance each pushed group's abs_original to what ABS now holds, so a later
  * revert of a pushed change is still detected. `snapshots` is keyed by group id.
  * H-5: the group's tags and genres become the server's (including values
- * added in ABS since import), and its staged state is cleared: total_changes,
- * changedFields, every file.changes and metadata.user_cleared.
+ * added in ABS since import).
+ *
+ * D-8: `pushed` (pushAbsItems' result, keyed by group id, values
+ * { fields, keep }) says which fields are now in step with ABS: only their
+ * staged state is cleared, and `keep` holds list values that were not sent.
+ * Without an entry in `pushed` all staged state is cleared (total_changes,
+ * changedFields, every file.changes and metadata.user_cleared).
  */
-export function applyPushSnapshots(groups, snapshots) {
+export function applyPushSnapshots(groups, snapshots, pushed = null) {
   if (!snapshots || typeof snapshots !== 'object') return groups;
   return (groups || []).map((g) => {
     if (!Object.prototype.hasOwnProperty.call(snapshots, g.id) || !snapshots[g.id]) return g;
-    return adoptServerState(g, snapshots[g.id], null);
+    const p = pushed && Object.prototype.hasOwnProperty.call(pushed, g.id) ? pushed[g.id] : null;
+    if (!p) return adoptServerState(g, snapshots[g.id], null);
+    return adoptServerState(g, snapshots[g.id], Array.isArray(p.fields) ? p.fields : [], p.keep || {});
   });
 }
 
@@ -479,6 +660,6 @@ export function applyRefreshedLists(groups, refreshed) {
   return (groups || []).map((g) => {
     const r = Object.prototype.hasOwnProperty.call(refreshed, g.id) ? refreshed[g.id] : null;
     if (!r?.snapshot) return g;
-    return adoptServerState(g, r.snapshot, Array.isArray(r.fields) ? r.fields : []);
+    return adoptServerState(g, r.snapshot, Array.isArray(r.fields) ? r.fields : [], r.keep || {});
   });
 }

@@ -34,9 +34,11 @@ const s = (v) => (v == null ? '' : String(v).trim());
 // step); prefer it so an edit is never masked by a stale `published_year` (H-2).
 const yearOf = (m) => s(m.year) || s(m.published_year ?? m.publishedYear);
 const scalarOf = (m, key) => (key === 'published_year' ? yearOf(m) : s(m[key]));
-const listKey = (v) => s(v).toLowerCase().replace(/\s+/g, '-');
+/** The key two list values (tags, genres) are compared by: case and spacing ignored. */
+export const listKey = (v) => s(v).toLowerCase().replace(/\s+/g, '-');
 
-function dedupe(list) {
+/** Trimmed, non-empty, first-of-each-key copy of a tag or genre list. */
+export function dedupe(list) {
   const seen = new Set();
   const out = [];
   for (const v of Array.isArray(list) ? list : []) {
@@ -50,7 +52,7 @@ function dedupe(list) {
   return out;
 }
 
-const sameList = (a, b) => {
+export const sameList = (a, b) => {
   const ka = new Set(a.map(listKey));
   const kb = new Set(b.map(listKey));
   return ka.size === kb.size && [...ka].every((k) => kb.has(k));
@@ -314,6 +316,31 @@ export function buildAbsPayload(meta = {}, original = null, cfg = {}) {
   return payload;
 }
 
+/**
+ * D-8: the metadata fields (changedFields vocabulary) whose local value is in
+ * step with `snapshot`, i.e. for which buildAbsPayload would send nothing.
+ * After a push these are the fields whose staged state can be cleared; any
+ * other staged field was not sent and stays staged.
+ */
+export function settledFields(meta = {}, snapshot = {}) {
+  const m = meta || {};
+  const o = snapshot || {};
+  const out = [];
+  for (const [key] of SCALARS) {
+    if (scalarOf(m, key) !== scalarOf(o, key)) continue;
+    if (key === 'published_year') out.push('year', 'published_year');
+    else out.push(key);
+  }
+  if (s(m.author) === s(o.author)) out.push('author');
+  if (s(m.narrator) === s(o.narrator)) out.push('narrator');
+  const sameSeries = s(m.series) === s(o.series) && s(m.sequence) === s(o.sequence)
+    && JSON.stringify(seriesList(m)) === JSON.stringify(seriesList(o));
+  if (sameSeries) out.push('series', 'sequence');
+  if (sameList(dedupe(m.genres), dedupe(o.genres))) out.push('genres');
+  if (sameList(dedupe(m.tags), dedupe(o.tags))) out.push('tags');
+  return out;
+}
+
 /** True when the payload would change nothing in ABS. */
 export function isEmptyPayload(payload) {
   return Object.keys(payload?.metadata || {}).length === 0 && !('tags' in (payload || {}));
@@ -381,8 +408,11 @@ export function readLiveLists(item) {
  * unless the user cleared that field (meta.user_cleared). Added genres are
  * capped against the live genres (MAX_GENRES); live genres are never trimmed.
  *
- * Returns { payload, lists } where `lists` is { tags, genres } as they will be
- * on the server once the payload is applied.
+ * Returns { payload, lists, intended } where `lists` is { tags, genres } as
+ * they will be on the server once the payload is applied, and `intended`
+ * holds, for each list the payload carried, the rebased list before it was
+ * dropped for matching the live one or for being empty (D-8 reads it to tell
+ * an empty-list refusal from "nothing to do").
  */
 export function rebasePayloadOnLive(payload, original, live, meta = {}) {
   const cleared = Array.isArray(meta?.user_cleared) ? meta.user_cleared : [];
@@ -390,6 +420,7 @@ export function rebasePayloadOnLive(payload, original, live, meta = {}) {
   const out = { metadata: md };
   if (payload && 'tags' in payload) out.tags = payload.tags;
   const lists = { tags: [...live.tags], genres: [...live.genres] };
+  const intended = {};
 
   const rebase = (field, localArr, cap) => {
     let next = rebaseArrayOnLive(original ? original[field] : null, localArr, live[field]);
@@ -399,6 +430,7 @@ export function rebasePayloadOnLive(payload, original, live, meta = {}) {
       const additions = next.filter((v) => !liveKeys.has(listKey(v)));
       next = [...fromLive, ...additions.slice(0, Math.max(0, cap - fromLive.length))];
     }
+    intended[field] = next;
     if (sameList(next, live[field])) return undefined;
     if (next.length === 0 && !cleared.includes(field)) return undefined;
     return next;
@@ -414,5 +446,5 @@ export function rebasePayloadOnLive(payload, original, live, meta = {}) {
     if (next === undefined) delete out.tags;
     else { out.tags = next; lists.tags = [...next]; }
   }
-  return { payload: out, lists };
+  return { payload: out, lists, intended };
 }

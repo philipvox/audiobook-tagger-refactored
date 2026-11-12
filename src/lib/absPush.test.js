@@ -299,7 +299,12 @@ describe('push_abs_imports rebases on the live item (H-5)', () => {
       original: { title: 'Book', genres: ['Fantasy'] },
     }]);
     expect(absApi.mock.calls.some((c) => c[3]?.method === 'PATCH')).toBe(false);
-    expect(out.skipped).toEqual([{ id: 'g1', title: 'Book', reason: 'no changes' }]);
+    // D-8: the cap is why nothing was sent, so the reason says so and the
+    // trimmed genre is named (was: reason 'no changes', genre dropped silently).
+    expect(out.skipped).toEqual([{
+      id: 'g1', title: 'Book', reason: 'genre limit (3) reached',
+      notSent: [{ field: 'genres', value: 'Thriller', reason: 'genre-limit' }],
+    }]);
   });
 });
 
