@@ -145,3 +145,21 @@ describe('neighbouring inputs are not reported as unsent', () => {
     expect(after[0].changedFields).toEqual([]);
   });
 });
+
+describe('badges that have no ABS field of their own', () => {
+  it('dna and age settle with the tags; themes and tropes do not keep the book edited', async () => {
+    let g = applyMetadataToGroup(mk({ tags: ['a'] }), { tags: ['a', 'dna:pacing:fast', 'age-adult'] }, ['tags']);
+    g = { ...g, metadata: { ...g.metadata, themes: ['loss'] }, changedFields: [...g.changedFields, 'dna', 'age', 'themes', 'tropes'] };
+    const { after } = await push([g], { tags: ['a'], genres: [] });
+    expect(after[0].changedFields).toEqual([]);
+    expect(after[0].total_changes).toBe(0);
+    expect(after[0].metadata.themes).toEqual(['loss']);
+  });
+
+  it('dna stays staged with the tags when the tags were not all sent', async () => {
+    let g = applyMetadataToGroup(applyMetadataToGroup(mk({ tags: ['a'] }), { title: 'New' }, ['title']), { tags: ['a', 'signed-copy'] }, ['tags']);
+    g = { ...g, changedFields: [...g.changedFields, 'dna'] };
+    const { after } = await push([g], { tags: ['a'], genres: [] });
+    expect(after[0].changedFields).toEqual(['tags', 'dna']);
+  });
+});

@@ -363,6 +363,13 @@ function withLists(snapshot, lists) {
 
 const LIST_FIELDS = ['tags', 'genres'];
 
+// changedFields names with no ABS field: kept in the app only.
+const APP_ONLY_FIELDS = ['themes', 'tropes'];
+
+// changedFields names whose values live in the tags list (dna: and age
+// tags): they settle when the tags do.
+const TAG_DERIVED_FIELDS = ['dna', 'age'];
+
 // D-8: true when `value`, a local addition, is on the server after the push,
 // as itself or as what the tag/genre policy maps it to.
 function isOnServer(field, value, serverKeys, cfg) {
@@ -521,11 +528,13 @@ export async function pushOneAbsItem(item, { request, cfg = {} }) {
     const snapshot = holdSnapshot(withLists(applyPayloadToSnapshot(original || snapshotAbsMetadata(meta), meta, payload), lists));
     const after = { ...meta, ...keep };
     for (const field of LIST_FIELDS) if (!(field in keep)) after[field] = snapshot[field];
+    // Fields ABS has no place for (themes, tropes) are never held back by a
+    // push: their values stay in the metadata, only the badge clears.
     return {
       status: 'updated',
       entry: withNotes({ id, title }),
       snapshot,
-      pushed: { fields: settledFields(after, snapshot), keep },
+      pushed: { fields: [...settledFields(after, snapshot), ...APP_ONLY_FIELDS], keep },
     };
   } catch (err) {
     return { status: 'failed', entry: { id, title, error: String(err?.message || err) } };
@@ -623,6 +632,7 @@ function adoptServerState(g, snapshot, fields, keep = {}) {
     if (left.length > 0) metadata.user_cleared = left;
     else delete metadata.user_cleared;
   }
+  if (fields.includes('tags')) fields = [...fields, ...TAG_DERIVED_FIELDS];
   const fileKeys = new Set(fields.flatMap((f) => FILE_FIELDS[f] || [f]));
   const files = (g.files || []).map((f) => {
     const changes = { ...(f.changes || {}) };
