@@ -885,9 +885,41 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     opCancelRef.current[op] = token;
     return token;
   };
+  // M-i: an Enrich handler's progress subscriptions, by batch op, so a run
+  // that throws can still release them (see cancellable).
+  const opListenersRef = useRef({});
+  const opSubscribe = (op, event, handler) => {
+    const off = subscribe(event, handler);
+    if (!opListenersRef.current[op]) opListenersRef.current[op] = new Set();
+    const set = opListenersRef.current[op];
+    const release = () => { off(); set.delete(release); };
+    set.add(release);
+    return release;
+  };
+  const releaseOpListeners = (op) => {
+    for (const release of [...(opListenersRef.current[op] || [])]) release();
+  };
+
   // Wrap an Enrich handler so the token its run took is released when the run
   // ends, however it ends (Run All's shared token is released by Run All).
-  const cancellable = (op, fn) => finishAfter(fn, () => {
+  // M-i: a run that throws (an applier or updater bug) never leaves its batch
+  // active (which disables every button) or a progress subscription running,
+  // and the error is shown. Inside Run All the error goes on to Run All,
+  // which reports it and stops.
+  const cancellable = (op, fn) => finishAfter(async (...args) => {
+    try {
+      return await fn(...args);
+    } catch (error) {
+      console.error(`${op} failed:`, error);
+      logEvent('batch', `${op} threw`, { error: String(error?.message || error) });
+      batch.end(op);
+      if (runAllActiveRef.current) throw error;
+      toast.error('Action Failed', String(error?.message || error));
+      return undefined;
+    } finally {
+      releaseOpListeners(op);
+    }
+  }, () => {
     const token = opCancelRef.current[op];
     if (!token || token === runAllCancelRef.current) return null;
     delete opCancelRef.current[op];
@@ -929,7 +961,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Listen for per-book progress events within each chunk
     let chunkOffset = 0;
-    const unlisten = subscribe('batch-progress', (d) => {
+    const unlisten = opSubscribe('genres', 'batch-progress', (d) => {
       if (d.call_type !== 'genres') return;
       batch.update('genres', { current: chunkOffset + d.current, currentBook: d.title });
     });
@@ -1023,7 +1055,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Listen for per-book progress events within each chunk
     let subtitleChunkOffset = 0;
-    const unlistenSubtitles = subscribe('batch-progress', (d) => {
+    const unlistenSubtitles = opSubscribe('subtitles', 'batch-progress', (d) => {
       if (d.call_type !== 'subtitles') return;
       batch.update('subtitles', { current: subtitleChunkOffset + d.current, currentBook: d.title });
     });
@@ -1072,7 +1104,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Listen for per-book progress events within each chunk
     let authorChunkOffset = 0;
-    const unlistenAuthors = subscribe('batch-progress', (d) => {
+    const unlistenAuthors = opSubscribe('authors', 'batch-progress', (d) => {
       if (d.call_type !== 'authors') return;
       batch.update('authors', { current: authorChunkOffset + d.current, currentBook: d.title });
     });
@@ -1202,7 +1234,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Listen for per-book progress events within each chunk
     let yearChunkOffset = 0;
-    const unlistenYears = subscribe('batch-progress', (d) => {
+    const unlistenYears = opSubscribe('years', 'batch-progress', (d) => {
       if (d.call_type !== 'years') return;
       batch.update('years', { current: yearChunkOffset + d.current, currentBook: d.title });
     });
@@ -1623,7 +1655,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Listen for per-book progress events (counted within each chunk)
     let metaChunkOffset = 0;
-    const unlisten = subscribe('batch-progress', (d) => {
+    const unlisten = opSubscribe('metadata', 'batch-progress', (d) => {
       if (d.call_type !== 'metadata') return;
       batch.update('metadata', {
         current: metaChunkOffset + d.current,
@@ -1738,7 +1770,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Listen for per-book progress events (counted within each chunk)
     let descProcChunkOffset = 0;
-    const unlisten = subscribe('batch-progress', (d) => {
+    const unlisten = opSubscribe('descriptionProcessing', 'batch-progress', (d) => {
       if (d.call_type !== 'description') return;
       batch.update('descriptionProcessing', {
         current: descProcChunkOffset + d.current,
@@ -1939,7 +1971,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Listen for per-book progress events within each chunk
     let tagChunkOffset = 0;
-    const unlistenTags = subscribe('batch-progress', (d) => {
+    const unlistenTags = opSubscribe('tags', 'batch-progress', (d) => {
       if (d.call_type !== 'tags') return;
       batch.update('tags', { current: tagChunkOffset + d.current, currentBook: d.title });
     });
@@ -2066,7 +2098,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     try {
       // Listen for progress events (counted within each chunk)
-      unlisten = subscribe('dna-progress', (data) => {
+      unlisten = opSubscribe('dna', 'dna-progress', (data) => {
         const { current, title, success, error } = data;
         if (success) dnaSuccessCount++;
         else dnaFailedCount++;
@@ -2202,7 +2234,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Listen for per-book progress events (counted within each chunk)
     let classifyChunkOffset = 0;
-    const unlisten = subscribe('batch-progress', (d) => {
+    const unlisten = opSubscribe('classify', 'batch-progress', (d) => {
       if (d.call_type !== 'classify') return;
       batch.update('classify', {
         current: classifyChunkOffset + d.current,
@@ -2363,7 +2395,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Listen for per-book progress events within each chunk
     let descChunkOffset = 0;
-    const unlistenDescs = subscribe('batch-progress', (d) => {
+    const unlistenDescs = opSubscribe('descriptions', 'batch-progress', (d) => {
       if (d.call_type !== 'description') return;
       batch.update('descriptions', { current: descChunkOffset + d.current, currentBook: d.title });
     });

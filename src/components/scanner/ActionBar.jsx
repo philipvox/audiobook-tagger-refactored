@@ -449,7 +449,7 @@ export function ActionBar({
                           <MenuItem onClick={onFixSeries} disabled={!hasSelection} active={fixingSeries} icon={Library} aiCalls={1}>
                             Fix Series
                           </MenuItem>
-                          <MenuItem onClick={onCleanupGenres} active={cleaningGenres} icon={Tag}>
+                          <MenuItem onClick={onCleanupGenres} disabled={!hasSelection} active={cleaningGenres} icon={Tag}>
                             Clean Genres
                           </MenuItem>
                           <MenuItem onClick={onAssignTagsGpt} disabled={!hasSelection} active={assigningTags} icon={Sparkles} aiCalls={1}>
@@ -469,7 +469,7 @@ export function ActionBar({
                     </>
                   )}
                   {!hasOpenAiKey && (
-                    <MenuItem onClick={onCleanupGenres} active={cleaningGenres} icon={Tag}>
+                    <MenuItem onClick={onCleanupGenres} disabled={!hasSelection} active={cleaningGenres} icon={Tag}>
                       Clean Genres
                     </MenuItem>
                   )}

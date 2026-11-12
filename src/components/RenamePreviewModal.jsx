@@ -112,7 +112,13 @@ export function RenamePreviewModal({ files = [], onConfirm, onCancel }) {
   const changedCount = changedPreviews.length;
   const noTemplates = templatesLoaded && templates.length === 0 && !currentTemplate;
 
-  const handleConfirm = () => {
+  // M-b: disabled from the first click until the rename settles, so a double
+  // click cannot send the same pairs twice.
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+
+  const handleConfirm = async () => {
+    if (submittingRef.current) return;
     // Thread the computed target names (from the previews already generated with
     // the chosen template) to the parent as explicit old->new pairs, plus the
     // template, so the backend renames exactly what was previewed.
@@ -121,7 +127,14 @@ export function RenamePreviewModal({ files = [], onConfirm, onCancel }) {
       oldPath: p.old_path,
       newPath: p.new_path,
     }));
-    onConfirm(pairs, currentTemplate);
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await onConfirm(pairs, currentTemplate);
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -276,15 +289,15 @@ export function RenamePreviewModal({ files = [], onConfirm, onCancel }) {
               </button>
               <button
                 onClick={handleConfirm}
-                disabled={changedCount === 0 || loading}
+                disabled={changedCount === 0 || loading || submitting}
                 className={`px-4 py-2 rounded-lg font-medium flex items-center gap-2 transition-colors ${
-                  changedCount === 0 || loading
+                  changedCount === 0 || loading || submitting
                     ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
                     : 'bg-blue-600 text-white hover:bg-blue-700'
                 }`}
               >
                 <CheckCircle className="w-4 h-4" />
-                Rename {changedCount} file{changedCount === 1 ? '' : 's'}
+                {submitting ? 'Renaming...' : `Rename ${changedCount} file${changedCount === 1 ? '' : 's'}`}
               </button>
             </div>
           </div>

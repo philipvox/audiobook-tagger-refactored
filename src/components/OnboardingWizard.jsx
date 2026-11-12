@@ -5,6 +5,7 @@ import { X, ArrowRight, ArrowLeft, Shield, Server, Key, Download, Check, Sparkle
 import { hasAiProvider, mergeAbsPull, mergeAbsPullGroups, importFromAbsWithNotice, confirmReimportDiscard } from '../hooks/useScan';
 import { startCancellable, finishCancellable, requestCancel } from '../lib/cancel';
 import { prepareConfigForSave, DEFAULT_OPENAI_MODEL } from '../lib/configSave';
+import { isTauri } from '../lib/platform.js';
 
 const ONBOARDING_KEY = 'audiobook_tagger_onboarding_completed';
 
@@ -38,12 +39,26 @@ export function WelcomeModal({ onDismiss, onStartWizard, onLocalOnly }) {
               <div className="flex items-start gap-3">
                 <Shield className="w-5 h-5 text-green-400 flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-sm text-white font-medium mb-1">Your data stays in your browser</p>
-                  <p className="text-xs text-gray-400 leading-relaxed">
-                    API keys and server credentials are stored locally and never sent to us.
-                    AI requests go directly from your browser to OpenAI or Anthropic.
-                    This app has no backend server.
-                  </p>
+                  {/* M-l: the desktop app is not a browser. */}
+                  {isTauri() ? (
+                    <>
+                      <p className="text-sm text-white font-medium mb-1">Your data stays on this computer</p>
+                      <p className="text-xs text-gray-400 leading-relaxed">
+                        API keys and server credentials are stored by this app on this computer and never sent to us.
+                        AI requests go directly from this app to OpenAI or Anthropic, or to Ollama on this computer.
+                        Nothing passes through a server of ours.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-sm text-white font-medium mb-1">Your data stays in your browser</p>
+                      <p className="text-xs text-gray-400 leading-relaxed">
+                        API keys and server credentials are stored locally and never sent to us.
+                        AI requests go directly from your browser to OpenAI or Anthropic.
+                        This app has no backend server.
+                      </p>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -348,7 +363,7 @@ export function SetupWizard({ onClose }) {
           {step === 1 && (
             <div className="space-y-3">
               <p className="text-sm text-gray-400 mb-3">
-                Enter an API key for OpenAI or Anthropic Claude. You only need one. Keys are stored in your browser only.
+                Enter an API key for OpenAI or Anthropic Claude. You only need one. {isTauri() ? 'Keys are stored by this app on this computer only.' : 'Keys are stored in your browser only.'}
               </p>
               <WizardInput
                 label="OpenAI API Key"
@@ -426,10 +441,20 @@ export function SetupWizard({ onClose }) {
               <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-green-600/20 mb-4">
                 <Check className="w-6 h-6 text-green-400" />
               </div>
-              <h3 className="text-lg font-semibold text-white mb-2">You're all set!</h3>
-              <p className="text-sm text-gray-400 mb-4">
-                Your library is connected and ready to go. Here's what you can do:
-              </p>
+              <h3 className="text-lg font-semibold text-white mb-2">Setup finished</h3>
+              {/* M-l: say what was actually set up; steps can be skipped. */}
+              <ul className="text-sm text-gray-400 mb-4 space-y-1" aria-label="Setup summary">
+                <li>{connectionStatus === 'success'
+                  ? 'AudiobookShelf: connected.'
+                  : 'AudiobookShelf: not connected. You can connect it later in Settings.'}</li>
+                <li>{hasAiProvider(localConfig)
+                  ? 'AI provider: configured.'
+                  : 'AI provider: not configured. Enrich needs one; add it in Settings.'}</li>
+                <li>{importedCount != null
+                  ? `Library: ${importedCount} ${importedCount === 1 ? 'book' : 'books'} imported.`
+                  : 'Library: not imported yet.'}</li>
+              </ul>
+              <p className="text-sm text-gray-400 mb-4">Here's what you can do:</p>
               <div className="text-left space-y-2 bg-neutral-800/50 rounded-xl p-4">
                 <div className="flex items-start gap-2">
                   <span className="text-blue-400 text-sm font-bold mt-0.5">1.</span>

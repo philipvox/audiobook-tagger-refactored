@@ -4,6 +4,7 @@ import { callBackend, subscribe, pickPath, askToConfirm } from '../api';
 import { useApp } from '../context/AppContext';
 import { getAbsId, normalizePushResult, buildPushItems, applyPushSnapshots, applyRefreshedLists, failedPushResult } from '../lib/absPush';
 import { logEvent } from '../lib/logEvent';
+import { isAiConfigured } from '../lib/proxy';
 import { requestCancel, startCancellable, finishCancellable } from '../lib/cancel';
 import { applyEntries } from '../lib/enrichActions';
 import { applyStaticGenreCleanupResult } from '../lib/applyAiResults';
@@ -172,10 +173,11 @@ export function hasAbsConnection(config) {
 
 /**
  * True when an AI provider is configured: an OpenAI key, an Anthropic key or
- * local AI. The one definition the Scanner page uses to gate AI actions.
+ * local AI with a model. The Scanner page gates AI actions on it; it is
+ * lib/proxy.js isAiConfigured, the rule callAI follows.
  */
 export function hasAiProvider(config) {
-  return !!(config?.openai_api_key || config?.anthropic_api_key || config?.use_local_ai);
+  return isAiConfigured(config);
 }
 
 /**

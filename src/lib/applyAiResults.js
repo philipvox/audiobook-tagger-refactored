@@ -378,6 +378,8 @@ export function hasNoNarrator(metadata) {
 // Returns the group (unchanged when the entry changed nothing).
 export function applyDescriptionProcessResult(group, entry) {
   if (!entry || entry.error || !entry.changed) return group;
+  // An empty or placeholder ("N/A") description never replaces the current one.
+  if (!has(entry.description) || isPlaceholderSeries(entry.description)) return group;
   const narrator = hasNoNarrator(group.metadata) ? extractNarrator(entry.description) : null;
   return applyMetadataToGroup(
     group,

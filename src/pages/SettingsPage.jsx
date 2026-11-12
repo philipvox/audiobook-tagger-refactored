@@ -840,7 +840,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
             {/* AI Provider */}
             <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
               <h3 className="text-lg font-semibold text-white mb-3">AI Provider</h3>
-              <p className="text-sm text-gray-400">Enter your API key for OpenAI or Anthropic Claude. Keys are stored in your browser only.</p>
+              <p className="text-sm text-gray-400">Enter your API key for OpenAI or Anthropic Claude. {isTauri() ? 'Keys are stored by this app on this computer only.' : 'Keys are stored in your browser only.'}</p>
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
                       <label className="text-sm text-gray-400">OpenAI API Key</label>
@@ -867,7 +867,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                   </div>
                   <div className="text-xs text-amber-500/70 mt-1 flex items-center gap-1">
                     <AlertCircle className="w-3 h-3 flex-shrink-0" />
-                    <span>API keys are stored in your browser's local storage. Do not use this on shared computers.</span>
+                    <span>{isTauri() ? 'API keys are stored by this app on this computer.' : "API keys are stored in your browser's local storage."} Do not use this on shared computers.</span>
                   </div>
                   <div>
                     <label className="block text-sm text-gray-400 mb-1.5">AI Model</label>
@@ -1550,13 +1550,13 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
           };
           const res = await persistConfig(cleared);
           if (res?.success) {
-            toast.success('Keys Cleared', 'All API keys and tokens have been removed from browser storage.');
+            toast.success('Keys Cleared', `All API keys and tokens have been removed from ${isTauri() ? "this app's storage" : 'browser storage'}.`);
           } else {
             toast.error('Clear Failed', res?.error || 'Could not remove keys. They may still be stored.');
           }
         }}
         title="Clear All API Keys"
-        message="This will remove your ABS token, OpenAI key, and Anthropic key from browser storage. You'll need to re-enter them to use the app."
+        message={`This will remove your ABS token, OpenAI key, and Anthropic key from ${isTauri() ? "this app's storage" : 'browser storage'}. You'll need to re-enter them to use the app.`}
         confirmText="Clear All Keys"
         type="danger"
       />

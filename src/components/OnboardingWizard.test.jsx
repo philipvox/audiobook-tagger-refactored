@@ -147,3 +147,15 @@ describe('WelcomeModal local-folders choice', () => {
     expect(onStartWizard).not.toHaveBeenCalled();
   });
 });
+
+describe('SetupWizard last step (M-l)', () => {
+  it('with every step skipped it says nothing is connected, configured or imported', async () => {
+    app.config = {};
+    renderWizard();
+    for (let i = 0; i < 3; i++) await act(async () => { next(); });
+    expect(screen.queryByText(/Your library is connected/)).not.toBeInTheDocument();
+    expect(screen.getByText(/AudiobookShelf: not connected/)).toBeInTheDocument();
+    expect(screen.getByText(/AI provider: not configured/)).toBeInTheDocument();
+    expect(screen.getByText(/Library: not imported yet/)).toBeInTheDocument();
+  });
+});

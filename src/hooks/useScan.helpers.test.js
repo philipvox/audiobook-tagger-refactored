@@ -179,7 +179,11 @@ describe('hasAiProvider (genre cleanup gate)', () => {
   it('is true for an OpenAI key, an Anthropic key or local AI', () => {
     expect(hasAiProvider({ openai_api_key: 'sk-x' })).toBe(true);
     expect(hasAiProvider({ anthropic_api_key: 'sk-ant' })).toBe(true);
-    expect(hasAiProvider({ use_local_ai: true })).toBe(true);
+    expect(hasAiProvider({ use_local_ai: true, ollama_model: 'gemma4' })).toBe(true);
+  });
+  it('local AI without a model is not a provider (callAI would not use it)', () => {
+    // Was: { use_local_ai: true } alone counted as configured.
+    expect(hasAiProvider({ use_local_ai: true })).toBe(false);
   });
   it('is false with none of them', () => {
     expect(hasAiProvider({})).toBe(false);

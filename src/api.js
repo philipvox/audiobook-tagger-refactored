@@ -3,7 +3,7 @@
 // All API calls go through the Cloudflare Worker CORS proxy.
 // Config lives in browser localStorage.
 
-import { absApi, callAI, parseAIJson, proxyFetch, retryOn429 } from './lib/proxy';
+import { absApi, callAI, parseAIJson, proxyFetch, retryOn429, usesLocalAi } from './lib/proxy';
 import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor, isPlaceholderTitle } from './lib/normalize';
 import { isPlaceholderSeries } from './lib/absPayload.js';
@@ -32,7 +32,7 @@ function getSystemPrompt(config) {
  *  Uses compact prompt for local AI, fewer fields, ~50% less output. */
 function getDnaSystemPrompt(config) {
   if (config?.custom_dna_prompt?.trim()) return config.custom_dna_prompt.trim();
-  const isLocal = !!(config?.use_local_ai && config?.ollama_model);
+  const isLocal = usesLocalAi(config);
   return isLocal ? BOOK_DNA_SYSTEM_PROMPT_COMPACT : BOOK_DNA_SYSTEM_PROMPT;
 }
 
@@ -536,7 +536,7 @@ const HANDLERS = {
   // === Full Pipeline (matching desktop process_with_pipeline) ===
   process_with_pipeline: async (args) => {
     const config = getLocalConfig();
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
+    const isLocalAI = usesLocalAi(config);
     const request = args.request || {};
     const books = request.books || [];
     const results = [];
@@ -798,7 +798,7 @@ const HANDLERS = {
   resolve_metadata_batch: async (args) => {
     const config = getLocalConfig();
     const books = args.books || [];
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
+    const isLocalAI = usesLocalAi(config);
     const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
     const BATCH_SIZE = isLocalAI ? 3 : 1;
     const results = [];
@@ -969,7 +969,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
   classify_books_batch: async (args) => {
     const config = getLocalConfig();
     const books = args.books || [];
-    const isLocal = !!(config.use_local_ai && config.ollama_model);
+    const isLocal = usesLocalAi(config);
     const dnaEnabled = args.dnaEnabled !== false;
     const CONCURRENCY = isLocal ? 1 : (config.cloud_concurrency || 5);
     const BATCH_SIZE = isLocal ? 3 : 1; // Local: batch 3 books per prompt (small models struggle with 5+)
@@ -1197,7 +1197,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
   fix_descriptions_with_gpt: async (args) => {
     const config = getLocalConfig();
     const books = args.books || [];
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
+    const isLocalAI = usesLocalAi(config);
     const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
     const results = [];
     let completed = 0;
@@ -1230,7 +1230,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
   process_descriptions_batch: async (args) => {
     const config = getLocalConfig();
     const books = args.books || args.request?.books || [];
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
+    const isLocalAI = usesLocalAi(config);
     const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
     const results = [];
     let completed = 0;
@@ -1329,7 +1329,7 @@ Return JSON: {"genres":["Genre1","Genre2"]}`;
   // === GPT: Tag Assignment (standard tags + DNA, matching desktop classify_book) ===
   assign_tags_with_gpt: async (args) => {
     const config = getLocalConfig();
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
+    const isLocalAI = usesLocalAi(config);
     const books = args.books || [];
     const dnaEnabled = args.dnaEnabled !== false; // default ON
     const results = [];
@@ -1459,7 +1459,7 @@ If the book has a well-known subtitle (e.g., "Dune: The Desert Planet"), include
       return false;
     };
 
-    const isLocal = !!(config.use_local_ai && config.ollama_model);
+    const isLocal = usesLocalAi(config);
     const CONCURRENCY = isLocal ? 1 : (config.cloud_concurrency || 5);
 
     const processBook = async (book) => {
@@ -1641,7 +1641,7 @@ Return JSON: {"year":"2005"}`;
   // === BookDNA Generation ===
   generate_book_dna_batch: async (args) => {
     const config = getLocalConfig();
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
+    const isLocalAI = usesLocalAi(config);
     const items = args.request?.items || args.items || [];
     const results = [];
     let completed = 0;

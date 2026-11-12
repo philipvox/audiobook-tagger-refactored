@@ -174,7 +174,8 @@ export async function absApi(absBaseUrl, absToken, path, options = {}) {
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`ABS API error ${res.status}: ${text}`);
+    // Bounded like the AI errors: the text ends up in toasts and pills.
+    throw new Error(`ABS API error ${res.status}: ${String(text).substring(0, 300)}`);
   }
 
   return res.json();
@@ -437,9 +438,22 @@ export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b',
  * @param {string} userPrompt
  * @param {number} maxTokens
  */
+/** True when AI calls go to the local Ollama model: the switch and a model. */
+export function usesLocalAi(config) {
+  return !!(config?.use_local_ai && config?.ollama_model);
+}
+
+/**
+ * The one definition of "an AI provider is configured", matching what callAI
+ * needs: local AI with a model, or an OpenAI or Anthropic key.
+ */
+export function isAiConfigured(config) {
+  return usesLocalAi(config) || !!(config?.openai_api_key || config?.anthropic_api_key);
+}
+
 export async function callAI(config, systemPrompt, userPrompt, maxTokens = 2000) {
   // Local AI takes priority
-  if (config.use_local_ai && config.ollama_model) {
+  if (usesLocalAi(config)) {
     return callOllama(systemPrompt, userPrompt, {
       model: config.ollama_model,
       maxTokens,
