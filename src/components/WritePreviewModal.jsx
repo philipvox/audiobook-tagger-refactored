@@ -143,7 +143,7 @@ export function WritePreviewModal({
                 {skipBackup && (
                   <div className="flex items-center gap-2 text-sm text-orange-700 bg-orange-50 px-3 py-1.5 rounded-lg">
                     <Zap className="w-4 h-4" />
-                    <span className="font-semibold">Fast mode:</span> No backups (30% faster)
+                    <span className="font-semibold">Fast mode:</span> No backups (30% faster). This write cannot be undone.
                   </div>
                 )}
               </div>
@@ -265,7 +265,7 @@ export function WritePreviewModal({
               <div>
                 <div className="font-medium text-gray-100">Fast Mode (Skip Backups)</div>
                 <div className="text-sm text-gray-400">
-                  ~30% faster, but no backup files created
+                  ~30% faster, but no backup files are created. This write cannot be undone.
                 </div>
               </div>
             </div>

@@ -10,6 +10,7 @@
 
 import { isLocalGroup } from './applyMetadata.js';
 import { splitFileChanges } from './writePayload.js';
+import { formatRelativeTime } from './session.js';
 
 /** The last segment of a POSIX or Windows path. */
 export function fileNameOf(path) {
@@ -137,6 +138,9 @@ export function summarizeWriteResult(result, groups) {
   return { written, failures, skipped, toast };
 }
 
+// file.changes uses 'genre'; changedFields uses 'genres' (applyMetadata.js).
+const metaField = (field) => (field === 'genre' ? 'genres' : field);
+
 // Same rule as applyMetadataToGroup: a representative file's change count.
 function totalChanges(files) {
   const representative = files.find((f) => Object.keys(f.changes || {}).length > 0);
@@ -168,18 +172,33 @@ export function applyWriteResult(groups, result) {
   return (groups || []).map((g) => {
     const touched = failuresByGroup.has(g.id) || (g.files || []).some((f) => byId.has(f.id));
     if (!touched) return g;
+    const written = new Set(); // file-change fields that reached a file
     const files = g.files.map((f) => {
       const r = byId.get(f.id);
       if (!r || r.status !== 'success' || !sent[f.id]) return f;
       const notEmbedded = new Set(r.skipped_fields || []);
       const changes = {};
       for (const [field, change] of Object.entries(f.changes || {})) {
-        const wasWritten = field in sent[f.id].changes && !notEmbedded.has(field);
-        if (!wasWritten) changes[field] = change;
+        const sentChange = sent[f.id].changes[field];
+        if (!sentChange || notEmbedded.has(field)) {
+          changes[field] = change;
+          continue;
+        }
+        written.add(field);
+        // I-7: a value staged while the write ran is newer than the one
+        // written; it stays staged, and the file now holds the written value.
+        if (String(sentChange.new ?? '') !== String(change?.new ?? '')) {
+          changes[field] = { ...change, old: sentChange.new };
+        }
       }
       return { ...f, changes, status: Object.keys(changes).length > 0 ? 'changed' : 'unchanged' };
     });
-    const next = { ...g, files, total_changes: totalChanges(files) };
+    // M-f: a field that was written and is staged on no file any more drops
+    // its "changed" badge; app-only fields (never sent) keep theirs.
+    const stillStaged = new Set(files.flatMap((f) => Object.keys(f.changes || {})));
+    const settled = new Set([...written].filter((field) => !stillStaged.has(field)).map(metaField));
+    const changedFields = (g.changedFields || []).filter((f) => !settled.has(f));
+    const next = { ...g, files, changedFields, total_changes: totalChanges(files) };
     const groupFailures = failuresByGroup.get(g.id);
     const groupSkipped = skippedByGroup.get(g.id);
     if (groupFailures) {
@@ -197,6 +216,65 @@ export function applyWriteResult(groups, result) {
     }
     return next;
   });
+}
+
+/**
+ * I-4: apply an undo_last_write result. `restoredPaths` are the files put
+ * back from their backups; `lastWrite` is the write_tags result (with `sent`)
+ * of the write that was undone, or null when it is not known (the journal is
+ * from an earlier session).
+ *
+ * With `lastWrite`, each restored file has the changes that write embedded
+ * staged again (old = the value the file holds again), so the book shows as
+ * edited and Write Tags can write them again; a change staged since then is
+ * kept and only its old value moves back. Every touched book gets a warning
+ * pill that says what happened. Untouched groups are returned as they are.
+ */
+export function applyUndoResult(groups, restoredPaths, lastWrite = null) {
+  const restored = new Set(restoredPaths || []);
+  const sent = lastWrite?.sent || {};
+  const results = new Map((Array.isArray(lastWrite?.results) ? lastWrite.results : []).map((r) => [r.file_id, r]));
+  return (groups || []).map((g) => {
+    if (!(g.files || []).some((f) => restored.has(f.path))) return g;
+    const restaged = new Set();
+    const files = g.files.map((f) => {
+      const r = results.get(f.id);
+      if (!restored.has(f.path) || !sent[f.id] || r?.status !== 'success') return f;
+      const notEmbedded = new Set(r.skipped_fields || []);
+      const changes = { ...(f.changes || {}) };
+      for (const [field, change] of Object.entries(sent[f.id].changes || {})) {
+        if (notEmbedded.has(field)) continue;
+        restaged.add(field);
+        changes[field] = field in changes
+          ? { ...changes[field], old: change.old }
+          : { old: change.old, new: change.new };
+      }
+      return { ...f, changes, status: Object.keys(changes).length > 0 ? 'changed' : 'unchanged' };
+    });
+    const changedFields = [...new Set([...(g.changedFields || []), ...[...restaged].map(metaField)])];
+    const message = restaged.size > 0
+      ? 'The last write was undone: the files hold their earlier tags again, and the changes are staged so Write Tags can write them again.'
+      : 'Tags were restored from backup, so the values shown here may not be what is in the files. Scan the folder again to reload tags from disk.';
+    return {
+      ...g,
+      files,
+      changedFields,
+      total_changes: totalChanges(files),
+      lastError: { stage: 'undo', kind: 'undo', severity: 'warn', message },
+    };
+  });
+}
+
+/**
+ * I-5: the confirmation for "Undo last write" in the action bar. `status` is
+ * a get_undo_status result ({ count, age_seconds }); `now` in milliseconds.
+ */
+export function undoConfirmMessage(status, now = Date.now()) {
+  const n = Number(status?.count ?? status?.books_count ?? 0);
+  const age = Number(status?.age_seconds);
+  const when = Number.isFinite(age) ? formatRelativeTime(now - age * 1000, now) : 'earlier';
+  return `Restore ${plural(n, 'file')} from the backups made ${when}? `
+    + 'The current contents of those files will be replaced. Anything changed in them since that write, in this app or another, will be lost.';
 }
 
 /**

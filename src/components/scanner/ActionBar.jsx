@@ -125,7 +125,9 @@ export function ActionBar({
   const localSelectedCount = (selectedGroups || []).filter(isLocalGroup).length;
   const onlyLocalSelected = localSelectedCount > 0 && localSelectedCount === (selectedGroups || []).length;
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const isProcessing = scanning || cleaningGenres || assigningTags || fixingDescriptions || fixingTitles || fixingSubtitles || fixingAuthors || fixingYears || fixingSeries || lookingUpAge || lookingUpISBN || runningAll || generatingDna || classifying || resolvingMetadata || processingDescriptions || pushing || validating || analyzingSeries || extractingByAudio;
+  // I-7: a write in progress blocks every other action, so nothing is staged
+  // or replaced while write_tags runs.
+  const isProcessing = !!writing || scanning || cleaningGenres || assigningTags || fixingDescriptions || fixingTitles || fixingSubtitles || fixingAuthors || fixingYears || fixingSeries || lookingUpAge || lookingUpISBN || runningAll || generatingDna || classifying || resolvingMetadata || processingDescriptions || pushing || validating || analyzingSeries || extractingByAudio;
 
   // Time estimate for local AI: ~3s per book (batched 5 per prompt) + ~4s DNA per book
   const estimateLocalTime = (count, calls) => {
@@ -281,6 +283,19 @@ export function ActionBar({
           label="Import"
           variant="primary"
         />
+
+        {/* M-d: the undo journal outlives the workspace, so Undo shows
+            whenever a journal exists, even with no books loaded. */}
+        {isTauri() && undoAvailable && onUndo && (
+          <PillBtn
+            onClick={onUndo}
+            disabled={isProcessing || undoing}
+            active={undoing}
+            icon={Undo2}
+            label="Undo last write"
+            title="Restore the files changed by the last tag write from their backups"
+          />
+        )}
 
         {totalGroupCount > 0 && (
           <>
@@ -491,16 +506,6 @@ export function ActionBar({
                 icon={Edit3}
                 label="Rename"
                 title="Rename the selected local files from a template"
-              />
-            )}
-            {isTauri() && undoAvailable && onUndo && (
-              <PillBtn
-                onClick={onUndo}
-                disabled={isProcessing || writing || undoing}
-                active={undoing}
-                icon={Undo2}
-                label="Undo last write"
-                title="Restore the files changed by the last tag write from their backups"
               />
             )}
 

@@ -43,6 +43,7 @@ import { applyFieldFixes } from '../lib/applyValidationFixes';
 import {
   selectedGroupsFrom, selectionForSelectAll, localWriteTargets,
   summarizeWriteResult, applyWriteResult, summarizeRenameResult, applyRenameResult,
+  applyUndoResult, undoConfirmMessage,
 } from '../lib/localWrite';
 import { isLocalGroup } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
@@ -104,6 +105,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const [undoStatus, setUndoStatus] = useState(null);
   const [undoing, setUndoing] = useState(false);
   const [showUndoToast, setShowUndoToast] = useState(false);
+  // I-5: the get_undo_status the action-bar Undo confirm is showing.
+  const [undoConfirm, setUndoConfirm] = useState(null);
+  // I-4: the write_tags result (with `sent`) of the last write in this
+  // session, so Undo can stage its changes again. Null when the journal is
+  // from an earlier session.
+  const lastWriteRef = useRef(null);
 
   // Check undo status. #62: re-checked on mount and after every write,
   // rename and undo, so "Undo last write" shows exactly when a journal exists.
@@ -120,7 +127,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   }, []);
   useEffect(() => { checkUndoStatus(); }, [checkUndoStatus]);
 
-  // Handle undo
+  // Handle undo. One click from the UndoToast (the user just wrote); the
+  // action bar goes through requestUndo's confirmation first (I-5).
   const handleUndo = useCallback(async () => {
     if (!undoStatus?.available || undoing) return;
 
@@ -134,37 +142,37 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       // M7: a stub/no-op or an explicit failure must surface an error toast,
       // not silently swallow (the old code only ever no-op'd on success).
       const failed = !result || result._stub || result.success === false || result.error;
+      // I-4: the files that were put back, also on a partial undo.
+      const paths = result?.restored_files || (failed ? [] : (result?.files || affectedPaths || []));
+      const lastWrite = lastWriteRef.current;
+      if (paths.length > 0) {
+        // The reverted changes are staged again (when this session made the
+        // write) and each book says what happened, so the screen never shows
+        // the written values as what is in the files with nothing staged.
+        setGroups(prev => applyUndoResult(prev, paths, lastWrite));
+        // The write-status overlay reflected the write we just reverted.
+        clearFileStatuses();
+      }
       if (failed) {
         const msg = result?.error || result?.message || 'Could not revert the last tag write.';
         toast.error('Undo Failed', String(msg));
         return;
       }
 
+      lastWriteRef.current = null;
       setShowUndoToast(false);
       setUndoStatus(null);
 
-      // M5: revert the UI for the undone files. A cheap re-read (read_tags /
-      // rescan) is not wired here, so per the brief we take the "no cheap path"
-      // branch: mark the affected groups 'undone' so the user knows the on
-      // screen tags may be stale, clear the stale write-status pills, and tell
-      // them via toast to rescan.
-      const paths = result.restored_files || result.files || affectedPaths || [];
-      const pathSet = new Set(paths);
-      if (pathSet.size > 0) {
-        setGroups(prev => prev.map(g => {
-          const touched = (g.files || []).some(f => pathSet.has(f.path));
-          return touched ? { ...g, status: 'undone' } : g;
-        }));
-      }
-      // The write-status overlay reflected the write we just reverted, so it is
-      // no longer accurate for any file - clear it.
-      clearFileStatuses();
-
+      const n = paths.length;
+      const restored = `Restored ${n} file${n === 1 ? '' : 's'} from the backups.`;
+      const next = lastWrite
+        ? 'The changes are staged again, so Write Tags can write them.'
+        : 'Scan the folder again to reload tags from disk.';
       if (result.journal_error) {
         // v2.2.3: files were restored but the undo journal could not be updated.
-        toast.warning('Changes Reverted', `Restored the files, but the undo record could not be updated: ${result.journal_error}`);
+        toast.warning('Changes Reverted', `${restored} The undo record could not be updated: ${result.journal_error}`);
       } else {
-        toast.success('Changes Reverted', 'Restored the files from the last write. Rescan to refresh the on-screen tags.');
+        toast.success('Changes Reverted', `${restored} ${next}`);
       }
     } catch (error) {
       // #62: undo_last_write rejects when its background task crashes.
@@ -176,6 +184,23 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       await checkUndoStatus();
     }
   }, [undoStatus, undoing, toast, setGroups, clearFileStatuses, checkUndoStatus]);
+
+  // I-5: "Undo last write" in the action bar. The journal survives restarts
+  // and has no expiry, so re-read it and ask before replacing any file.
+  const requestUndo = useCallback(async () => {
+    if (undoing) return;
+    try {
+      const status = await callBackend('get_undo_status');
+      setUndoStatus(status);
+      if (!status?.available) {
+        toast.info('Nothing to Undo', 'There is no tag write to undo.');
+        return;
+      }
+      setUndoConfirm(status);
+    } catch (error) {
+      toast.error('Undo Failed', String(error?.message || error));
+    }
+  }, [undoing, toast]);
 
   // Dismiss undo toast. #62: hiding the toast (by hand or after its 30 s
   // countdown) keeps the undo journal, so "Undo last write" in the action bar
@@ -703,6 +728,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       });
       const summary = summarizeWriteResult(result, groupsRef.current);
       setGroups(prev => applyWriteResult(prev, result));
+      // I-4: keep what this write wrote so an Undo can stage it again. After a
+      // write that wrote nothing it is not known which write the journal
+      // holds, so Undo then only marks the books.
+      lastWriteRef.current = summary.written > 0 ? { sent: result.sent, results: result.results } : null;
       (toast[summary.toast.type] || toast.info)(summary.toast.title, summary.toast.message);
       if (summary.written > 0 && summary.failures.length === 0) handleClearSelection();
       logEvent('write', 'write tags complete', {
@@ -2775,7 +2804,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         onPipelineRescan={handlePipelineClick}
         onWrite={handleWriteClick}
         onRename={handleRenameClick}
-        onUndo={handleUndo}
+        onUndo={requestUndo}
         undoAvailable={!!undoStatus?.available}
         undoing={undoing}
         selectedGroups={getSelectedGroups()}
@@ -3093,6 +3122,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       )}
 
       {/* H2: full JSON import replace-groups confirmation */}
+      {/* I-5: the action-bar Undo states what it replaces before it runs. */}
+      <ConfirmModal
+        isOpen={!!undoConfirm}
+        onClose={() => setUndoConfirm(null)}
+        onConfirm={handleUndo}
+        type="danger"
+        title="Undo the last tag write?"
+        message={undoConfirm ? undoConfirmMessage(undoConfirm) : ''}
+        confirmText="Restore files"
+        cancelText="Cancel"
+      />
+
       <ConfirmModal
         isOpen={!!pendingImport}
         onClose={() => setPendingImport(null)}
@@ -3231,8 +3272,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       {/* Undo Toast */}
       {showUndoToast && undoStatus?.available && (
         <UndoToast
-          booksCount={undoStatus.books_count}
-          ageSeconds={undoStatus.age_seconds}
+          fileCount={undoStatus.count ?? undoStatus.books_count}
           onUndo={handleUndo}
           onDismiss={dismissUndo}
           undoing={undoing}

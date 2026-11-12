@@ -1,18 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { UndoToast } from './UndoToast';
 
-describe('UndoToast (L4)', () => {
-  it('renders with a defaulted ageSeconds and a valid (non-NaN) undo countdown', () => {
-    // ageSeconds omitted -> defaults to 0, so the 1h availability text is exact.
-    render(<UndoToast booksCount={3} onUndo={() => {}} onDismiss={() => {}} />);
-    expect(screen.getByText(/Wrote 3 books/)).toBeTruthy();
-    // 3600s -> "1h 0m" (formatTime), proving timeRemaining isn't NaN.
-    expect(screen.getByText(/Undo available for 1h 0m/)).toBeTruthy();
+// I-5: the count is the undo journal's file count, and the journal has no
+// expiry. These tests used to expect "Wrote 3 books" and a one-hour
+// "Undo available for 1h 0m" countdown that nothing enforced.
+describe('UndoToast (L4, I-5)', () => {
+  it('names the file count and that undo lasts until the next write', () => {
+    render(<UndoToast fileCount={3} onUndo={() => {}} onDismiss={() => {}} />);
+    expect(screen.getByText(/Wrote 3 files/)).toBeTruthy();
+    expect(screen.getByText(/Undo stays available until the next write/)).toBeTruthy();
   });
 
-  it('renders a single book without the plural', () => {
-    render(<UndoToast booksCount={1} onUndo={() => {}} onDismiss={() => {}} />);
-    expect(screen.getByText(/Wrote 1 book(?!s)/)).toBeTruthy();
+  it('renders a single file without the plural', () => {
+    render(<UndoToast fileCount={1} onUndo={() => {}} onDismiss={() => {}} />);
+    expect(screen.getByText(/Wrote 1 file(?!s)/)).toBeTruthy();
   });
 });

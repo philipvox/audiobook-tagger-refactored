@@ -3,19 +3,12 @@ import { Undo2, X, Clock, Loader2 } from 'lucide-react';
 
 const AUTO_DISMISS_SECONDS = 30;
 
-export function UndoToast({ booksCount, ageSeconds = 0, onUndo, onDismiss, undoing }) {
-  // Time the undo action itself stays available (1 hour), shown as text.
-  const [timeRemaining, setTimeRemaining] = useState(3600 - ageSeconds);
-  // L4: separate countdown driving the auto-dismiss progress bar (30s).
+// I-5: shown right after a write, so its Undo stays one click. `fileCount` is
+// get_undo_status's count of files in the undo journal. The journal has no
+// expiry: Undo stays available (from the action bar) until the next write.
+export function UndoToast({ fileCount, onUndo, onDismiss, undoing }) {
+  // L4: countdown driving the auto-dismiss progress bar (30s).
   const [dismissRemaining, setDismissRemaining] = useState(AUTO_DISMISS_SECONDS);
-
-  // Countdown timer - undo availability text (does not itself dismiss the toast).
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setTimeRemaining(prev => (prev <= 1 ? 0 : prev - 1));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, []);
 
   // Auto-dismiss after 30 seconds, ticking every second so the progress bar
   // below actually tracks the countdown it claims.
@@ -33,14 +26,6 @@ export function UndoToast({ booksCount, ageSeconds = 0, onUndo, onDismiss, undoi
     return () => clearInterval(interval);
   }, [onDismiss]);
 
-  const formatTime = (seconds) => {
-    if (seconds < 60) return `${seconds}s`;
-    const mins = Math.floor(seconds / 60);
-    if (mins < 60) return `${mins}m`;
-    const hours = Math.floor(mins / 60);
-    return `${hours}h ${mins % 60}m`;
-  };
-
   return (
     <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 fade-in duration-300">
       <div className="bg-neutral-950 text-white rounded-xl shadow-2xl px-5 py-4 flex items-center gap-4 min-w-[320px]">
@@ -52,11 +37,11 @@ export function UndoToast({ booksCount, ageSeconds = 0, onUndo, onDismiss, undoi
         {/* Content */}
         <div className="flex-1">
           <div className="font-medium text-sm">
-            Wrote {booksCount} book{booksCount === 1 ? '' : 's'}
+            Wrote {fileCount} file{fileCount === 1 ? '' : 's'}
           </div>
           <div className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
             <Clock className="w-3 h-3" />
-            Undo available for {formatTime(timeRemaining)}
+            Undo stays available until the next write
           </div>
         </div>
 
