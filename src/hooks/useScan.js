@@ -134,6 +134,30 @@ export function healUnresolvedSeries(staged, fresh) {
   return next;
 }
 
+/** I-6: books from an older session (needs_reimport) with unpushed edits. */
+export function reimportDiscardCount(groups) {
+  return (groups || []).filter((g) => g?.needs_reimport === true && groupHasStagedChanges(g)).length;
+}
+
+/** I-6: asked before an import that would discard those edits. */
+export const REIMPORT_DISCARD_PROMPT = (n) =>
+  `${n} ${n === 1 ? 'book' : 'books'} from an older session ${n === 1 ? 'has' : 'have'} unpushed edits that will be discarded. Continue?`;
+
+/**
+ * I-6: an import replaces every needs_reimport book with the fresh ABS copy
+ * (mergeAbsPull), staged edits included. Ask first when that would discard
+ * edits; resolves true when the import may go ahead.
+ */
+export async function confirmReimportDiscard(groups) {
+  const n = reimportDiscardCount(groups);
+  if (n === 0) return true;
+  return askToConfirm(REIMPORT_DISCARD_PROMPT(n), {
+    title: 'Discard unpushed edits?',
+    okLabel: 'Import and discard',
+    cancelLabel: 'Cancel',
+  });
+}
+
 export function mergeAbsPullGroups(prevGroups, newGroups) {
   return mergeAbsPull(prevGroups, newGroups).groups;
 }
@@ -578,6 +602,10 @@ export function useScan() {
   // Import books from ABS library (no local file scan)
   // Options: { enrichWithCustomProviders: boolean } - if true, search Goodreads/Hardcover for additional metadata
   const handleImportFromAbs = useCallback(async (options = {}) => {
+    // I-6: say before importing that older-session edits will be discarded.
+    if (!(await confirmReimportDiscard(groupsRef.current || []))) {
+      return { success: false, declined: true, count: 0, refreshed: 0 };
+    }
     if (progressIntervalRef.current) {
       clearInterval(progressIntervalRef.current);
       progressIntervalRef.current = null;

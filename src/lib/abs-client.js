@@ -31,9 +31,10 @@ export async function getLibraries(absBaseUrl, absToken) {
  * Import all books from an ABS library.
  * @param {object} config - App config with abs_base_url, abs_api_token, abs_library_id
  * @param {function} onProgress - Optional callback (current, total, message)
+ * @param {object} [options] { shouldStop } - stop once it returns true (M-m)
  * @returns {Array} Array of book groups
  */
-export async function importLibrary(config, onProgress) {
+export async function importLibrary(config, onProgress, { shouldStop } = {}) {
   const { abs_base_url: baseUrl, abs_api_token: token, abs_library_id: libraryId } = config;
 
   if (!baseUrl || !token || !libraryId) {
@@ -54,6 +55,9 @@ export async function importLibrary(config, onProgress) {
   while (true) {
     onProgress?.(allItems.length, lastKnownTotal, `Fetching page ${page + 1}...`);
     const data = await absApi(baseUrl, token, `/api/libraries/${libraryId}/items?limit=${limit}&page=${page}&expanded=1`);
+    // M-m: a cancelled import (the wizard closed) stops here; the caller
+    // discards the result.
+    if (shouldStop?.()) return [];
     const items = data.results || [];
     const total = data.total || 0;
     if (total) lastKnownTotal = total;
@@ -76,6 +80,7 @@ export async function importLibrary(config, onProgress) {
       onProgress?.(index, total, `Processing ${item.media?.metadata?.title || 'book'}...`);
     },
     (done, total) => onProgress?.(done, total, `Reading series ${done} of ${total}...`),
+    { shouldStop },
   );
 
   return groups;

@@ -137,6 +137,10 @@ export function parseSession(json) {
  * push against. Flag it so the push skips it and the book list says why; a
  * fresh import replaces the group and clears the flag.
  */
+/** I-6: the pill on a book restored without its import snapshot. */
+export const NEEDS_REIMPORT_MESSAGE =
+  'Restored from an older session. Re-import from ABS before pushing this book; re-importing discards the edits shown here.';
+
 function flagMissingSnapshot(g) {
   if (!g || typeof g !== 'object') return g;
   if ((g.source !== 'abs' && !g.abs_id) || g.abs_original) return g;
@@ -147,8 +151,29 @@ function flagMissingSnapshot(g) {
       stage: 'restore',
       kind: 'snapshot',
       severity: 'warn',
-      message: 'Restored from an older session. Re-import from ABS before pushing this book.',
+      message: NEEDS_REIMPORT_MESSAGE,
     },
+  };
+}
+
+/**
+ * I-6: the toast after a session restore. When books came from an older
+ * session (needs_reimport) it is a warning that says they cannot be pushed
+ * and that re-importing discards their unpushed edits. Same shape as
+ * summarizeBatch: toast[type](title, message).
+ */
+export function restoreToast(groups) {
+  const list = Array.isArray(groups) ? groups : [];
+  const n = list.length;
+  const books = `${n} book${n === 1 ? '' : 's'}`;
+  const stale = list.filter((g) => g?.needs_reimport === true).length;
+  if (stale === 0) {
+    return { type: 'success', title: 'Session Restored', message: `Brought back ${books} from your last session.` };
+  }
+  return {
+    type: 'warning',
+    title: 'Session Restored',
+    message: `Brought back ${books} from your last session. ${stale} ${stale === 1 ? 'book came' : 'books came'} from an older session and cannot be pushed until re-imported from AudiobookShelf. Re-importing discards their unpushed edits.`,
   };
 }
 

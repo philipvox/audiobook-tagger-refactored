@@ -2,7 +2,8 @@ import { useState, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { useToast } from './Toast';
 import { X, ArrowRight, ArrowLeft, Shield, Server, Key, Download, Check, Sparkles, AlertTriangle, FolderOpen } from 'lucide-react';
-import { hasAiProvider, mergeAbsPull, mergeAbsPullGroups, importFromAbsWithNotice } from '../hooks/useScan';
+import { hasAiProvider, mergeAbsPull, mergeAbsPullGroups, importFromAbsWithNotice, confirmReimportDiscard } from '../hooks/useScan';
+import { startCancellable, finishCancellable, requestCancel } from '../lib/cancel';
 import { prepareConfigForSave, DEFAULT_OPENAI_MODEL } from '../lib/configSave';
 
 const ONBOARDING_KEY = 'audiobook_tagger_onboarding_completed';
@@ -205,13 +206,26 @@ export function SetupWizard({ onClose }) {
 
   // H-10: the imported groups go into the workspace through the same merge
   // the Library import uses, so staged edits are never clobbered.
+  // M-m: the running import's cancel token; closing the wizard cancels it.
+  const importCancelRef = useRef(null);
   const runImport = async () => {
+    // I-6: same question as the Library import before discarding edits.
+    if (!(await confirmReimportDiscard(groupsRef.current || []))) return { success: false, declined: true };
     const cfg = await saveWizardConfig();
     const { importLibrary } = await import('../lib/abs-client');
-    const imported = await importLibrary(cfg, (current) => setImportProgress(current || 0));
-    const { refreshed } = mergeAbsPull(groupsRef.current || [], imported);
-    setGroups(prev => mergeAbsPullGroups(prev, imported));
-    return { success: true, count: imported.length, refreshed };
+    const token = startCancellable();
+    importCancelRef.current = token;
+    try {
+      const imported = await importLibrary(cfg, (current) => setImportProgress(current || 0), { shouldStop: () => token.cancelled });
+      // A cancelled import leaves the workspace as it was.
+      if (token.cancelled) return { success: false, cancelled: true };
+      const { refreshed } = mergeAbsPull(groupsRef.current || [], imported);
+      setGroups(prev => mergeAbsPullGroups(prev, imported));
+      return { success: true, count: imported.length, refreshed };
+    } finally {
+      finishCancellable(token);
+      if (importCancelRef.current === token) importCancelRef.current = null;
+    }
   };
 
   const handleImport = async () => {
@@ -251,6 +265,7 @@ export function SetupWizard({ onClose }) {
   };
 
   const handleClose = () => {
+    if (importCancelRef.current) requestCancel(importCancelRef.current);
     markOnboardingComplete();
     saveConfig(prepareConfigForSave(localConfig));
     onClose();
@@ -271,7 +286,7 @@ export function SetupWizard({ onClose }) {
             </div>
             <p className="text-sm text-gray-400">{STEPS[step].subtitle}</p>
           </div>
-          <button onClick={handleClose} className="p-1.5 hover:bg-neutral-800 rounded-lg transition-colors">
+          <button onClick={handleClose} aria-label="Close" className="p-1.5 hover:bg-neutral-800 rounded-lg transition-colors">
             <X className="w-4 h-4 text-gray-500" />
           </button>
         </div>

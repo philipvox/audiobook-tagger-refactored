@@ -8,6 +8,7 @@
 // lastError already says the same thing.
 
 import { UNRESOLVED_SERIES_IMPORT_MESSAGE } from './absPayload.js';
+import { NEEDS_REIMPORT_MESSAGE } from './session.js';
 
 /** The standing warnings to show beside `group.lastError`, as errorDetails. */
 export function standingWarnings(group) {
@@ -16,6 +17,10 @@ export function standingWarnings(group) {
   const last = group.lastError;
   if (group.metadata?.series_unresolved === true && last?.kind !== 'series') {
     out.push({ stage: 'import', kind: 'series', severity: 'warn', message: UNRESOLVED_SERIES_IMPORT_MESSAGE });
+  }
+  // I-6: a book restored without its import snapshot is never pushed.
+  if (group.needs_reimport === true && last?.kind !== 'snapshot') {
+    out.push({ stage: 'restore', kind: 'snapshot', severity: 'warn', message: NEEDS_REIMPORT_MESSAGE });
   }
   return out;
 }

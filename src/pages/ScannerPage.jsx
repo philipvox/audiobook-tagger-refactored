@@ -27,7 +27,7 @@ import { useModals } from '../hooks/useModals';
 import { useApp } from '../context/AppContext';
 import { severityForKind } from '../lib/errorDetail';
 import { summarizeBatch, scrollToFirstErrorGroup } from '../lib/batchToast';
-import { keepCurrentBooksToast } from '../lib/session.js';
+import { keepCurrentBooksToast, restoreToast } from '../lib/session.js';
 import { logEvent, logBatchStart, logBatchEnd } from '../lib/logEvent';
 import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePush } from '../lib/absPush';
 import { userClearedPatch } from '../lib/userCleared';
@@ -217,20 +217,21 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   // books. Same shape as pendingImport: replacing loaded books is destructive.
   const [pendingRestore, setPendingRestore] = useState(null);
 
-  const finishRestore = useCallback((result) => {
+  // `restoredGroups` are the groups the restore put in the workspace (the
+  // saved session's), read for I-6: books from an older session get a warning.
+  const finishRestore = useCallback((result, restoredGroups = []) => {
     if (!result?.restored) return;
     setSelectedGroup(null);
     setSelectedGroupIds(new Set());
     logEvent('session', 'restored previous session', { books: result.count });
     if (result.count > 0) {
-      toast.success(
-        'Session Restored',
-        `Brought back ${result.count} book${result.count === 1 ? '' : 's'} from your last session.`
-      );
+      const notice = restoreToast(restoredGroups.length > 0 ? restoredGroups : Array.from({ length: result.count }, () => ({})));
+      toast[notice.type](notice.title, notice.message);
     }
   }, [toast]);
 
   const handleRestoreSession = useCallback(() => {
+    const restoredGroups = savedSession?.groups || [];
     const result = restoreSession();
     // The prompt has no dismiss, so the user can scan or import while it is
     // still open. Restoring on top of that would throw the new work away with
@@ -239,14 +240,15 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       setPendingRestore(result);
       return;
     }
-    finishRestore(result);
-  }, [restoreSession, finishRestore]);
+    finishRestore(result, restoredGroups);
+  }, [restoreSession, finishRestore, savedSession]);
 
   const confirmRestoreSession = useCallback(() => {
+    const restoredGroups = savedSession?.groups || [];
     const result = restoreSession({ force: true });
     setPendingRestore(null);
-    finishRestore(result);
-  }, [restoreSession, finishRestore]);
+    finishRestore(result, restoredGroups);
+  }, [restoreSession, finishRestore, savedSession]);
 
   // "Keep current books": the declined snapshot moves to the second slot and
   // autosave resumes, so the user is neither stranded unprotected nor loses
@@ -315,7 +317,17 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
   // H-4/H-9/H-7: tell the user how an import ended: refreshed books, a
   // failure (with its message) or a cancel. Never rethrows (bound to onClick).
-  const handleImportFromAbsNotify = (...args) => importFromAbsWithNotice(handleImportFromAbs, toast, ...args);
+  // M-c: an import that changed the workspace clears the selection (as Scan
+  // Folder does), so old ids and a whole-library Select All do not carry over.
+  const handleImportFromAbsNotify = async (...args) => {
+    const result = await importFromAbsWithNotice(handleImportFromAbs, toast, ...args);
+    if (result?.success) {
+      clearSelection();
+      setSelectedGroupIds(new Set());
+      setSelectedGroup(null);
+    }
+    return result;
+  };
 
   // Keep selectedGroup in sync when groups are updated (e.g., after rescan)
   useEffect(() => {
