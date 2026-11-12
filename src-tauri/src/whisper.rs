@@ -7,10 +7,11 @@ use reqwest::multipart;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 use tempfile::NamedTempFile;
+use tokio::time::Instant;
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
@@ -52,6 +53,17 @@ pub struct AudioIntroResult {
     pub language: Option<String>,
     pub parse_method: String,
     pub confidence: f32,
+    /// "ok" (a transcript was produced), "failed", "cancelled" or "timed_out".
+    /// Defaults to "ok" for transcripts cached before this field existed.
+    #[serde(default = "status_ok")]
+    pub status: String,
+    /// Why the item failed, when it did.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+fn status_ok() -> String {
+    "ok".to_string()
 }
 
 /// Request for audio intro extraction
@@ -102,6 +114,9 @@ pub async fn extract_audio_intro(
         return Err("FFmpeg is not installed. Install it with: brew install ffmpeg".to_string());
     }
 
+    // A Cancel pressed during an earlier run must not cancel this one.
+    CANCELLED.store(false, Ordering::SeqCst);
+
     // Check cache unless the caller forces a fresh extraction.
     if !force.unwrap_or(false) {
         if let Some(cached) = get_cached_transcript(&request.item_id) {
@@ -133,15 +148,21 @@ pub async fn batch_extract_audio_intros(
     let mut cached_count = 0;
     let mut skipped_count = 0;
     let mut failed_count = 0;
+    let mut timed_out_count = 0;
+    let emit_cancelled = |done: usize, found: usize, cached: usize| {
+        let _ = window.emit("audio_intro_progress", serde_json::json!({
+            "current": done, "total": total, "found": found, "cached": cached,
+            "stage": "cancelled",
+            "status": format!("Cancelled after {} of {} books ({} found)", done, total, found),
+        }));
+    };
+    let mut cancel_reported = false;
 
     for (i, request) in items.into_iter().enumerate() {
         // Check if cancelled
         if CANCELLED.load(Ordering::SeqCst) {
-            let _ = window.emit("audio_intro_progress", serde_json::json!({
-                "current": i, "total": total, "found": found_count, "cached": cached_count,
-                "stage": "cancelled",
-                "status": format!("Cancelled after {} of {} books ({} found)", i, total, found_count),
-            }));
+            emit_cancelled(i, found_count, cached_count);
+            cancel_reported = true;
             break;
         }
 
@@ -172,6 +193,10 @@ pub async fn batch_extract_audio_intros(
         let result = extract_intro_metadata_with_stages(&request, &window, i + 1, total).await;
         if !result.narrators.is_empty() {
             found_count += 1;
+        } else if result.status == "cancelled" {
+            // Stopped by the user mid-item; the loop reports the cancel below.
+        } else if result.status == "timed_out" {
+            timed_out_count += 1;
         } else if result.transcript.is_none() {
             // No transcript at all: extraction/transcription failed.
             failed_count += 1;
@@ -185,12 +210,20 @@ pub async fn batch_extract_audio_intros(
     // Clean up any lingering temp files in the system temp dir
     cleanup_temp_files();
 
+    // Cancel pressed during the last item: that item stopped, say so.
+    if CANCELLED.load(Ordering::SeqCst) && !cancel_reported {
+        emit_cancelled(results.len(), found_count, cached_count);
+    }
+
     if !CANCELLED.load(Ordering::SeqCst) {
         let _ = window.emit("audio_intro_progress", serde_json::json!({
             "current": total, "total": total, "found": found_count, "cached": cached_count,
-            "skipped": skipped_count, "failed": failed_count,
+            "skipped": skipped_count, "failed": failed_count, "timed_out": timed_out_count,
             "stage": "complete",
-            "status": format!("Done! {} found, {} cached, {} skipped, {} failed", found_count, cached_count, skipped_count, failed_count),
+            "status": format!(
+                "Done! {} found, {} cached, {} skipped, {} failed, {} timed out",
+                found_count, cached_count, skipped_count, failed_count, timed_out_count
+            ),
         }));
     }
 
@@ -199,17 +232,50 @@ pub async fn batch_extract_audio_intros(
 
 // ---- Pipeline ----
 
-/// Pipeline with stage-by-stage progress events
-/// Tries multiple time windows if first pass finds nothing useful
+/// Pipeline with stage-by-stage progress events.
+/// Tries multiple time windows if first pass finds nothing useful.
+/// The whole item (download, every FFmpeg pass, transcription, parsing) gets
+/// ITEM_TIMEOUT and stops as soon as Cancel is pressed; either outcome is
+/// reported in the result's `status`, not as a generic failure.
 async fn extract_intro_metadata_with_stages(
     request: &AudioIntroRequest,
     window: &tauri::Window,
     current: usize,
     total: usize,
 ) -> AudioIntroResult {
+    let deadline = Instant::now() + ITEM_TIMEOUT;
+    match run_intro_passes(request, window, current, total, deadline).await {
+        Ok(result) => result,
+        Err(e) => {
+            println!("   Audio intro for {} stopped: {:?}", request.item_id, e);
+            step_error_result(&request.item_id, &e)
+        }
+    }
+}
+
+async fn run_intro_passes(
+    request: &AudioIntroRequest,
+    window: &tauri::Window,
+    current: usize,
+    total: usize,
+    deadline: Instant,
+) -> Result<AudioIntroResult, StepError> {
     use tauri::Emitter;
     let item_id = request.item_id.clone();
     let title = request.title.as_deref().unwrap_or(&item_id);
+
+    // ABS audio is fetched once per item (a bounded prefix, see
+    // fetch_intro_bytes) into a private temp file and every pass reads that.
+    // Local files are read in place.
+    let abs_input = if request.source == "abs" {
+        Some(fetch_abs_intro(request, deadline).await?)
+    } else {
+        None
+    };
+    let (input_path, seek_input) = match &abs_input {
+        Some(tmp) => (tmp.path().to_string_lossy().into_owned(), true),
+        None => (request.file_path.clone().unwrap_or_default(), false),
+    };
 
     // Try progressively deeper into the audio if first pass finds nothing
     // Pass 1: 0-60s (most intros are here)
@@ -223,6 +289,7 @@ async fn extract_intro_metadata_with_stages(
 
     for (pass_idx, &(start_secs, duration_secs, label)) in time_windows.iter().enumerate() {
         let is_retry = pass_idx > 0;
+        let is_last = pass_idx == time_windows.len() - 1;
 
         let _ = window.emit("audio_intro_progress", serde_json::json!({
             "current": current, "total": total,
@@ -230,30 +297,39 @@ async fn extract_intro_metadata_with_stages(
             "status": format!("{}: {} ({})", if is_retry { "Deep scan" } else { "Extracting" }, title, label),
         }));
 
-        let result = try_extract_at_offset(request, window, current, total, start_secs, duration_secs).await;
+        let pass = try_extract_at_offset(
+            request, &input_path, seek_input, window, current, total, start_secs, duration_secs, deadline,
+        )
+        .await;
 
-        // Consider it a good result if we found at least 2 useful fields
-        let fields_found = [
-            result.title.is_some(),
-            !result.narrators.is_empty(),
-            !result.authors.is_empty(),
-            result.publisher.is_some() || result.audio_publisher.is_some(),
-        ].iter().filter(|&&v| v).count();
+        match pass {
+            Ok(result) => {
+                // Consider it a good result if we found at least 2 useful fields
+                let fields_found = [
+                    result.title.is_some(),
+                    !result.narrators.is_empty(),
+                    !result.authors.is_empty(),
+                    result.publisher.is_some() || result.audio_publisher.is_some(),
+                ].iter().filter(|&&v| v).count();
 
-        if fields_found >= 2 {
-            cache_if_worthwhile(&result);
-            return result;
+                // On the last pass return whatever we got. Only real transcripts
+                // are cached, so a transient failure isn't remembered forever.
+                if fields_found >= 2 || is_last {
+                    cache_if_worthwhile(&result);
+                    return Ok(result);
+                }
+            }
+            // A failed pass falls through to the next window, as before.
+            Err(StepError::Failed(msg)) => {
+                println!("   Pass {} failed for {}: {}", label, item_id, msg);
+                if is_last {
+                    return Err(StepError::Failed(msg));
+                }
+            }
+            // Cancelled or timed out: stop the item now.
+            Err(e) => return Err(e),
         }
 
-        // If this is the last pass, return whatever we got (even if empty).
-        // Only cache real transcripts; never cache empty/error results so a
-        // transient failure isn't remembered forever.
-        if pass_idx == time_windows.len() - 1 {
-            cache_if_worthwhile(&result);
-            return result;
-        }
-
-        // Otherwise, try next window
         let _ = window.emit("audio_intro_progress", serde_json::json!({
             "current": current, "total": total,
             "stage": "deep_scan",
@@ -262,18 +338,22 @@ async fn extract_intro_metadata_with_stages(
     }
 
     // Should not reach here, but just in case
-    empty_result(&item_id)
+    Ok(empty_result(&item_id))
 }
 
 /// Try extracting metadata from a specific time window in the audio
+#[allow(clippy::too_many_arguments)]
 async fn try_extract_at_offset(
     request: &AudioIntroRequest,
+    input_path: &str,
+    seek_input: bool,
     window: &tauri::Window,
     current: usize,
     total: usize,
     start_secs: u32,
     duration_secs: u32,
-) -> AudioIntroResult {
+    deadline: Instant,
+) -> Result<AudioIntroResult, StepError> {
     use tauri::Emitter;
     let item_id = request.item_id.clone();
     let title = request.title.as_deref().unwrap_or(&item_id);
@@ -288,48 +368,18 @@ async fn try_extract_at_offset(
         (".mp3", "mp3")
     };
 
-    let temp_audio = match NamedTempFile::with_suffix(out_suffix) {
-        Ok(f) => f,
-        Err(e) => {
-            println!("   Temp file error for {}: {}", item_id, e);
-            return empty_result(&item_id);
-        }
-    };
+    let temp_audio = NamedTempFile::with_suffix(out_suffix)
+        .map_err(|e| StepError::Failed(format!("Temp file error: {}", e)))?;
     let out_path = temp_audio.path().to_string_lossy().to_string();
     register_temp_file(&out_path);
     // whisper-cpp may drop a sidecar transcript next to the audio file.
     register_temp_file(&format!("{}.txt", out_path));
 
-    // Build FFmpeg input: stream from ABS URL or read local file
-    let extract_result = if request.source == "abs" {
-        // Stream directly from ABS - FFmpeg fetches only what it needs (no full download)
-        let abs_url = match build_abs_audio_url(request).await {
-            Ok(url) => url,
-            Err(e) => {
-                println!("   ABS URL error for {}: {}", item_id, e);
-                return empty_result(&item_id);
-            }
-        };
-        let token = request.abs_api_token.as_deref().unwrap_or("");
-
-        extract_audio_from_url_with_offset(&abs_url, token, &out_path, start_secs, duration_secs, out_format)
-    } else {
-        // Local file
-        let local_path = request.file_path.as_deref().unwrap_or("");
-        extract_audio_segment(local_path, &out_path, start_secs, duration_secs, out_format)
-    };
-
-    if let Err(e) = extract_result {
-        println!("   FFmpeg error for {}: {}", item_id, e);
-        return empty_result(&item_id);
-    }
+    extract_audio_segment(input_path, &out_path, start_secs, duration_secs, out_format, seek_input, deadline).await?;
 
     let audio_data = match std::fs::read(&out_path) {
         Ok(data) if data.len() > 100 => data,
-        _ => {
-            println!("   Extracted audio too small for {}", item_id);
-            return empty_result(&item_id);
-        }
+        _ => return Err(StepError::Failed("Extracted audio is too small".to_string())),
     };
 
     // Stage: transcribing
@@ -340,17 +390,17 @@ async fn try_extract_at_offset(
             "status": format!("Local Whisper: {}", title),
         }));
 
-        match crate::whisper_local::transcribe_local(&out_path, whisper_model) {
+        match crate::whisper_local::transcribe_local(&out_path, whisper_model, deadline, &CANCELLED).await {
             Ok((text, lang)) => (text, lang),
-            Err(e) => {
-                println!("   Local whisper failed for {}: {}", item_id, e);
+            Err(StepError::Failed(e)) => {
                 let _ = window.emit("audio_intro_progress", serde_json::json!({
                     "current": current, "total": total,
                     "stage": "error",
                     "status": format!("Local Whisper failed: {}", e),
                 }));
-                return empty_result(&item_id);
+                return Err(StepError::Failed(format!("Local Whisper failed: {}", e)));
             }
+            Err(e) => return Err(e),
         }
     } else {
         let _ = window.emit("audio_intro_progress", serde_json::json!({
@@ -359,23 +409,21 @@ async fn try_extract_at_offset(
             "status": format!("Whisper transcribing: {}", title),
         }));
 
-        match try_cloud_whisper(&audio_data, request.openai_api_key.as_deref()).await {
-            Ok(r) => (r.text, r.language),
-            Err(e) => {
-                println!("   Whisper API error for {}: {}", item_id, e);
-                return empty_result(&item_id);
-            }
-        }
+        let r = bounded(try_cloud_whisper(&audio_data, request.openai_api_key.as_deref()), deadline, &CANCELLED)
+            .await?
+            .map_err(|e| StepError::Failed(format!("Whisper API error: {}", e)))?;
+        (r.text, r.language)
     };
 
     if transcript.len() < 20 {
-        return AudioIntroResult {
+        return Ok(AudioIntroResult {
             item_id, transcript: Some(transcript), title: None, subtitle: None,
             narrators: vec![], authors: vec![],
             publisher: None, audio_publisher: None,
             language: detected_language,
             parse_method: "none".to_string(), confidence: 0.0,
-        };
+            status: status_ok(), error: None,
+        });
     }
 
     // Stage: parsing
@@ -386,7 +434,7 @@ async fn try_extract_at_offset(
     }));
 
     // Try LLM parsing first (more accurate), fall back to regex
-    let (extracted, method) = match try_llm_parse(&transcript, request).await {
+    let (extracted, method) = match bounded(try_llm_parse(&transcript, request), deadline, &CANCELLED).await? {
         Ok(info) => (info, "llm"),
         Err(e) => {
             println!("   LLM parse failed, using regex: {}", e);
@@ -401,7 +449,7 @@ async fn try_extract_at_offset(
 
     let confidence = calculate_confidence(&extracted);
 
-    let result = AudioIntroResult {
+    Ok(AudioIntroResult {
         item_id, transcript: Some(transcript),
         title: extracted.title,
         subtitle: extracted.subtitle,
@@ -411,12 +459,380 @@ async fn try_extract_at_offset(
         language: detected_language,
         parse_method: method.to_string(),
         confidence,
-    };
-
-    result
+        status: status_ok(),
+        error: None,
+    })
 }
 
-// ---- Audio streaming + extraction ----
+// ---- Child processes, timeouts and cancellation ----
+
+/// End-to-end budget for one audio intro item.
+const ITEM_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// How often a running step checks the Cancel flag.
+const CANCEL_POLL: Duration = Duration::from_millis(200);
+
+/// Windows CREATE_NO_WINDOW: a GUI app's children must not flash a console.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Why a step of the pipeline stopped.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum StepError {
+    Cancelled,
+    TimedOut,
+    Failed(String),
+}
+
+/// A tokio command that never opens a console window on Windows and is killed
+/// if its handle is dropped (timeout, cancel, or the caller going away).
+pub(crate) fn tokio_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.kill_on_drop(true);
+    cmd
+}
+
+/// A std command for short lookups (`which`/`where`) that never opens a
+/// console window on Windows.
+pub(crate) fn std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Run `fut` until it finishes, `deadline` passes, or `cancel` is set
+/// (checked every CANCEL_POLL while it runs). On timeout or cancel the future
+/// is dropped, which aborts a request or kills a kill_on_drop child.
+pub(crate) async fn bounded<F: std::future::Future>(
+    fut: F,
+    deadline: Instant,
+    cancel: &AtomicBool,
+) -> Result<F::Output, StepError> {
+    tokio::pin!(fut);
+    let mut tick = tokio::time::interval(CANCEL_POLL);
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(StepError::Cancelled);
+        }
+        tokio::select! {
+            biased;
+            out = &mut fut => return Ok(out),
+            _ = tokio::time::sleep_until(deadline) => return Err(StepError::TimedOut),
+            _ = tick.tick() => {}
+        }
+    }
+}
+
+/// Spawn `cmd` (stdin closed, output captured) and wait for it within
+/// `deadline`, killing it on timeout or cancel.
+pub(crate) async fn run_child(
+    mut cmd: tokio::process::Command,
+    deadline: Instant,
+    cancel: &AtomicBool,
+) -> Result<std::process::Output, StepError> {
+    use std::process::Stdio;
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let program = cmd.as_std().get_program().to_string_lossy().into_owned();
+    let child = cmd
+        .spawn()
+        .map_err(|e| StepError::Failed(format!("{} failed to start: {}", program, e)))?;
+    bounded(child.wait_with_output(), deadline, cancel)
+        .await?
+        .map_err(|e| StepError::Failed(format!("{} failed: {}", program, e)))
+}
+
+/// The last `max` bytes of a child's stderr, for error messages.
+pub(crate) fn stderr_tail(stderr: &[u8], max: usize) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim();
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut start = text.len() - max;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("...{}", &text[start..])
+}
+
+// ---- Audio fetch + extraction ----
+
+/// Bytes fetched from the start of an ABS audio file. 3 minutes of audio is
+/// under 8 MB at 320 kbps and about 20 MB for CD-quality lossless; this also
+/// covers a large ID3 tag with cover art in front of an mp3.
+const INTRO_HEAD_BYTES: u64 = 24 * 1024 * 1024;
+
+/// Largest MP4 index (moov) we will fetch. A 40-hour single-track m4b has a
+/// sample table of roughly 25 MB.
+const MOOV_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Top-level MP4 boxes walked while looking for the index.
+const MAX_TOP_LEVEL_BOXES: usize = 64;
+
+/// Random-access reads from an audio file (ABS over HTTP, or memory in tests).
+trait RangeSource {
+    /// Up to `len` bytes starting at `start`; fewer only at the end of the file.
+    async fn read(&mut self, start: u64, len: u64) -> Result<Vec<u8>, StepError>;
+    /// The file's total size, once a read has revealed it.
+    fn total(&self) -> Option<u64>;
+}
+
+/// One top-level MP4 box header.
+#[derive(Debug, Clone, Copy)]
+struct BoxHeader {
+    offset: u64,
+    /// Whole box including the header; 0 means "runs to end of file".
+    size: u64,
+    header_len: u64,
+    kind: [u8; 4],
+}
+
+fn parse_box_header(bytes: &[u8], offset: u64) -> Option<BoxHeader> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let size32 = u32::from_be_bytes(bytes[0..4].try_into().ok()?) as u64;
+    let kind: [u8; 4] = bytes[4..8].try_into().ok()?;
+    let (size, header_len) = match size32 {
+        1 => {
+            if bytes.len() < 16 {
+                return None;
+            }
+            (u64::from_be_bytes(bytes[8..16].try_into().ok()?), 16)
+        }
+        0 => (0, 8),
+        n => (n, 8),
+    };
+    if size != 0 && size < header_len {
+        return None;
+    }
+    Some(BoxHeader { offset, size, header_len, kind })
+}
+
+/// Fetch just enough of an audio file for FFmpeg to decode its first minutes,
+/// never more than `head_budget + moov_cap` plus a few box headers.
+///
+/// Non-MP4 formats (mp3, flac, ogg) decode from a plain prefix. An MP4/M4B
+/// also needs its index (the moov box), which is often at the end of the file.
+/// In that case the result is the prefix with the box that runs past it (the
+/// media data) shortened to end at the prefix, followed by the moov box. The
+/// sample offsets in moov are absolute, and the samples for the first minutes
+/// lie inside the prefix, which keeps its real offsets, so FFmpeg can decode
+/// them. When the index comes first but is bigger than the prefix, the prefix
+/// is extended to the end of the index plus `head_budget`.
+async fn fetch_intro_bytes<S: RangeSource>(
+    src: &mut S,
+    head_budget: u64,
+    moov_cap: u64,
+) -> Result<Vec<u8>, StepError> {
+    let mut head = src.read(0, head_budget).await?;
+    let is_mp4 = head.len() >= 8 && &head[4..8] == b"ftyp";
+    if !is_mp4 || (head.len() as u64) < head_budget {
+        // Not MP4 (a prefix is enough), or the whole file already fits.
+        return Ok(head);
+    }
+    let head_len = head.len() as u64;
+
+    let mut offset = 0u64;
+    // The box that starts inside the prefix and runs past its end.
+    let mut straddler: Option<BoxHeader> = None;
+    for _ in 0..MAX_TOP_LEVEL_BOXES {
+        let header_bytes = if offset + 16 <= head_len {
+            head[offset as usize..offset as usize + 16].to_vec()
+        } else {
+            src.read(offset, 16).await?
+        };
+        let mut b = parse_box_header(&header_bytes, offset)
+            .ok_or_else(|| StepError::Failed(format!("Unreadable MP4 box at byte {}", offset)))?;
+
+        if &b.kind == b"moov" {
+            if b.size == 0 {
+                let total = src.total().ok_or_else(|| {
+                    StepError::Failed("MP4 index size unknown".to_string())
+                })?;
+                b.size = total.saturating_sub(offset);
+            }
+            if b.size > moov_cap {
+                return Err(StepError::Failed(format!(
+                    "MP4 index is {} MB, larger than the {} MB limit",
+                    b.size / 1_000_000,
+                    moov_cap / 1_000_000
+                )));
+            }
+            let end = offset + b.size;
+            if end <= head_len {
+                return Ok(head);
+            }
+            if offset < head_len {
+                // Index first but larger than the prefix: extend past it.
+                let want_end = end + head_budget;
+                let more = src.read(head_len, want_end - head_len).await?;
+                if (head_len + more.len() as u64) < end {
+                    return Err(StepError::Failed("MP4 index was cut short".to_string()));
+                }
+                head.extend_from_slice(&more);
+                return Ok(head);
+            }
+            // Index after the prefix (not "faststart"): fetch it and append.
+            let moov = src.read(offset, b.size).await?;
+            if moov.len() as u64 != b.size {
+                return Err(StepError::Failed("MP4 index was cut short".to_string()));
+            }
+            if let Some(s) = straddler {
+                let new_size = head_len - s.offset;
+                if new_size < s.header_len {
+                    head.truncate(s.offset as usize);
+                } else if s.header_len == 16 {
+                    head[s.offset as usize + 8..s.offset as usize + 16]
+                        .copy_from_slice(&new_size.to_be_bytes());
+                } else {
+                    head[s.offset as usize..s.offset as usize + 4]
+                        .copy_from_slice(&(new_size as u32).to_be_bytes());
+                }
+            }
+            head.extend_from_slice(&moov);
+            return Ok(head);
+        }
+
+        if b.size == 0 {
+            return Err(StepError::Failed(
+                "MP4 has no index before data that runs to the end of the file".to_string(),
+            ));
+        }
+        let end = offset + b.size;
+        if offset < head_len && end > head_len {
+            straddler = Some(b);
+        }
+        offset = end;
+        if src.total().is_some_and(|t| offset >= t) {
+            break;
+        }
+    }
+    Err(StepError::Failed("MP4 index (moov) not found".to_string()))
+}
+
+/// Ranged reads from the ABS file endpoint. The token travels only in the
+/// Authorization header of our own requests, never in a child's argv.
+struct AbsRangeSource {
+    client: reqwest::Client,
+    url: String,
+    token: String,
+    total: Option<u64>,
+    deadline: Instant,
+}
+
+impl RangeSource for AbsRangeSource {
+    async fn read(&mut self, start: u64, len: u64) -> Result<Vec<u8>, StepError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let request = self
+            .client
+            .get(&self.url)
+            .bearer_auth(&self.token)
+            .header(reqwest::header::RANGE, format!("bytes={}-{}", start, start + len - 1))
+            .send();
+        let resp = bounded(request, self.deadline, &CANCELLED)
+            .await?
+            .map_err(|e| StepError::Failed(format!("ABS audio download failed: {}", e)))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            return Ok(Vec::new()); // start is past the end of the file
+        }
+        if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            if let Some(total) = resp
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_content_range_total)
+            {
+                self.total = Some(total);
+            }
+        } else if status.is_success() {
+            // The server ignored Range and is sending the whole file. Fine for
+            // the prefix (we stop reading at `len`), useless for anything else.
+            if start != 0 {
+                return Err(StepError::Failed(
+                    "ABS server does not support byte-range requests".to_string(),
+                ));
+            }
+            self.total = resp.content_length();
+        } else {
+            return Err(StepError::Failed(format!("ABS audio download failed: HTTP {}", status)));
+        }
+
+        use futures::StreamExt;
+        let mut buf: Vec<u8> = Vec::with_capacity(len.min(INTRO_HEAD_BYTES) as usize);
+        let mut stream = resp.bytes_stream();
+        while (buf.len() as u64) < len {
+            match bounded(stream.next(), self.deadline, &CANCELLED).await? {
+                Some(Ok(chunk)) => {
+                    let room = (len - buf.len() as u64) as usize;
+                    buf.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                }
+                Some(Err(e)) => {
+                    return Err(StepError::Failed(format!("ABS audio download failed: {}", e)))
+                }
+                None => break,
+            }
+        }
+        Ok(buf)
+    }
+
+    fn total(&self) -> Option<u64> {
+        self.total
+    }
+}
+
+/// "bytes 0-1023/146515" -> 146515
+fn parse_content_range_total(value: &str) -> Option<u64> {
+    value.rsplit('/').next()?.trim().parse().ok()
+}
+
+/// Fetch the opening of an ABS audio file into a private temp file (0600 on
+/// Unix; removed when dropped). A temp file rather than FFmpeg's stdin because
+/// MP4/M4B demuxing needs to seek to the index.
+async fn fetch_abs_intro(request: &AudioIntroRequest, deadline: Instant) -> Result<NamedTempFile, StepError> {
+    use std::io::Write;
+    let url = bounded(build_abs_audio_url(request), deadline, &CANCELLED)
+        .await?
+        .map_err(|e| StepError::Failed(format!("ABS URL error: {}", e)))?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| StepError::Failed(format!("HTTP error: {}", e)))?;
+    let mut src = AbsRangeSource {
+        client,
+        url,
+        token: request.abs_api_token.clone().unwrap_or_default(),
+        total: None,
+        deadline,
+    };
+    let bytes = fetch_intro_bytes(&mut src, INTRO_HEAD_BYTES, MOOV_MAX_BYTES).await?;
+    if bytes.is_empty() {
+        return Err(StepError::Failed("ABS returned no audio".to_string()));
+    }
+
+    let mut tmp = NamedTempFile::with_suffix(".audio")
+        .map_err(|e| StepError::Failed(format!("Temp file error: {}", e)))?;
+    register_temp_file(&tmp.path().to_string_lossy());
+    tmp.write_all(&bytes)
+        .and_then(|_| tmp.flush())
+        .map_err(|e| StepError::Failed(format!("Temp file write error: {}", e)))?;
+    Ok(tmp)
+}
 
 /// Build the ABS audio URL for streaming (resolves file_ino if needed)
 async fn build_abs_audio_url(request: &AudioIntroRequest) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -450,20 +866,27 @@ async fn build_abs_audio_url(request: &AudioIntroRequest) -> Result<String, Box<
     Ok(format!("{}/api/items/{}/file/{}", base_url.trim_end_matches('/'), request.item_id, ino))
 }
 
-/// Extract audio from an HTTP URL using FFmpeg streaming (no full download)
-fn extract_audio_from_url_with_offset(
-    url: &str, auth_token: &str, output_path: &str, start_secs: u32, duration_secs: u32, format: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut args = vec![
-        "-y".to_string(),
-        "-headers".to_string(), format!("Authorization: Bearer {}\r\n", auth_token),
-        "-ss".to_string(), start_secs.to_string(),
-        "-i".to_string(), url.to_string(),
+/// FFmpeg arguments to cut `duration_secs` from `start_secs` of a local file.
+/// `seek_input` puts -ss before -i (fast seek; used for the fetched ABS file,
+/// as the old URL path did). The input is always a local path: no URL, no
+/// headers, no credentials.
+fn ffmpeg_args(
+    input_path: &str, output_path: &str, start_secs: u32, duration_secs: u32, format: &str, seek_input: bool,
+) -> Vec<String> {
+    let mut args = vec!["-y".to_string()];
+    if seek_input {
+        args.extend(["-ss".to_string(), start_secs.to_string()]);
+        args.extend(["-i".to_string(), input_path.to_string()]);
+    } else {
+        args.extend(["-i".to_string(), input_path.to_string()]);
+        args.extend(["-ss".to_string(), start_secs.to_string()]);
+    }
+    args.extend([
         "-t".to_string(), duration_secs.to_string(),
         "-vn".to_string(),
         "-ar".to_string(), "16000".to_string(),
         "-ac".to_string(), "1".to_string(),
-    ];
+    ]);
 
     if format == "wav" {
         args.extend(["-f".to_string(), "wav".to_string()]);
@@ -472,61 +895,28 @@ fn extract_audio_from_url_with_offset(
     }
 
     args.push(output_path.to_string());
-
-    let output = ffmpeg_cmd()
-        .ok_or("FFmpeg not found")?
-        .args(&args)
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("FFmpeg stream failed: {}", stderr).into());
-    }
-    if std::fs::metadata(output_path)?.len() == 0 {
-        return Err("FFmpeg produced empty output".into());
-    }
-    Ok(())
+    args
 }
 
-/// Extract first N seconds from a local file using FFmpeg
-fn extract_audio_segment(
+/// Cut a window of audio with FFmpeg, bounded by `deadline` and Cancel.
+async fn extract_audio_segment(
     input_path: &str, output_path: &str, start_secs: u32, duration_secs: u32, format: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut args = vec![
-        "-y".to_string(),
-        "-i".to_string(), input_path.to_string(),
-        "-ss".to_string(), start_secs.to_string(),
-        "-t".to_string(), duration_secs.to_string(),
-        "-vn".to_string(),
-        "-ar".to_string(), "16000".to_string(),
-        "-ac".to_string(), "1".to_string(),
-    ];
+    seek_input: bool, deadline: Instant,
+) -> Result<(), StepError> {
+    let ffmpeg = crate::whisper_local::find_ffmpeg_binary()
+        .ok_or_else(|| StepError::Failed("FFmpeg not found".to_string()))?;
+    let mut cmd = tokio_command(ffmpeg);
+    cmd.args(ffmpeg_args(input_path, output_path, start_secs, duration_secs, format, seek_input));
 
-    if format == "wav" {
-        args.extend(["-f".to_string(), "wav".to_string()]);
-    } else {
-        args.extend(["-acodec".to_string(), "libmp3lame".to_string(), "-q:a".to_string(), "9".to_string()]);
-    }
-
-    args.push(output_path.to_string());
-
-    let output = ffmpeg_cmd()
-        .ok_or("FFmpeg not found")?
-        .args(&args)
-        .output()?;
-
+    let output = run_child(cmd, deadline, &CANCELLED).await?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("FFmpeg failed: {}", stderr).into());
+        return Err(StepError::Failed(format!("FFmpeg failed: {}", stderr_tail(&output.stderr, 1000))));
     }
-    if std::fs::metadata(output_path)?.len() == 0 {
-        return Err("FFmpeg produced empty output".into());
+    let len = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+    if len == 0 {
+        return Err(StepError::Failed("FFmpeg produced empty output".to_string()));
     }
     Ok(())
-}
-
-fn ffmpeg_cmd() -> Option<Command> {
-    crate::whisper_local::find_ffmpeg_binary().map(Command::new)
 }
 
 fn check_ffmpeg_available() -> bool {
@@ -976,12 +1366,319 @@ fn empty_result(item_id: &str) -> AudioIntroResult {
         narrators: vec![], authors: vec![],
         publisher: None, audio_publisher: None, language: None,
         parse_method: "none".to_string(), confidence: 0.0,
+        status: "failed".to_string(), error: None,
     }
+}
+
+/// The per-item result for an item that stopped early.
+fn step_error_result(item_id: &str, err: &StepError) -> AudioIntroResult {
+    let mut result = empty_result(item_id);
+    match err {
+        StepError::Cancelled => {
+            result.status = "cancelled".to_string();
+            result.error = Some("Cancelled".to_string());
+        }
+        StepError::TimedOut => {
+            result.status = "timed_out".to_string();
+            result.error = Some(format!("Timed out after {} minutes", ITEM_TIMEOUT.as_secs() / 60));
+        }
+        StepError::Failed(msg) => {
+            result.status = "failed".to_string();
+            result.error = Some(msg.clone());
+        }
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Bounded fetch of the opening of an audio file ----
+
+    /// In-memory file that counts the bytes it hands out.
+    struct MemSource {
+        data: Vec<u8>,
+        bytes_read: u64,
+        seen_total: bool,
+    }
+
+    impl MemSource {
+        fn new(data: Vec<u8>) -> Self {
+            MemSource { data, bytes_read: 0, seen_total: false }
+        }
+    }
+
+    impl RangeSource for MemSource {
+        async fn read(&mut self, start: u64, len: u64) -> Result<Vec<u8>, StepError> {
+            self.seen_total = true;
+            let start = (start as usize).min(self.data.len());
+            let end = (start + len as usize).min(self.data.len());
+            self.bytes_read += (end - start) as u64;
+            Ok(self.data[start..end].to_vec())
+        }
+        fn total(&self) -> Option<u64> {
+            self.seen_total.then_some(self.data.len() as u64)
+        }
+    }
+
+    fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut b = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b.extend_from_slice(payload);
+        b
+    }
+
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(f)
+    }
+
+    #[test]
+    fn mp4_with_index_at_end_fetches_prefix_and_index_only() {
+        let ftyp = mp4_box(b"ftyp", b"M4A \0\0\0\0M4A mp42");
+        let mdat = mp4_box(b"mdat", &vec![7u8; 10_000]);
+        let moov = mp4_box(b"moov", &[9u8; 100]);
+        let file = [ftyp.clone(), mdat, moov.clone()].concat();
+        let budget = 1000u64;
+
+        let mut src = MemSource::new(file.clone());
+        let out = run(fetch_intro_bytes(&mut src, budget, 1 << 20)).unwrap();
+
+        // Prefix at its real offsets, media box shortened to end there, index appended.
+        assert_eq!(out.len(), budget as usize + moov.len());
+        assert_eq!(&out[..ftyp.len()], &ftyp[..]);
+        let mdat_size = u32::from_be_bytes(out[ftyp.len()..ftyp.len() + 4].try_into().unwrap());
+        assert_eq!(mdat_size as usize, budget as usize - ftyp.len());
+        assert_eq!(&out[ftyp.len() + 8..budget as usize], &file[ftyp.len() + 8..budget as usize]);
+        assert_eq!(&out[budget as usize..], &moov[..]);
+        // Bounded: the prefix, one box header, and the index. Never the media.
+        assert!(src.bytes_read <= budget + 16 + moov.len() as u64, "read {}", src.bytes_read);
+    }
+
+    #[test]
+    fn mp4_with_64bit_media_box_is_patched() {
+        let ftyp = mp4_box(b"ftyp", b"M4A \0\0\0\0");
+        let payload = vec![5u8; 5000];
+        let mut mdat = 1u32.to_be_bytes().to_vec();
+        mdat.extend_from_slice(b"mdat");
+        mdat.extend_from_slice(&((payload.len() + 16) as u64).to_be_bytes());
+        mdat.extend_from_slice(&payload);
+        let moov = mp4_box(b"moov", &[3u8; 40]);
+        let file = [ftyp.clone(), mdat, moov.clone()].concat();
+
+        let mut src = MemSource::new(file);
+        let out = run(fetch_intro_bytes(&mut src, 500, 1 << 20)).unwrap();
+        let o = ftyp.len();
+        assert_eq!(u32::from_be_bytes(out[o..o + 4].try_into().unwrap()), 1);
+        assert_eq!(u64::from_be_bytes(out[o + 8..o + 16].try_into().unwrap()), (500 - o) as u64);
+        assert_eq!(&out[500..], &moov[..]);
+    }
+
+    #[test]
+    fn mp4_with_index_first_is_just_the_prefix() {
+        let ftyp = mp4_box(b"ftyp", b"M4A \0\0\0\0");
+        let moov = mp4_box(b"moov", &[9u8; 100]);
+        let mdat = mp4_box(b"mdat", &vec![7u8; 10_000]);
+        let file = [ftyp, moov, mdat].concat();
+        let mut src = MemSource::new(file.clone());
+        let out = run(fetch_intro_bytes(&mut src, 1000, 1 << 20)).unwrap();
+        assert_eq!(out, file[..1000]);
+        assert_eq!(src.bytes_read, 1000);
+    }
+
+    #[test]
+    fn mp4_with_large_index_first_extends_past_it() {
+        let ftyp = mp4_box(b"ftyp", b"M4A \0\0\0\0");
+        let moov = mp4_box(b"moov", &vec![9u8; 3000]);
+        let mdat = mp4_box(b"mdat", &vec![7u8; 10_000]);
+        let file = [ftyp.clone(), moov.clone(), mdat].concat();
+        let mut src = MemSource::new(file.clone());
+        let out = run(fetch_intro_bytes(&mut src, 1000, 1 << 20)).unwrap();
+        let moov_end = ftyp.len() + moov.len();
+        assert_eq!(out, file[..moov_end + 1000]);
+    }
+
+    #[test]
+    fn non_mp4_and_short_files_take_only_the_prefix() {
+        let mp3 = [b"ID3\x04".as_slice(), &vec![1u8; 5000]].concat();
+        let mut src = MemSource::new(mp3.clone());
+        assert_eq!(run(fetch_intro_bytes(&mut src, 1000, 1 << 20)).unwrap(), mp3[..1000]);
+        assert_eq!(src.bytes_read, 1000);
+
+        let small_m4b = [mp4_box(b"ftyp", b"M4A "), mp4_box(b"mdat", &[1u8; 50]), mp4_box(b"moov", &[2u8; 20])].concat();
+        let mut src = MemSource::new(small_m4b.clone());
+        assert_eq!(run(fetch_intro_bytes(&mut src, 1000, 1 << 20)).unwrap(), small_m4b);
+    }
+
+    #[test]
+    fn oversized_or_missing_mp4_index_is_refused() {
+        let ftyp = mp4_box(b"ftyp", b"M4A \0\0\0\0");
+        let file = [ftyp.clone(), mp4_box(b"mdat", &vec![7u8; 5000]), mp4_box(b"moov", &vec![9u8; 5000])].concat();
+        let mut src = MemSource::new(file);
+        let err = run(fetch_intro_bytes(&mut src, 1000, 2000)).unwrap_err();
+        assert!(matches!(err, StepError::Failed(ref m) if m.contains("limit")), "{err:?}");
+        assert!(src.bytes_read < 2000, "the oversized index is not downloaded");
+
+        let no_index = [ftyp, mp4_box(b"mdat", &vec![7u8; 5000])].concat();
+        let mut src = MemSource::new(no_index);
+        assert!(run(fetch_intro_bytes(&mut src, 1000, 1 << 20)).is_err());
+    }
+
+    #[test]
+    fn content_range_total_is_parsed() {
+        assert_eq!(parse_content_range_total("bytes 0-1023/146515"), Some(146515));
+        assert_eq!(parse_content_range_total("bytes 0-1023/*"), None);
+    }
+
+    #[test]
+    fn ffmpeg_reads_a_local_file_with_no_credentials() {
+        for seek_input in [true, false] {
+            let args = ffmpeg_args("/tmp/in.audio", "/tmp/out.wav", 60, 120, "wav", seek_input);
+            assert!(!args.iter().any(|a| a == "-headers" || a.contains("Authorization") || a.contains("Bearer")));
+            assert!(!args.iter().any(|a| a.contains("://")), "{args:?}");
+            let i = args.iter().position(|a| a == "-i").unwrap();
+            assert_eq!(args[i + 1], "/tmp/in.audio");
+            let ss = args.iter().position(|a| a == "-ss").unwrap();
+            assert_eq!(ss < i, seek_input);
+        }
+    }
+
+    // ---- Child processes: timeout and cancel ----
+
+    /// True if `pid` is still running. A killed child that has not been
+    /// reaped yet shows as a zombie ("Z"), which counts as stopped.
+    #[cfg(unix)]
+    fn pid_alive(pid: &str) -> bool {
+        let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", pid]).output().unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        !stat.is_empty() && !stat.starts_with('Z')
+    }
+
+    #[cfg(unix)]
+    fn sleeper(pidfile: &std::path::Path) -> tokio::process::Command {
+        let mut cmd = tokio_command("sh");
+        cmd.arg("-c").arg(format!("echo $$ > '{}'; exec sleep 30", pidfile.display()));
+        cmd
+    }
+
+    #[cfg(unix)]
+    fn wait_for_pid(pidfile: &std::path::Path) -> String {
+        for _ in 0..100 {
+            if let Ok(p) = std::fs::read_to_string(pidfile) {
+                if !p.trim().is_empty() {
+                    return p.trim().to_string();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("child never started");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_kills_a_running_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("pid");
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let started = std::time::Instant::now();
+        let res = run(async {
+            let flag = cancel.clone();
+            let pf = pidfile.clone();
+            let setter = tokio::spawn(async move {
+                while !pf.exists() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                flag.store(true, Ordering::SeqCst);
+            });
+            let r = run_child(sleeper(&pidfile), Instant::now() + Duration::from_secs(60), &cancel).await;
+            setter.await.unwrap();
+            r
+        });
+        assert_eq!(res.unwrap_err(), StepError::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let pid = wait_for_pid(&pidfile);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!pid_alive(&pid), "child {pid} still running after cancel");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_kills_a_running_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("pid");
+        let cancel = AtomicBool::new(false);
+        let res = run(run_child(sleeper(&pidfile), Instant::now() + Duration::from_millis(500), &cancel));
+        assert_eq!(res.unwrap_err(), StepError::TimedOut);
+        let pid = wait_for_pid(&pidfile);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!pid_alive(&pid), "child {pid} still running after timeout");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finished_child_output_is_returned() {
+        let mut cmd = tokio_command("sh");
+        cmd.arg("-c").arg("echo out; echo err >&2");
+        let out = run(run_child(cmd, Instant::now() + Duration::from_secs(10), &AtomicBool::new(false))).unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "out");
+        assert_eq!(stderr_tail(&out.stderr, 100), "err");
+    }
+
+    #[test]
+    fn cancelled_and_timed_out_items_say_so() {
+        let c = step_error_result("b1", &StepError::Cancelled);
+        assert_eq!((c.status.as_str(), c.transcript.is_none()), ("cancelled", true));
+        let t = step_error_result("b1", &StepError::TimedOut);
+        assert_eq!(t.status, "timed_out");
+        assert!(t.error.as_deref().unwrap().contains("10 minutes"));
+        let f = step_error_result("b1", &StepError::Failed("FFmpeg failed: boom".into()));
+        assert_eq!((f.status.as_str(), f.error.as_deref()), ("failed", Some("FFmpeg failed: boom")));
+
+        // A transcript cached before `status` existed still loads, as "ok".
+        let old = r#"{"item_id":"b1","transcript":"hi","title":null,"subtitle":null,"narrators":[],"authors":[],"publisher":null,"audio_publisher":null,"language":null,"parse_method":"regex","confidence":0.0}"#;
+        let r: AudioIntroResult = serde_json::from_str(old).unwrap();
+        assert_eq!((r.status.as_str(), r.error), ("ok", None));
+    }
+
+    /// End to end with the real FFmpeg (run with `--ignored`): an m4b whose
+    /// index is at the end, cut down by fetch_intro_bytes, still decodes its
+    /// opening window.
+    #[test]
+    #[ignore]
+    fn real_ffmpeg_decodes_fetched_intro_of_index_at_end_m4b() {
+        let ffmpeg = crate::whisper_local::find_ffmpeg_binary().expect("ffmpeg");
+        let tmp = tempfile::tempdir().unwrap();
+        let book = tmp.path().join("book.m4b");
+        // 40 minutes of 128 kbps AAC (about 38 MB), no faststart: moov at the end.
+        let st = std::process::Command::new(&ffmpeg)
+            .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2400",
+                   "-c:a", "aac", "-b:a", "128k", "-f", "ipod"])
+            .arg(&book).status().unwrap();
+        assert!(st.success());
+        let data = std::fs::read(&book).unwrap();
+        assert!(data.len() as u64 > INTRO_HEAD_BYTES, "test file must be bigger than the prefix");
+
+        let mut src = MemSource::new(data.clone());
+        let intro = run(fetch_intro_bytes(&mut src, INTRO_HEAD_BYTES, MOOV_MAX_BYTES)).unwrap();
+        assert!(src.bytes_read < INTRO_HEAD_BYTES + 2 * 1024 * 1024, "read {}", src.bytes_read);
+        let cut = tmp.path().join("intro.audio");
+        std::fs::write(&cut, &intro).unwrap();
+
+        for (start, dur) in [(0u32, 60u32), (60, 120), (0, 180)] {
+            let out = tmp.path().join(format!("o{start}-{dur}.wav"));
+            let o = std::process::Command::new(&ffmpeg)
+                .args(["-v", "error"])
+                .args(ffmpeg_args(cut.to_str().unwrap(), out.to_str().unwrap(), start, dur, "wav", true))
+                .output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            // No decode errors: every sample in the window came from real data.
+            assert_eq!(String::from_utf8_lossy(&o.stderr).trim(), "", "{start}+{dur}");
+            // 16 kHz mono s16 WAV: 32000 bytes per second, plus a header.
+            let len = std::fs::metadata(&out).unwrap().len();
+            assert!(len >= 32_000 * dur as u64, "{start}+{dur}: {len} bytes");
+        }
+    }
 
     // ---- Item 9: UTF-8-safe truncation ----
 
