@@ -437,20 +437,61 @@ pub fn sweep_temp_files(dir: &Path) -> usize {
     removed
 }
 
-/// True for a temp copy a tag write stages through: the current
-/// `.tagtmp-<uuid>.<ext>` form, and the older `.<name>.tagtmp-<uuid>.<ext>`
-/// form a crash before this naming change may have left behind.
+/// Audio extensions a temp copy can carry (the formats the scanner reads).
+const TEMP_AUDIO_EXTENSIONS: &[&str] = &["m4b", "m4a", "mp3", "flac", "ogg", "opus", "aac"];
+
+/// True only for a temp copy a tag write stages through, matched exactly so a
+/// user's own dot-file is never swept:
+///   current form  `.tagtmp-<32 lowercase hex>.<ext>`
+///   older form    `.<file name>.tagtmp-<32 lowercase hex>.<ext>`
+/// where `<ext>` is one audio extension.
 pub fn is_temp_file_name(name: &str) -> bool {
-    name.starts_with(TEMP_PREFIX) || (name.starts_with('.') && name.contains(TEMP_PREFIX))
+    let rest = match name.strip_prefix('.') {
+        Some(r) => r,
+        None => return false,
+    };
+    let (stem, ext) = match rest.rsplit_once('.') {
+        Some(parts) => parts,
+        None => return false,
+    };
+    if !TEMP_AUDIO_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
+        return false;
+    }
+    let tag = &TEMP_PREFIX[1..]; // "tagtmp-"
+    let hex = match stem.strip_prefix(tag) {
+        Some(h) => h,
+        None => match stem.rsplit_once(TEMP_PREFIX) {
+            Some((original, h)) if !original.is_empty() => h,
+            _ => return false,
+        },
+    };
+    hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 const LYRICS_COLLISION: &str = "multiple lyrics frames with the same description; file not written";
+const COMMENT_COLLISION: &str = "multiple comment frames with the same description; file not written";
+const ID3_UNVERIFIABLE: &str = "this file's ID3v2 tag could not be verified for lyrics and comments; file not written";
+const ID3_MULTIPLE_TAGS: &str = "this file has more than one ID3v2 tag at the start; file not written";
 
-/// Number of USLT (ID3v2.2: ULT) frames in the ID3v2 tag at the start of `path`,
-/// counted from the raw bytes. None when the tag cannot be walked with
-/// confidence (no leading tag, tag-wide unsynchronisation, truncated data), in
-/// which case the caller must assume lyrics could be lost.
-fn raw_id3v2_lyrics_frame_count(path: &Path) -> Option<usize> {
+/// What a raw walk of the leading ID3v2 tag found.
+#[derive(Debug, PartialEq)]
+enum RawId3 {
+    /// The file does not start with an ID3v2 tag.
+    NoTag,
+    /// A tag is there but cannot be walked with confidence (unsupported
+    /// version, tag-wide unsynchronisation, truncated or inconsistent data).
+    Unverifiable,
+    /// Frame counts of the first tag, and whether another tag follows it.
+    Counts { lyrics: usize, comments: usize, another_tag_follows: bool },
+}
+
+/// Walk the raw bytes of the ID3v2 tag at the start of `path`, counting USLT
+/// (v2.2: ULT) and COMM (v2.2: COM) frames. lofty compares those frames by
+/// description only, so its reader silently keeps one of two frames that
+/// share a description; comparing these raw counts with lofty's parsed counts
+/// is how the writer notices. lofty also folds the frames of any further
+/// leading tags into the first, so a second tag is reported too.
+fn walk_raw_id3v2(path: &Path) -> RawId3 {
     use std::io::Read;
     fn syncsafe(b: &[u8]) -> usize {
         b.iter().fold(0usize, |acc, x| (acc << 7) | (*x as usize & 0x7f))
@@ -458,43 +499,83 @@ fn raw_id3v2_lyrics_frame_count(path: &Path) -> Option<usize> {
     fn be(b: &[u8]) -> usize {
         b.iter().fold(0usize, |acc, x| (acc << 8) | *x as usize)
     }
-    let mut f = fs::File::open(path).ok()?;
+    let mut f = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return RawId3::Unverifiable,
+    };
     let mut header = [0u8; 10];
-    f.read_exact(&mut header).ok()?;
-    if &header[..3] != b"ID3" {
-        return None;
+    if f.read_exact(&mut header).is_err() || &header[..3] != b"ID3" {
+        return RawId3::NoTag;
     }
     let version = header[3];
     let flags = header[5];
     if flags & 0x80 != 0 || !(2..=4).contains(&version) {
-        return None;
+        return RawId3::Unverifiable;
     }
-    let mut data = vec![0u8; syncsafe(&header[6..10])];
-    f.read_exact(&mut data).ok()?;
+    // Read through take() so a header claiming a huge size cannot force a huge
+    // allocation; a short read means the tag is truncated.
+    let size = syncsafe(&header[6..10]);
+    let mut data = Vec::new();
+    if (&mut f).take(size as u64).read_to_end(&mut data).is_err() || data.len() != size {
+        return RawId3::Unverifiable;
+    }
 
     let mut pos = 0usize;
     if version >= 3 && flags & 0x40 != 0 {
-        let ext = data.get(0..4)?;
+        let ext = match data.get(0..4) {
+            Some(e) => e,
+            None => return RawId3::Unverifiable,
+        };
         pos = if version == 3 { 4 + be(ext) } else { syncsafe(ext) };
     }
-    let (id_len, header_len) = if version == 2 { (3, 6) } else { (4, 10) };
-    let mut count = 0usize;
+    let (id_len, size_len, header_len) = if version == 2 { (3, 3, 6) } else { (4, 4, 10) };
+    let (mut lyrics, mut comments) = (0usize, 0usize);
     while pos + header_len <= data.len() {
         let id = &data[pos..pos + id_len];
         if id[0] == 0 {
             break; // padding
         }
-        let size_bytes = &data[pos + id_len..pos + id_len + if version == 2 { 3 } else { 4 }];
-        let size = if version == 4 { syncsafe(size_bytes) } else { be(size_bytes) };
-        if id == b"USLT" || id == b"ULT" {
-            count += 1;
+        let size_bytes = &data[pos + id_len..pos + id_len + size_len];
+        let frame_size = if version == 4 { syncsafe(size_bytes) } else { be(size_bytes) };
+        match id {
+            b"USLT" | b"ULT" => lyrics += 1,
+            b"COMM" | b"COM" => comments += 1,
+            _ => {}
         }
-        pos = pos.checked_add(header_len + size)?;
-        if pos > data.len() {
-            return None;
+        pos = match pos.checked_add(header_len + frame_size) {
+            Some(p) if p <= data.len() => p,
+            _ => return RawId3::Unverifiable,
+        };
+    }
+
+    // An ID3v2.4 footer (flag 0x10) is 10 bytes after the tag; then see
+    // whether another tag starts right away.
+    if version == 4 && flags & 0x10 != 0 {
+        let mut footer = [0u8; 10];
+        if f.read_exact(&mut footer).is_err() || &footer[..3] != b"3DI" {
+            return RawId3::Unverifiable;
         }
     }
-    Some(count)
+    let mut next = [0u8; 3];
+    let another_tag_follows = f.read_exact(&mut next).is_ok() && &next == b"ID3";
+    RawId3::Counts { lyrics, comments, another_tag_follows }
+}
+
+/// Refuse a write that would silently drop a lyrics or comment frame: lofty's
+/// parsed counts must match the raw tag, the raw tag must be walkable, and the
+/// file must have a single leading tag.
+fn check_id3_frames_preserved(path: &Path, parsed_lyrics: usize, parsed_comments: usize) -> Result<(), String> {
+    match walk_raw_id3v2(path) {
+        // Nothing lofty could drop: no lyrics or comments parsed and no tag
+        // we could count in. (A tag we cannot walk that DOES hold lyrics or
+        // comments is refused below.)
+        RawId3::NoTag | RawId3::Unverifiable if parsed_lyrics + parsed_comments == 0 => Ok(()),
+        RawId3::NoTag | RawId3::Unverifiable => Err(ID3_UNVERIFIABLE.to_string()),
+        RawId3::Counts { another_tag_follows: true, .. } => Err(ID3_MULTIPLE_TAGS.to_string()),
+        RawId3::Counts { lyrics, .. } if lyrics != parsed_lyrics => Err(LYRICS_COLLISION.to_string()),
+        RawId3::Counts { comments, .. } if comments != parsed_comments => Err(COMMENT_COLLISION.to_string()),
+        RawId3::Counts { .. } => Ok(()),
+    }
 }
 
 /// Read, mutate, save `path` in place (only ever called on a temp copy).
@@ -565,11 +646,12 @@ fn write_tags_in_place(
             // lofty treats two USLT frames as equal when their descriptions
             // match (language is ignored) and its reader already keeps only one
             // of them, so the parsed tag can hold fewer lyrics frames than the
-            // file. Count them in the raw tag and refuse the write rather than
-            // drop lyrics.
-            if !lyrics.is_empty() && raw_id3v2_lyrics_frame_count(path) != Some(lyrics.len()) {
-                return Err(LYRICS_COLLISION.to_string());
-            }
+            // file. check_id3_frames_preserved compares with the raw tag and
+            // refuses the write rather than drop lyrics.
+            // COMM frames have the same weakness, and a second leading tag is
+            // folded into the first on read but left behind on write.
+            let parsed_comments = (&id3).into_iter().filter(|fr| fr.id_str() == "COMM").count();
+            check_id3_frames_preserved(path, lyrics.len(), parsed_comments)?;
             let (remainder, mut tag) = id3.split_tag();
             tag.remove_key(&ItemKey::Lyrics);
             let mut user_text: Vec<(String, String)> = Vec::new();
@@ -1924,10 +2006,10 @@ mod tests {
         assert!(after.contains("Some sung words"), "lyrics lost:\n{after}");
     }
 
-    /// Replace `mp3`'s ID3v2 tag with a hand-built ID3v2.4 tag holding TIT2 and
-    /// the given USLT frames (language, description, text). lofty's own insert
-    /// cannot build this fixture: it merges USLT frames that share a description.
-    fn write_raw_id3_with_lyrics(mp3: &Path, lyrics: &[(&[u8; 3], &str, &str)]) {
+    /// A hand-built ID3v2.4 tag holding TIT2 and the given language frames
+    /// (frame id USLT or COMM, language, description, text). lofty's own insert
+    /// cannot build these fixtures: it merges frames that share a description.
+    fn raw_id3_tag(frames: &[(&[u8; 4], &[u8; 3], &str, &str)]) -> Vec<u8> {
         fn syncsafe(n: usize) -> [u8; 4] {
             [((n >> 21) & 0x7f) as u8, ((n >> 14) & 0x7f) as u8, ((n >> 7) & 0x7f) as u8, (n & 0x7f) as u8]
         }
@@ -1938,18 +2020,26 @@ mod tests {
             f.extend_from_slice(body);
             f
         }
-        let mut frames = Vec::new();
+        let mut body_frames = Vec::new();
         let mut tit2 = vec![3u8];
         tit2.extend_from_slice(b"Orig");
-        frames.extend(frame(b"TIT2", &tit2));
-        for (lang, desc, text) in lyrics {
+        body_frames.extend(frame(b"TIT2", &tit2));
+        for (id, lang, desc, text) in frames {
             let mut body = vec![3u8];
             body.extend_from_slice(*lang);
             body.extend_from_slice(desc.as_bytes());
             body.push(0);
             body.extend_from_slice(text.as_bytes());
-            frames.extend(frame(b"USLT", &body));
+            body_frames.extend(frame(id, &body));
         }
+        let mut out = b"ID3\x04\x00\x00".to_vec();
+        out.extend_from_slice(&syncsafe(body_frames.len()));
+        out.extend(body_frames);
+        out
+    }
+
+    /// Replace `mp3`'s leading ID3v2 tag with the given raw tags, in order.
+    fn replace_id3_tags(mp3: &Path, tags: &[Vec<u8>]) {
         let data = fs::read(mp3).unwrap();
         let audio = if data.starts_with(b"ID3") {
             let size = data[6..10].iter().fold(0usize, |acc, b| (acc << 7) | (*b as usize & 0x7f));
@@ -1957,11 +2047,92 @@ mod tests {
         } else {
             &data[..]
         };
-        let mut out = b"ID3\x04\x00\x00".to_vec();
-        out.extend_from_slice(&syncsafe(frames.len()));
-        out.extend(frames);
+        let mut out: Vec<u8> = tags.concat();
         out.extend_from_slice(audio);
         fs::write(mp3, out).unwrap();
+    }
+
+    fn write_raw_id3_with_lyrics(mp3: &Path, lyrics: &[(&[u8; 3], &str, &str)]) {
+        let frames: Vec<(&[u8; 4], &[u8; 3], &str, &str)> =
+            lyrics.iter().map(|(lang, desc, text)| (b"USLT", *lang, *desc, *text)).collect();
+        replace_id3_tags(mp3, &[raw_id3_tag(&frames)]);
+    }
+
+    fn assert_refused_untouched(mp3: &Path, dir: &Path, expected: &str) {
+        let before = fs::read(mp3).unwrap();
+        let res = write_tags_at(one_file_request(mp3, false), &dir.join("undo.json"));
+        assert_eq!(res["success"], json!(0), "{res}");
+        assert_eq!(res["failed"], json!(1), "{res}");
+        let err = res["errors"][0]["error"].as_str().unwrap_or("");
+        assert!(err.contains(expected), "expected {expected:?}: {res}");
+        assert_eq!(fs::read(mp3).unwrap(), before, "file bytes changed");
+        let leftovers: Vec<_> = fs::read_dir(dir).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("tagtmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp copy left behind");
+    }
+
+    #[test]
+    fn mp3_with_two_leading_id3_tags_is_refused_untouched() {
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let mp3 = make_mp3(dir.path(), "two-tags.mp3");
+        replace_id3_tags(&mp3, &[
+            raw_id3_tag(&[(b"USLT", b"eng", "", "First tag words")]),
+            raw_id3_tag(&[(b"USLT", b"eng", "", "Second tag words")]),
+        ]);
+        assert_eq!(
+            walk_raw_id3v2(&mp3),
+            RawId3::Counts { lyrics: 1, comments: 0, another_tag_follows: true }
+        );
+        assert_refused_untouched(&mp3, dir.path(), "more than one ID3v2 tag");
+    }
+
+    #[test]
+    fn mp3_with_colliding_comment_frames_is_refused_untouched() {
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let mp3 = make_mp3(dir.path(), "two-comments.mp3");
+        replace_id3_tags(&mp3, &[raw_id3_tag(&[
+            (b"COMM", b"eng", "", "English note"),
+            (b"COMM", b"deu", "", "German note"),
+        ])]);
+        let probe = ffprobe(&mp3);
+        assert!(probe.contains("English note") || probe.contains("German note"), "fixture must carry COMM:\n{probe}");
+        assert_refused_untouched(&mp3, dir.path(), "multiple comment frames with the same description");
+    }
+
+    #[test]
+    fn raw_walker_reports_unwalkable_tags() {
+        let dir = tempdir().unwrap();
+        // Unsynchronised tag (flag 0x80) and a header claiming more bytes than
+        // the file holds: both unverifiable, and no huge allocation.
+        let unsync = dir.path().join("unsync.mp3");
+        let mut tag = raw_id3_tag(&[(b"USLT", b"eng", "", "words")]);
+        tag[5] = 0x80;
+        fs::write(&unsync, &tag).unwrap();
+        assert_eq!(walk_raw_id3v2(&unsync), RawId3::Unverifiable);
+        let truncated = dir.path().join("truncated.mp3");
+        fs::write(&truncated, b"ID3\x04\x00\x00\x7f\x7f\x7f\x7f\x00").unwrap();
+        assert_eq!(walk_raw_id3v2(&truncated), RawId3::Unverifiable);
+        let none = dir.path().join("none.mp3");
+        fs::write(&none, b"not a tag").unwrap();
+        assert_eq!(walk_raw_id3v2(&none), RawId3::NoTag);
+        // The guard's own message for a tag it cannot verify.
+        assert_eq!(check_id3_frames_preserved(&unsync, 1, 0), Err(ID3_UNVERIFIABLE.to_string()));
+        assert_eq!(check_id3_frames_preserved(&none, 0, 0), Ok(()));
+        // A raw lyrics frame lofty did not parse at all is refused too.
+        let one = dir.path().join("one.mp3");
+        fs::write(&one, raw_id3_tag(&[(b"USLT", b"eng", "", "words")])).unwrap();
+        assert_eq!(check_id3_frames_preserved(&one, 0, 0), Err(LYRICS_COLLISION.to_string()));
+        assert_eq!(check_id3_frames_preserved(&one, 1, 0), Ok(()));
     }
 
     #[test]
@@ -2026,10 +2197,28 @@ mod tests {
 
     #[test]
     fn old_style_temp_names_are_skipped_and_swept() {
-        assert!(is_temp_file_name(".book.mp3.tagtmp-0123456789abcdef0123456789abcdef.mp3"));
-        assert!(is_temp_file_name(".tagtmp-0123456789abcdef0123456789abcdef.mp3"));
-        assert!(!is_temp_file_name("book.tagtmp-x.mp3"), "a visible file is never a temp copy");
-        assert!(!is_temp_file_name("book.mp3"));
+        let hex = "0123456789abcdef0123456789abcdef";
+        assert!(is_temp_file_name(&format!(".book.mp3.tagtmp-{hex}.mp3")));
+        assert!(is_temp_file_name(&format!(".tagtmp-{hex}.mp3")));
+        assert!(is_temp_file_name(&format!(".tagtmp-{hex}.M4B")));
+        // A real temp name from the writer matches.
+        let real = temp_path_for(Path::new("/x/Some Book.m4b"));
+        assert!(is_temp_file_name(&real.file_name().unwrap().to_string_lossy()));
+        for name in [
+            ".notes.tagtmp-keep.txt".to_string(),
+            ".tagtmp-.mp3".to_string(),
+            format!("x.tagtmp-{hex}.mp3"),
+            format!("book.tagtmp-{hex}.mp3"),
+            format!(".tagtmp-{}.mp3", &hex[..31]),
+            format!(".tagtmp-{hex}0.mp3"),
+            format!(".tagtmp-{}.mp3", hex.to_uppercase()),
+            format!(".tagtmp-{hex}.txt"),
+            format!(".tagtmp-{hex}"),
+            format!("..tagtmp-{hex}.mp3"),
+            "book.mp3".to_string(),
+        ] {
+            assert!(!is_temp_file_name(&name), "{name} must not count as a temp copy");
+        }
 
         if !have_ffmpeg() {
             eprintln!("skipping: ffmpeg not available");
@@ -2041,9 +2230,12 @@ mod tests {
         fs::copy(&mp3, &old_style).unwrap();
         let found = crate::scanner::collect_audio_files(&[dir.path().to_string_lossy().to_string()]);
         assert_eq!(found.len(), 1, "scanner must skip old-style temp copies");
+        let keep = dir.path().join(".notes.tagtmp-keep.txt");
+        fs::write(&keep, b"user notes").unwrap();
         assert_eq!(sweep_temp_files(dir.path()), 1);
         assert!(!old_style.exists());
         assert!(mp3.exists());
+        assert!(keep.exists(), "the sweep deleted a user's dot-file");
     }
 
     #[test]
