@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false  # keep the token out of .git/config
 
       - name: Install Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -36,6 +38,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false  # keep the token out of .git/config
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, pinned
@@ -79,6 +83,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false  # keep the token out of .git/config
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, pinned
@@ -131,10 +137,10 @@ jobs:
             Metadata manager for AudiobookShelf with AI enrichment, plus local folder scanning with tag writing.
 
             ### Installation
-            - **Windows:** Download the `.msi` installer
+            - **Windows:** Download the `.msi` or the NSIS `.exe` installer
             - **macOS (Apple Silicon):** Download the aarch64 `.dmg`
             - **macOS (Intel):** Download the x64 `.dmg`
-            - **Linux:** Download the `.deb` or `.AppImage`
+            - **Linux:** Download the `.deb`, `.rpm` or `.AppImage`
 
             ### Verifying a download
             Each platform's `SHA256SUMS-<platform>.txt` is attached to this release. Compare it with `shasum -a 256 <file>` (macOS), `sha256sum <file>` (Linux) or `Get-FileHash <file>` (Windows).

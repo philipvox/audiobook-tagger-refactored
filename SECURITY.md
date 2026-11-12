@@ -63,6 +63,8 @@ The app contacts only the hosts below. This list was built from the `https://` a
 | Homebrew's hosts (`brew.sh`, ghcr.io and the formula sources it uses) | whisper-cpp and FFmpeg on macOS, whisper-cpp on Linux | When you install Whisper through Homebrew |
 | `registry.ollama.ai` and its CDN | Model pulls, made by Ollama, not by the app | When you pull an Ollama model |
 
+`ollama.com` and `api.github.com` appear in the source only in user-facing text and comments (install hints, a note about where release digests came from). The app does not contact them.
+
 - **The HTTP scope allows any host.** The Tauri HTTP capability (`src-tauri/capabilities/default.json`) permits `https://**` and `http://**` because ABS servers and custom AI base URLs are chosen by the user and can be anywhere, including a private LAN address. The scope is therefore not a restriction. The list above is what the code actually contacts.
 - **No default third-party proxy.** Earlier versions could fall back to a hosted proxy when a direct request failed. That default is gone. A proxy is used only if you build the web version with `VITE_PROXY_URL` set yourself.
 - **Downloads are pinned and verified.** Executables the app downloads itself (whisper.cpp and FFmpeg on Windows, FFmpeg on Linux, Ollama on macOS and Linux, Whisper model files) are fixed to a specific version and checked against a SHA-256 hash stored in the source before they are used. Components installed through Homebrew are verified by Homebrew, not by the app. The Windows and Linux install paths were checked against the real release archives but have not been run on those platforms in this release.

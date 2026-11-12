@@ -8,7 +8,7 @@ Metadata manager for [AudiobookShelf](https://www.audiobookshelf.org/) with AI e
 
 | Platform | Link |
 |----------|------|
-| Windows | [Latest release](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest) (.exe installer or .msi) |
+| Windows | [Latest release](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest) (.msi or NSIS .exe installer) |
 | macOS (Apple Silicon) | [Latest release](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest) (.dmg aarch64) |
 | macOS (Intel) | [Latest release](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest) (.dmg x64) |
 | Linux | [Latest release](https://github.com/philipvox/audiobook-tagger-refactored/releases/latest) (.deb, .rpm, or .AppImage) |
