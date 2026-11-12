@@ -29,7 +29,7 @@ export function parseYearFromDateString(dateStr) {
 // GET /api/items/:id?expanded=1 for each one. Returns Map(id -> series array);
 // an id maps to null when the fetch failed or returned no series, which the
 // group builder records as series_unresolved.
-export async function fetchMultiSeries(baseUrl, token, items, concurrency = 4) {
+export async function fetchMultiSeries(baseUrl, token, items, { concurrency = 4, onProgress } = {}) {
   const wanted = items.filter((item) => {
     const meta = item?.media?.metadata || {};
     const hasArray = Array.isArray(meta.series) && meta.series.length > 0;
@@ -43,11 +43,15 @@ export async function fetchMultiSeries(baseUrl, token, items, concurrency = 4) {
       try {
         const full = await absApi(baseUrl, token, `/api/items/${item.id}?expanded=1`);
         const series = full?.media?.metadata?.series;
-        out.set(item.id, Array.isArray(series) && series.length > 0 ? series : null);
+        // Every entry needs a name; a partial array is no better than none.
+        const usable = Array.isArray(series) && series.length > 0
+          && series.every((x) => (typeof x === 'string' ? x : x?.name)?.trim?.());
+        out.set(item.id, usable ? series : null);
       } catch (err) {
         console.warn(`[abs import] Could not fetch series for ${item.id}: ${err?.message || err}`);
         out.set(item.id, null);
       }
+      onProgress?.(out.size, wanted.length);
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, wanted.length) }, worker));
@@ -171,9 +175,11 @@ export function absItemToBookGroup(item, absBaseUrl, fetchedSeries) {
  * Convert list-endpoint items to BookGroups, first fetching the series of
  * any item whose seriesName may hold several series.
  * @param {function} [onItem] optional (index, total, item) callback per item
+ * @param {function} [onSeriesProgress] optional (done, total) callback after
+ *   each multi-series item fetch, so a long fetch phase shows progress
  */
-export async function absItemsToBookGroups(baseUrl, token, items, onItem) {
-  const fetchedSeries = await fetchMultiSeries(baseUrl, token, items);
+export async function absItemsToBookGroups(baseUrl, token, items, onItem, onSeriesProgress) {
+  const fetchedSeries = await fetchMultiSeries(baseUrl, token, items, { onProgress: onSeriesProgress });
   return items.map((item, index) => {
     onItem?.(index, items.length, item);
     return absItemToBookGroup(item, baseUrl, fetchedSeries.get(item.id));

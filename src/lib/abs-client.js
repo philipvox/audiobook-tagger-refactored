@@ -68,9 +68,15 @@ export async function importLibrary(config, onProgress) {
   onProgress?.(allItems.length, lastKnownTotal || allItems.length, 'Processing...');
 
   // Convert ABS items to book groups (shared builder, see absGroup.js).
-  const groups = await absItemsToBookGroups(baseUrl, token, allItems, (index, total, item) => {
-    onProgress?.(index, total, `Processing ${item.media?.metadata?.title || 'book'}...`);
-  });
+  const groups = await absItemsToBookGroups(
+    baseUrl,
+    token,
+    allItems,
+    (index, total, item) => {
+      onProgress?.(index, total, `Processing ${item.media?.metadata?.title || 'book'}...`);
+    },
+    (done, total) => onProgress?.(done, total, `Reading series ${done} of ${total}...`),
+  );
 
   return groups;
 }

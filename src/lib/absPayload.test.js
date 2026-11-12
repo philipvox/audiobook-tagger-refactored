@@ -203,9 +203,12 @@ describe('parseSeriesName', () => {
     expect(parseSeriesName('Discworld')).toEqual({ name: 'Discworld', sequence: null });
   });
 
-  it('a single series whose name contains a comma is still one series', () => {
-    expect(parseSeriesName('Wallace, Gromit #2')).toEqual({ name: 'Wallace, Gromit', sequence: '2' });
-    expect(parseSeriesName('Tales of Earth, Sea and Sky')).toEqual({ name: 'Tales of Earth, Sea and Sky', sequence: null });
+  it('any string with ", " may hold several series, so it is not parsed', () => {
+    // ABS omits "#seq" for an unsequenced series, so a comma alone can join
+    // two series ("Discworld, Tiffany Aching #2", "A, B"). Import fetches these.
+    expect(parseSeriesName('Wallace, Gromit #2')).toBeNull();
+    expect(parseSeriesName('Tales of Earth, Sea and Sky')).toBeNull();
+    expect(parseSeriesName('Discworld, Tiffany Aching #2')).toBeNull();
   });
 
   it('returns null for empty input and for a string that may hold several series', () => {
@@ -215,10 +218,14 @@ describe('parseSeriesName', () => {
     expect(parseSeriesName('The Plantagenet and Tudor #6, Tudor Court #1')).toBeNull();
   });
 
-  it('isMultiSeriesName is conservative: needs ", " and more than one " #"', () => {
+  it('isMultiSeriesName flags any string containing ", "', () => {
     expect(isMultiSeriesName('A #6, B #1')).toBe(true);
-    expect(isMultiSeriesName('Wallace, Gromit #2')).toBe(false);
+    expect(isMultiSeriesName('Discworld, Tiffany Aching #2')).toBe(true);
+    expect(isMultiSeriesName('A, B')).toBe(true);
+    expect(isMultiSeriesName('Wallace, Gromit #2')).toBe(true);
     expect(isMultiSeriesName('Discworld')).toBe(false);
+    expect(isMultiSeriesName('Rivers of London #8.1')).toBe(false);
+    expect(isMultiSeriesName('Wallace,Gromit')).toBe(false);
   });
 });
 

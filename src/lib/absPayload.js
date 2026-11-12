@@ -77,13 +77,14 @@ export function stripEmbeddedSequence(name) {
 
 /**
  * True when an ABS `seriesName` string could hold more than one series. ABS
- * joins several series as "A #6, B #1". A series name can itself contain a
- * comma or a "#", so this is deliberately conservative: it needs ", " AND
- * more than one " #". Callers fetch the item rather than guess.
+ * joins several series with ", " and omits "#seq" for a series without a
+ * sequence, so "Discworld, Tiffany Aching #2" and "A, B" are two series each.
+ * Any ", " therefore counts as possibly multi-series; callers fetch the item
+ * rather than guess. A single series with a comma in its name costs one GET.
  */
 export function isMultiSeriesName(str) {
   if (typeof str !== 'string') return false;
-  return str.includes(', ') && str.split(' #').length - 1 > 1;
+  return str.includes(', ');
 }
 
 /**

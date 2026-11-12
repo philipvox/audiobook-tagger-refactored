@@ -113,6 +113,56 @@ describe('import_from_abs series parsing (C-3)', () => {
     expect(g.metadata.tags).toEqual(['keep-me']);
   });
 
+  it('"Discworld, Tiffany Aching #2" is two series: one item GET, two-entry all_series', async () => {
+    mockAbs({
+      items: [listItem('d1', 'Discworld, Tiffany Aching #2')],
+      itemResponses: {
+        d1: { id: 'd1', media: { metadata: { series: [
+          { id: 'a', name: 'Discworld', sequence: null },
+          { id: 'b', name: 'Tiffany Aching', sequence: '2' },
+        ] } } },
+      },
+    });
+    const { groups } = await callBackend('import_from_abs', {});
+    expect(itemCalls()).toHaveLength(1);
+    expect(itemCalls()[0][2]).toBe('/api/items/d1?expanded=1');
+    expect(groups[0].metadata.all_series).toEqual([
+      { name: 'Discworld', sequence: null, source: 'abs' },
+      { name: 'Tiffany Aching', sequence: '2', source: 'abs' },
+    ]);
+    expect(groups[0].metadata.series_unresolved).toBe(false);
+    expect(isEmptyPayload(buildAbsPayload(groups[0].metadata, groups[0].abs_original, {}))).toBe(true);
+  });
+
+  it('a single series whose name has a comma costs one GET and imports as one entry', async () => {
+    mockAbs({
+      items: [listItem('w1', 'Wallace, Gromit #2'), listItem('t1', 'Tales of Earth, Sea and Sky')],
+      itemResponses: {
+        w1: { id: 'w1', media: { metadata: { series: [{ id: 'w', name: 'Wallace, Gromit', sequence: '2' }] } } },
+        t1: { id: 't1', media: { metadata: { series: [{ id: 't', name: 'Tales of Earth, Sea and Sky', sequence: null }] } } },
+      },
+    });
+    const { groups } = await callBackend('import_from_abs', {});
+    expect(itemCalls()).toHaveLength(2);
+    const w = groups.find((g) => g.abs_id === 'w1');
+    expect(w.metadata.all_series).toEqual([{ name: 'Wallace, Gromit', sequence: '2', source: 'abs' }]);
+    expect(w.metadata.series).toBe('Wallace, Gromit');
+    expect(w.metadata.sequence).toBe('2');
+    const tl = groups.find((g) => g.abs_id === 't1');
+    expect(tl.metadata.all_series).toEqual([{ name: 'Tales of Earth, Sea and Sky', sequence: null, source: 'abs' }]);
+  });
+
+  it('a fetched series entry with no name leaves the book unresolved', async () => {
+    mockAbs({
+      items: [listItem('n1', 'A, B')],
+      itemResponses: { n1: { id: 'n1', media: { metadata: { series: [{ id: 'a', name: 'A' }, { id: 'b', sequence: '1' }] } } } },
+    });
+    const { groups } = await callBackend('import_from_abs', {});
+    expect(groups[0].metadata.series_unresolved).toBe(true);
+    expect(groups[0].metadata.all_series).toEqual([]);
+    expect(groups[0].lastError).toMatchObject({ stage: 'import', kind: 'series', severity: 'warn' });
+  });
+
   it('marks the book series_unresolved when the item fetch fails, and push never sends series', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     mockAbs({

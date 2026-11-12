@@ -100,6 +100,19 @@ describe('importLibrary uses the same group builder as import_from_abs', () => {
     const multi = wizard.find((g) => g.abs_id === 'multi');
     expect(multi.metadata.series_unresolved).toBe(true);
     expect(multi.lastError).toMatchObject({ stage: 'import', kind: 'series', severity: 'warn' });
+    expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
+  });
+
+  it('reports progress while it reads multi-series items, before Processing', async () => {
+    mockAbs();
+    const onProgress = vi.fn();
+    await importLibrary(config, onProgress);
+    const messages = onProgress.mock.calls.map((c) => c[2]);
+    const seriesIdx = messages.findIndex((m) => /series/i.test(m));
+    expect(seriesIdx).toBeGreaterThan(-1);
+    expect(onProgress.mock.calls[seriesIdx]).toEqual([1, 1, 'Reading series 1 of 1...']);
+    const firstBook = messages.findIndex((m) => m.startsWith('Processing ') && m !== 'Processing...');
+    expect(seriesIdx).toBeLessThan(firstBook);
   });
 });
