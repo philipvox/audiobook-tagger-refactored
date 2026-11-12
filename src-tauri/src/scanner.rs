@@ -850,16 +850,32 @@ fn part_marker_re() -> &'static regex::Regex {
     })
 }
 
-/// A multi-file book's title from one of its files' title or stem, in its
-/// original casing: the trailing part/disc marker and a leading track number
-/// are removed ("It Part 1" -> "It", "01 - Dune" -> "Dune"). None when nothing
-/// but generic numbering is left ("01", "Track 3", "Chapter 1").
-fn clean_book_title(raw: &str) -> Option<String> {
+/// A multi-file book's title from one of its files' title tag or filename
+/// stem, in its original casing: the trailing part/disc marker is removed
+/// ("It Part 1" -> "It"). None when nothing but generic numbering is left
+/// ("01", "Track 3", "Chapter 1").
+///
+/// A leading track number is removed ONLY from a stem (`from_stem`), and only
+/// when the 1-3 digits stand alone and are followed by an explicit separator
+/// ("01 - The Hobbit", "02_Dune", "3. It", "4) Emma"). A title tag keeps its
+/// number, and so does a stem where the number belongs to the title:
+/// "101 Dalmatians" (bare space), "1Q84", "20,000 Leagues", "2001 A Space
+/// Odyssey" (four digits), "1.5 Lives" (a decimal). When in doubt the number
+/// stays: a stray track number is a smaller harm than a lost first word.
+fn clean_book_title(raw: &str, from_stem: bool) -> Option<String> {
     use std::sync::OnceLock;
     static LEADING_NUM_RE: OnceLock<regex::Regex> = OnceLock::new();
-    let lead = LEADING_NUM_RE.get_or_init(|| regex::Regex::new(r"^\s*\d{1,3}\s*[-_.:)\]]*\s*").unwrap());
-    let no_part = part_marker_re().replace(raw.trim(), "");
-    let title = lead.replace(&no_part, "").trim().to_string();
+    let lead = LEADING_NUM_RE.get_or_init(|| regex::Regex::new(r"^\d{1,3}\s*[-_.)\]:]+\s*").unwrap());
+    let mut title = part_marker_re().replace(raw.trim(), "").trim().to_string();
+    if from_stem {
+        if let Some(m) = lead.find(&title) {
+            let rest = &title[m.end()..];
+            // "1.5 Lives": the separator was a decimal point.
+            if !rest.is_empty() && !rest.starts_with(|c: char| c.is_ascii_digit()) {
+                title = rest.trim().to_string();
+            }
+        }
+    }
     if stem_is_generic(&title) { None } else { Some(title) }
 }
 
@@ -1004,8 +1020,13 @@ fn known_too_long_for_a_track(f: &RawFile) -> bool {
 ///     one book's chapters;
 ///   - untitled m4a/m4b with generic numbered names ("01.m4b", "02.m4b") merge
 ///     unless one is known to run longer than `MAX_TRACK_SECS`.
+///   - per-track m4a/m4b (`album_overrides_titles`): three or more generically
+///     named files sharing an album, none known to run over `MAX_TRACK_SECS`,
+///     merge on that album despite distinct titles.
 /// Anywhere, files whose title tags (or filenames, part markers removed) give
-/// the same key are one book.
+/// the same key are one book. (A keyless album-less mp3 that carries a title
+/// of its own does NOT join another book's single keyed group: see
+/// `split_folder_into_books`.)
 fn is_numbered_track_set(files: &[RawFile]) -> bool {
     if files.len() < 2 {
         return false;
@@ -1072,8 +1093,10 @@ fn file_book_key(f: &RawFile, track_set: bool, per_track: bool) -> String {
 }
 
 /// Split one folder's files into books. Keyless files (album-less tracks of a
-/// numbered set) join the single keyed book when there is exactly one (an
-/// untagged intro track), else form their own group.
+/// numbered set) join the single keyed book when there is exactly one AND they
+/// carry no title of their own (an untagged intro track). A titled keyless
+/// file ("02 - Carrie.mp3", title "Carrie", beside album "It") may be another
+/// book, so the keyless files then form their own group.
 fn split_folder_into_books(raw_files: Vec<RawFile>) -> Vec<(String, Vec<RawFile>)> {
     let track_set = is_numbered_track_set(&raw_files);
     let per_track = album_overrides_titles(&raw_files);
@@ -1087,7 +1110,9 @@ fn split_folder_into_books(raw_files: Vec<RawFile>) -> Vec<(String, Vec<RawFile>
         buckets.entry(key).or_default().push(f);
     }
     let keyed = order.iter().filter(|k| !k.is_empty()).count();
-    if keyed <= 1 {
+    let has_title = |f: &RawFile| f.tags.title.as_deref().is_some_and(|t| !book_key(t).is_empty());
+    let titled_keyless = buckets.get("").is_some_and(|fs| fs.iter().any(has_title));
+    if keyed == 0 || (keyed == 1 && !titled_keyless) {
         let all: Vec<RawFile> = order.iter().flat_map(|k| buckets.remove(k).unwrap_or_default()).collect();
         return vec![(String::new(), all)];
     }
@@ -1124,6 +1149,10 @@ pub(crate) fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
                 }
             }
         }
+        // Split books' names already used in this folder (lowercased), so two
+        // books never share a name, title and hierarchy dir (a rename would
+        // aim both at one destination).
+        let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (key, mut raw_files) in books {
             // Sort by full path so tracks stay ordered across discs
             // (Disc 1/track01, Disc 1/track02, Disc 2/track01, ...).
@@ -1153,15 +1182,24 @@ pub(crate) fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
                 raw_files[0].tags.album.clone().filter(|s| !s.trim().is_empty())
             };
             let multi_file_title = || {
-                let raw = own_title().unwrap_or_else(|| file_stem(&raw_files[0]));
-                clean_book_title(&raw).unwrap_or_else(|| folder_name.clone())
+                let cleaned = match own_title() {
+                    Some(t) => clean_book_title(&t, false),
+                    None => clean_book_title(&file_stem(&raw_files[0]), true),
+                };
+                cleaned.unwrap_or_else(|| folder_name.clone())
             };
             let (group_name, hierarchy_dir) = if split {
-                let name = if raw_files.len() == 1 {
+                let base = if raw_files.len() == 1 {
                     file_stem(&raw_files[0])
                 } else {
                     album_title.clone().unwrap_or_else(multi_file_title)
                 };
+                let mut name = base.clone();
+                let mut n = 2;
+                while !used_names.insert(name.to_lowercase()) {
+                    name = format!("{base} ({n})");
+                    n += 1;
+                }
                 let dir = Path::new(&book_dir).join(&name).to_string_lossy().to_string();
                 (name, dir)
             } else {
@@ -1778,6 +1816,70 @@ mod tests {
         ]);
         assert_eq!(groups.len(), 2, "{groups:?}");
         assert_eq!(names(&groups), vec!["Carrie", "Stephen King"]);
+    }
+
+    #[test]
+    fn clean_book_title_keeps_numbers_that_belong_to_the_title() {
+        for t in ["101 Dalmatians", "1Q84", "20,000 Leagues Under the Sea", "100 Years of Solitude", "2001 A Space Odyssey", "1.5 Lives"] {
+            assert_eq!(clean_book_title(t, true).as_deref(), Some(t), "stem {t}");
+            assert_eq!(clean_book_title(t, false).as_deref(), Some(t), "tag {t}");
+        }
+        assert_eq!(clean_book_title("01 - The Hobbit", true).as_deref(), Some("The Hobbit"));
+        assert_eq!(clean_book_title("02_Dune", true).as_deref(), Some("Dune"));
+        assert_eq!(clean_book_title("3. It", true).as_deref(), Some("It"));
+        // A title tag keeps even a track-like number.
+        assert_eq!(clean_book_title("01 - The Hobbit", false).as_deref(), Some("01 - The Hobbit"));
+        assert_eq!(clean_book_title("2001 A Space Odyssey Part 1", true).as_deref(), Some("2001 A Space Odyssey"));
+        assert_eq!(clean_book_title("01", true), None);
+        assert_eq!(clean_book_title("Track 03", true), None);
+    }
+
+    #[test]
+    fn numeric_leading_title_survives_split() {
+        let d = "/audiobooks/Mixed";
+        let a = |title: Option<&str>| EmbeddedTags {
+            album: Some("Sci-Fi Collection".into()),
+            title: title.map(Into::into),
+            ..Default::default()
+        };
+        for titled in [true, false] {
+            let tt = |s: &'static str| if titled { Some(s) } else { None };
+            let groups = group_files(vec![
+                raw(d, "2001 A Space Odyssey Part 1.m4b", a(tt("2001 A Space Odyssey Part 1"))),
+                raw(d, "2001 A Space Odyssey Part 2.m4b", a(tt("2001 A Space Odyssey Part 2"))),
+                raw(d, "Carrie.m4b", a(tt("Carrie"))),
+            ]);
+            assert_eq!(groups.len(), 2, "{groups:?}");
+            assert_eq!(names(&groups), vec!["2001 A Space Odyssey", "Carrie"], "titled={titled}");
+        }
+    }
+
+    #[test]
+    fn folder_name_fallback_is_unique_per_folder() {
+        let d = "/audiobooks/Stephen King";
+        let tr = |n: u32| EmbeddedTags { track: Some(n), ..Default::default() };
+        let groups = group_files(vec![
+            raw(d, "01.m4b", tr(1)),
+            raw(d, "02.m4b", tr(2)),
+            raw(d, "Track 01.m4b", tr(3)),
+            raw(d, "Track 02.m4b", tr(4)),
+        ]);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!(names(&groups), vec!["Stephen King", "Stephen King (2)"]);
+        let mut gnames: Vec<&str> = groups.iter().map(|g| g.group_name.as_str()).collect();
+        gnames.sort();
+        assert_eq!(gnames, vec!["Stephen King", "Stephen King (2)"]);
+    }
+
+    #[test]
+    fn titled_keyless_track_does_not_join_another_book() {
+        let d = "/audiobooks/Stephen King";
+        let groups = group_files(vec![
+            raw(d, "01 - It.mp3", EmbeddedTags { album: Some("It".into()), title: Some("It".into()), ..Default::default() }),
+            raw(d, "02 - Carrie.mp3", titled("Carrie")),
+        ]);
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!(names(&groups), vec!["Carrie", "It"]);
     }
 
     #[test]
