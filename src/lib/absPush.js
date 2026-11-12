@@ -13,6 +13,9 @@ import {
 
 const s = (v) => (v == null ? '' : String(v).trim());
 
+/** H-7: the skip reason for a book a cancelled push never started. */
+export const CANCELLED_REASON = 'cancelled';
+
 /** The ABS library item id for a group, or null if it is not ABS-backed. */
 export function getAbsId(group) {
   if (!group) return null;
@@ -135,6 +138,23 @@ export function summarizePush(result, attempted) {
   }
   const tail = parts.length > 0 ? ` ${parts.join(' ')}` : '';
 
+  // H-7: a cancelled push says so, and how many books it did not reach.
+  const cancelled = skipped.filter((e) => e.reason === CANCELLED_REASON).length;
+  if (cancelled > 0) {
+    const otherSkipped = skipped.length - cancelled;
+    const extra = [];
+    if (otherSkipped > 0) extra.push(`${otherSkipped} other book${plural(otherSkipped)} skipped.`);
+    if (failed.length > 0) {
+      extra.push(`Failed: ${formatTitleList(failed)}.`);
+      if (failed[0].error) extra.push(`First error: ${failed[0].error}`);
+    }
+    return {
+      type: failed.length > 0 ? 'error' : 'warning',
+      title: 'Push Cancelled',
+      message: `Updated ${updated.length} book${plural(updated.length)} before the push was cancelled; ${cancelled} ${cancelled === 1 ? 'was' : 'were'} not pushed.${extra.length ? ` ${extra.join(' ')}` : ''}`,
+    };
+  }
+
   if (failed.length === 0 && updated.length > 0) {
     return {
       type: 'success',
@@ -230,14 +250,25 @@ export async function runPush(groups, { pushById, pushByFileIds }) {
  * calls in flight. Results come back in input order. A worker that throws
  * never stops the other lanes: its slot gets `onError(error, item, index)`
  * (default `{ error }`).
+ *
+ * H-7: `shouldStop()` is checked before each item starts. Once it returns
+ * true no new item starts, items in flight finish, and every item not started
+ * gets `onStopped(item, index)` (default `{ stopped: true }`).
  */
-export async function runPool(items, worker, concurrency, onError = (error) => ({ error })) {
+export async function runPool(items, worker, concurrency, onError = (error) => ({ error }), { shouldStop, onStopped = () => ({ stopped: true }) } = {}) {
   const list = Array.isArray(items) ? items : [];
   const results = new Array(list.length);
   const limit = Math.max(1, Math.min(list.length, Math.floor(Number(concurrency)) || 1));
   let next = 0;
   const lane = async () => {
     while (next < list.length) {
+      if (shouldStop?.()) {
+        while (next < list.length) {
+          const i = next++;
+          results[i] = onStopped(list[i], i);
+        }
+        return;
+      }
       const i = next++;
       try {
         results[i] = await worker(list[i], i);
@@ -335,13 +366,25 @@ export async function pushOneAbsItem(item, { request, cfg = {} }) {
  * { snapshot, fields } of each book skipped because ABS already matched,
  * both keyed by book id.
  */
-export async function pushAbsItems(items, { request, cfg = {} }) {
+/**
+ * Push every item, `pushConcurrency(cfg)` at a time. H-7: once `shouldStop()`
+ * is true no new book starts; books in flight finish and every book not
+ * started is skipped with reason 'cancelled' (the result then carries
+ * `cancelled: true`). Snapshots for the books that were written are returned
+ * either way, so the caller can apply them.
+ */
+export async function pushAbsItems(items, { request, cfg = {}, shouldStop } = {}) {
   const onError = (err, item) => {
     const { id, title } = describeItem(item);
     return { status: 'failed', entry: { id, title, error: String(err?.message || err) } };
   };
-  const outcomes = await runPool(items || [], (item) => pushOneAbsItem(item, { request, cfg }), pushConcurrency(cfg), onError);
+  const onStopped = (item) => {
+    const { id, title } = describeItem(item);
+    return { status: 'skipped', entry: { id, title, reason: CANCELLED_REASON }, stopped: true };
+  };
+  const outcomes = await runPool(items || [], (item) => pushOneAbsItem(item, { request, cfg }), pushConcurrency(cfg), onError, { shouldStop, onStopped });
   const result = { updated: [], skipped: [], failed: [], snapshots: {}, refreshed: {} };
+  if (outcomes.some((o) => o.stopped)) result.cancelled = true;
   for (const o of outcomes) {
     result[o.status].push(o.entry);
     if (o.entry.id == null) continue;

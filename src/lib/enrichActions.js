@@ -10,7 +10,13 @@
 //   - outcomes counted from the groups as sent, outside the setGroups updater
 //     (React may run an updater twice); the same applier then runs on the live
 //     groups inside the updater;
-//   - one summarizeBatch toast at the end, so total failure reads as failure.
+//   - one summarizeBatch toast at the end, so total failure reads as failure;
+//   - M-6: a Cancel (lib/cancel.js) stops the loop between chunks. What was
+//     applied stays applied; the toast says how many were processed.
+//
+// runBatchChunks is the chunk loop for the steps that send a whole selection
+// to one batch command (Resolve, Description Processing, Classify, DNA): 25
+// books per call, each chunk staged as it lands, the same cancel check.
 
 import {
   applyTitleResult, applySeriesResult, applySubtitleResult, applyGenreCleanupResult,
@@ -18,6 +24,7 @@ import {
 } from './applyAiResults.js';
 import { summarizeBatch, scrollToFirstErrorGroup } from './batchToast.js';
 import { errorDetailFromException } from './errorDetail.js';
+import { isCancelled } from './cancel.js';
 
 export const rejectedEntry = (err) => ({ success: false, error: String(err?.message || err) });
 
@@ -35,10 +42,11 @@ export function applyEntries(setGroups, sentGroups, entryFor, apply) {
   return pairs;
 }
 
-// The end-of-run toast for an action. Returns the counts.
-export function reportOutcomes(toast, op, pairs) {
+// The end-of-run toast for an action. Returns the counts. `cancelled` is the
+// number of books a cancelled run never reached.
+export function reportOutcomes(toast, op, pairs, cancelled = 0) {
   const { counts, errorResults } = tallyOutcomes(pairs);
-  const summary = summarizeBatch({ op, ...counts });
+  const summary = summarizeBatch({ op, ...counts, cancelled });
   if (summary && toast) {
     const opts = (summary.hasWarnings || summary.hasFailures)
       ? { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(errorResults, summary.hasFailures ? 'error' : 'warn') } }
@@ -208,13 +216,15 @@ export const ENRICH_ACTIONS = Object.freeze({
  *   chunkSize     override the action's chunk size
  *   extraPairs    outcomes to include in the toast (e.g. smart-skipped books)
  *   onChunkStart(chunk, offset), onChunkDone(done, counts)  progress hooks
+ *   shouldStop    checked before each chunk (default: the Cancel token)
  *
- * Returns { pairs, counts } where counts is the tally of every pair.
+ * Returns { pairs, counts, cancelled } where counts is the tally of every
+ * pair and cancelled is how many books a cancelled run never reached.
  */
 export async function runEnrichAction(name, groups, options = {}) {
   const action = ENRICH_ACTIONS[name];
   if (!action) throw new Error(`runEnrichAction: unknown action "${name}"`);
-  const { callBackend, setGroups, toast = null, ctx = {}, extraPairs = [], onChunkStart, onChunkDone } = options;
+  const { callBackend, setGroups, toast = null, ctx = {}, extraPairs = [], onChunkStart, onChunkDone, shouldStop = isCancelled } = options;
   const applyFn = options.apply || action.apply;
   const apply = (g, entry) => applyFn(g, entry, ctx);
   const chunkSize = options.chunkSize || action.chunkSize;
@@ -223,7 +233,9 @@ export async function runEnrichAction(name, groups, options = {}) {
   const toCall = action.skip ? groups.filter((g) => !action.skip(g)) : groups;
   const pairs = skipped.length > 0 ? applyEntries(setGroups, skipped, () => undefined, apply) : [];
 
+  let cancelled = 0;
   for (let i = 0; i < toCall.length; i += chunkSize) {
+    if (shouldStop()) { cancelled = toCall.length - i; break; }
     const chunk = toCall.slice(i, i + chunkSize);
     onChunkStart?.(chunk, skipped.length + i);
     let entries;
@@ -249,6 +261,55 @@ export async function runEnrichAction(name, groups, options = {}) {
     onChunkDone?.(skipped.length + Math.min(i + chunkSize, toCall.length), tallyOutcomes(pairs).counts);
   }
 
-  const counts = reportOutcomes(toast, action.op, [...pairs, ...extraPairs]);
-  return { pairs, counts };
+  const counts = reportOutcomes(toast, action.op, [...pairs, ...extraPairs], cancelled);
+  return { pairs, counts, cancelled };
+}
+
+export const BATCH_CHUNK_SIZE = 25;
+
+/**
+ * M-6: run a whole-selection batch command in chunks, staging each chunk as
+ * it lands so a crash or a Cancel keeps what was done.
+ *
+ * options:
+ *   chunkSize     books per call (default 25; Local AI's 5-per-prompt
+ *                 batching happens inside the call and is unchanged)
+ *   callChunk(chunk, offset) -> { results, total_processed, total_failed }
+ *   applyChunk(result, chunk)  stage one chunk (calls setGroups)
+ *   onChunkStart(chunk, offset)
+ *   stage         errorDetail stage for a chunk whose call throws
+ *   shouldStop    checked before each chunk (default: the Cancel token)
+ *
+ * A chunk whose call throws counts each of its books as failed (with the
+ * error on the book) and the next chunk still runs.
+ *
+ * Returns { results, processed, failed, cancelled } summed over the chunks;
+ * cancelled is how many books a cancelled run never reached.
+ */
+export async function runBatchChunks(items, options = {}) {
+  const { chunkSize = BATCH_CHUNK_SIZE, callChunk, applyChunk, onChunkStart, stage, shouldStop = isCancelled } = options;
+  const out = { results: [], processed: 0, failed: 0, cancelled: 0 };
+  for (let i = 0; i < items.length; i += chunkSize) {
+    if (shouldStop()) { out.cancelled = items.length - i; break; }
+    const chunk = items.slice(i, i + chunkSize);
+    onChunkStart?.(chunk, i);
+    let result;
+    try {
+      result = await callChunk(chunk, i);
+    } catch (err) {
+      console.error(`Batch of ${chunk.length} failed:`, err);
+      const error = String(err?.message || err);
+      const errorDetail = errorDetailFromException(err, { stage });
+      result = {
+        results: chunk.map((g) => ({ id: g.id, success: false, error, errorDetail })),
+        total_processed: 0,
+        total_failed: chunk.length,
+      };
+    }
+    applyChunk(result, chunk);
+    out.results.push(...(Array.isArray(result?.results) ? result.results : []));
+    out.processed += result?.total_processed || 0;
+    out.failed += result?.total_failed || 0;
+  }
+  return out;
 }

@@ -3,6 +3,10 @@ import { X, UploadCloud, AlertTriangle, CheckCircle, BookOpen, User, Mic2, Tag, 
 
 export function ABSPushModal({ isOpen, onClose, onConfirm, groups, pushing }) {
   const [confirmText, setConfirmText] = useState('');
+  // H-7: disabled from the first click until the push settles, so a second
+  // click before the parent reports `pushing` cannot start a second push.
+  const [submitting, setSubmitting] = useState(false);
+  const busy = pushing || submitting;
 
   // Calculate summary of changes
   const summary = useMemo(() => {
@@ -61,10 +65,14 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, groups, pushing }) {
   const needsTypedConfirmation = summary.totalBooks >= 100;
   const confirmationValid = !needsTypedConfirmation || confirmText === `push ${summary.totalBooks}`;
 
-  const handleConfirm = () => {
-    if (confirmationValid) {
-      onConfirm();
-      setConfirmText('');
+  const handleConfirm = async () => {
+    if (!confirmationValid || busy) return;
+    setSubmitting(true);
+    setConfirmText('');
+    try {
+      await onConfirm();
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -193,21 +201,21 @@ export function ABSPushModal({ isOpen, onClose, onConfirm, groups, pushing }) {
         <div className="px-6 py-4 border-t border-neutral-800 bg-neutral-950 flex items-center justify-end gap-3">
           <button
             onClick={onClose}
-            disabled={pushing}
+            disabled={busy}
             className="px-4 py-2 text-gray-300 hover:bg-neutral-800 rounded-lg transition-colors font-medium"
           >
             Cancel
           </button>
           <button
             onClick={handleConfirm}
-            disabled={pushing || !confirmationValid}
+            disabled={busy || !confirmationValid}
             className={`px-6 py-2 rounded-lg font-medium flex items-center gap-2 transition-all ${
-              confirmationValid && !pushing
+              confirmationValid && !busy
                 ? 'bg-green-600 hover:bg-green-700 text-white'
                 : 'bg-gray-600 text-gray-400 cursor-not-allowed'
             }`}
           >
-            {pushing ? (
+            {busy ? (
               <>
                 <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                 Pushing...

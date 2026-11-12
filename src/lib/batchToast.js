@@ -32,9 +32,30 @@ const warningText = (meta, n) => `${n} ${meta.warningLabel || 'warnings'}`;
 // Returns null if nothing to report (zero succeeded AND zero skipped AND no
 // errors). Returns { type: 'success'|'warning'|'error', title, message,
 // hasWarnings, hasFailures } — caller adds the action for Show details.
-export function summarizeBatch({ op, succeeded = 0, skipped = 0, warnings = 0, failed = 0 }) {
+//
+// M-6: `cancelled` is the number of books a cancelled run never reached. When
+// it is set the toast says how many were processed and that the rest were
+// cancelled (what was already applied stays applied).
+export function summarizeBatch({ op, succeeded = 0, skipped = 0, warnings = 0, failed = 0, cancelled = 0 }) {
   const meta = OPS[op];
   if (!meta) throw new Error(`summarizeBatch: unknown op "${op}"`);
+
+  if (cancelled > 0) {
+    const processed = succeeded + skipped + warnings + failed;
+    const parts = [];
+    if (succeeded > 0) parts.push(`${succeeded} ${meta.verb}`);
+    if (failed > 0) parts.push(`${failed} failed`);
+    if (warnings > 0) parts.push(warningText(meta, warnings));
+    if (skipped > 0) parts.push(skippedText(meta, skipped));
+    const detail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+    return {
+      type: failed > 0 ? 'error' : 'warning',
+      title: `${meta.v2v3Title} cancelled`,
+      message: `${processed} of ${processed + cancelled} processed${detail}; the remaining ${cancelled} ${cancelled === 1 ? 'was' : 'were'} cancelled.`,
+      hasWarnings: warnings > 0,
+      hasFailures: failed > 0,
+    };
+  }
 
   if (succeeded === 0 && skipped === 0 && warnings === 0 && failed === 0) return null;
 

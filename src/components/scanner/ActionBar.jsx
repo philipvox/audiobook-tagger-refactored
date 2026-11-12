@@ -68,6 +68,7 @@ export function ActionBar({
   processingDescriptions = false,
   onClearSelection,
   onSelectAll,
+  filteredGroups = null, // H-8: the books the list's search/filters show; null when no filter is active
   onScanErrors,
   onAuthorMatch,
   onBatchFix,
@@ -112,7 +113,7 @@ export function ActionBar({
   const selectedCount = allSelected ? totalGroupCount : selectedGroupCount;
   const hasSelection = selectedCount > 0;
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const isProcessing = scanning || cleaningGenres || assigningTags || fixingDescriptions || fixingTitles || fixingAuthors || fixingYears || fixingSeries || lookingUpAge || lookingUpISBN || runningAll || generatingDna || classifying || resolvingMetadata || processingDescriptions || pushing || validating || analyzingSeries || extractingByAudio;
+  const isProcessing = scanning || cleaningGenres || assigningTags || fixingDescriptions || fixingTitles || fixingSubtitles || fixingAuthors || fixingYears || fixingSeries || lookingUpAge || lookingUpISBN || runningAll || generatingDna || classifying || resolvingMetadata || processingDescriptions || pushing || validating || analyzingSeries || extractingByAudio;
 
   // Time estimate for local AI: ~3s per book (batched 5 per prompt) + ~4s DNA per book
   const estimateLocalTime = (count, calls) => {
@@ -440,7 +441,7 @@ export function ActionBar({
             {/* Push */}
             <PillBtn
               onClick={onPush}
-              disabled={isProcessing}
+              disabled={isProcessing || !hasSelection}
               active={pushing}
               icon={Upload}
               label="Push"
@@ -484,7 +485,8 @@ export function ActionBar({
             {/* Select All */}
             {!allSelected && onSelectAll && (
               <PillBtn
-                onClick={onSelectAll}
+                // H-8: with a filter active, select the books it shows, not the library.
+                onClick={() => (filteredGroups ? onSelectAll(filteredGroups) : onSelectAll())}
                 icon={CheckCircle}
                 label="Select All"
               />

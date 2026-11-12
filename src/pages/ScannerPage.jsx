@@ -19,7 +19,7 @@ import { ValidationIssueModal } from '../components/ValidationIssueModal';
 import { AuthorAnalysisModal } from '../components/AuthorAnalysisModal';
 import { BatchFixModal } from '../components/BatchFixModal';
 import { useToast } from '../components/Toast';
-import { useScan } from '../hooks/useScan';
+import { useScan, importFromAbsWithNotice, hasAbsConnection } from '../hooks/useScan';
 import { useFileSelection } from '../hooks/useFileSelection';
 import { useTagOperations } from '../hooks/useTagOperations';
 import { useBatchOperations } from '../hooks/useBatchOperations';
@@ -33,7 +33,8 @@ import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePu
 import { userClearedPatch } from '../lib/userCleared';
 import { applyClassifyResult } from '../lib/applyClassifyResult';
 import { applyTagsResultToGroup, applyDnaResultToGroup, normalizeResults } from '../lib/applyTagResults';
-import { runEnrichAction, applyEntries } from '../lib/enrichActions';
+import { runEnrichAction, applyEntries, runBatchChunks } from '../lib/enrichActions';
+import { requestCancel, resetCancel, isCancelled } from '../lib/cancel';
 import { syncAllSeries } from '../lib/absPayload';
 import { applyMetadataToGroup, readFileField, setYear } from '../lib/applyMetadata';
 import { listFingerprint } from '../lib/selectionFingerprint';
@@ -60,6 +61,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   // affected group ids (cleared from BookList's coverCache); `nonce` also
   // re-triggers MetadataPanel's cover load for the open book.
   const [coverRefresh, setCoverRefresh] = useState({ nonce: 0, ids: [] });
+  // H-8: the books the list's search/filters show; null when they show every book.
+  const [listFilteredGroups, setListFilteredGroups] = useState(null);
+  // H-7: an ABS push is running (the modal's Confirm stays disabled).
+  const [absPushing, setAbsPushing] = useState(false);
+  const absPushingRef = useRef(false);
 
   // H3 (Run All stale groups): keep a live ref to `groups` so Run All's
   // sequential enrichment steps read each prior step's merged results instead
@@ -275,18 +281,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     cancelScan
   } = useScan();
 
-  // H-4: tell the user when a re-import replaced books restored without a snapshot.
-  const handleImportFromAbsNotify = async (...args) => {
-    const result = await handleImportFromAbs(...args);
-    const n = result?.refreshed || 0;
-    if (n > 0) {
-      toast.warning(
-        'Books Refreshed',
-        `${n} ${n === 1 ? 'book' : 'books'} from an older session ${n === 1 ? 'was' : 'were'} refreshed from AudiobookShelf. Their unpushed edits were discarded.`
-      );
-    }
-    return result;
-  };
+  // H-4/H-9/H-7: tell the user how an import ended: refreshed books, a
+  // failure (with its message) or a cancel. Never rethrows (bound to onClick).
+  const handleImportFromAbsNotify = (...args) => importFromAbsWithNotice(handleImportFromAbs, toast, ...args);
 
   // Keep selectedGroup in sync when groups are updated (e.g., after rescan)
   useEffect(() => {
@@ -414,8 +411,14 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     });
   };
 
-  // Optimized: use allSelected flag instead of building huge Sets
-  const handleSelectAll = () => {
+  // Optimized: use allSelected flag instead of building huge Sets.
+  // H-8: with a filter active the action bar passes the filtered books, and
+  // only those are selected.
+  const handleSelectAll = (filteredGroups) => {
+    if (Array.isArray(filteredGroups)) {
+      handleSelectFiltered(filteredGroups);
+      return;
+    }
     selectAll(groups);
     setSelectedGroupIds(new Set()); // Clear - we use allSelected flag
   };
@@ -854,6 +857,19 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const runAction = (name, sentGroups, options = {}) =>
     runEnrichAction(name, sentGroups, { callBackend, setGroups, toast, ...options });
 
+  // H-7/M-6: every Enrich action starts with a fresh cancel token, so a stale
+  // Cancel from an earlier run never stops it. A Run All step keeps Run All's
+  // token, so a Cancel during one step also stops the steps after it.
+  const beginCancellable = () => {
+    if (!runAllActiveRef.current) resetCancel();
+  };
+  // The progress bar's Cancel: chunked actions stop before their next chunk;
+  // what was already applied stays applied.
+  const handleCancelBatch = () => {
+    requestCancel();
+    toast.info('Cancelling', 'Stopping once the books in progress finish.');
+  };
+
   // ✅ GPT-powered genre cleanup for selected books (with progress)
   const handleGenreCleanup = async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
@@ -872,6 +888,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     }
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    beginCancellable();
     batch.start('genres', { total: selectedGroups.length, cleaned: 0, unchanged: 0 });
     logBatchStart('genres', selectedGroups.length);
 
@@ -937,6 +954,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    beginCancellable();
     batch.start('titles', { total: selectedGroups.length });
     logBatchStart('titles', selectedGroups.length);
 
@@ -962,6 +980,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    beginCancellable();
     batch.start('subtitles', { total: selectedGroups.length, fixed: 0, skipped: 0 });
     logBatchStart('subtitles', selectedGroups.length);
 
@@ -1001,6 +1020,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    beginCancellable();
     batch.start('authors', { total: selectedGroups.length, fixed: 0, skipped: 0 });
     logBatchStart('authors', selectedGroups.length);
 
@@ -1022,7 +1042,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Process in batches of 10
     const batchSize = 10;
+    let authorsCancelled = 0;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
+      // M-6: Cancel stops between batches; finished batches stay applied.
+      if (isCancelled()) { authorsCancelled = selectedGroups.length - i; break; }
       const chunk = selectedGroups.slice(i, i + batchSize);
       authorChunkOffset = i;
 
@@ -1097,8 +1120,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // warnings} we skip the success toast too, progress bar already showed
     // counts. Only surface V2/V3 when there's something to flag.
     const authorWarnings = 0; // fix_authors_batch ai-empty is failed, not warn (commit 8 normalization)
-    if (failedCount > 0 || authorWarnings > 0) {
-      const summary = summarizeBatch({ op: 'authors', succeeded: fixedCount, skipped: skippedCount, warnings: authorWarnings, failed: failedCount });
+    if (failedCount > 0 || authorWarnings > 0 || authorsCancelled > 0) {
+      const summary = summarizeBatch({ op: 'authors', succeeded: fixedCount, skipped: skippedCount, warnings: authorWarnings, failed: failedCount, cancelled: authorsCancelled });
       if (summary) {
         const opts = { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(authorErrorResults, summary.hasFailures ? 'error' : 'warn') } };
         toast[summary.type](summary.title, summary.message, opts);
@@ -1126,6 +1149,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // H3: read live groups so a Run All chain sees prior steps' merges.
     const currentGroups = groupsRef.current;
     const selectedGroups = allSelected ? currentGroups : currentGroups.filter(g => selectedGroupIds.has(g.id));
+    beginCancellable();
     batch.start('years', { total: selectedGroups.length, fixed: 0, skipped: 0 });
     logBatchStart('years', selectedGroups.length);
 
@@ -1146,7 +1170,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Process in batches of 50 (backend handles concurrency)
     const batchSize = 50;
+    let yearsCancelled = 0;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
+      // M-6: Cancel stops between batches; finished batches stay applied.
+      if (isCancelled()) { yearsCancelled = selectedGroups.length - i; break; }
       const chunk = selectedGroups.slice(i, i + batchSize);
       yearChunkOffset = i;
 
@@ -1246,8 +1273,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // only when there's something to flag. fix_years_batch emits kind='schema'
     // for invalid-year, which maps to severity=error, so these are failures,
     // not warnings.
-    if (failedCount > 0) {
-      const summary = summarizeBatch({ op: 'years', succeeded: fixedCount, skipped: skippedCount, warnings: 0, failed: failedCount });
+    if (failedCount > 0 || yearsCancelled > 0) {
+      const summary = summarizeBatch({ op: 'years', succeeded: fixedCount, skipped: skippedCount, warnings: 0, failed: failedCount, cancelled: yearsCancelled });
       if (summary) {
         const opts = { action: { label: 'Show details', onClick: () => scrollToFirstErrorGroup(yearErrorResults, 'error') } };
         toast[summary.type](summary.title, summary.message, opts);
@@ -1300,6 +1327,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       return;
     }
 
+    beginCancellable();
+
     batch.start('audio_check', { total: needsProcessing.length });
     logBatchStart('audio_check', needsProcessing.length);
 
@@ -1344,6 +1373,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    beginCancellable();
     batch.start('series', { total: selectedGroups.length });
     logBatchStart('series', selectedGroups.length);
 
@@ -1372,6 +1402,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    beginCancellable();
     batch.start('age', { total: selectedGroups.length });
     logBatchStart('age', selectedGroups.length);
 
@@ -1396,6 +1427,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const handleLookupISBN = async () => {
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0) return;
+
+    beginCancellable();
 
     batch.start('isbn', {});
     // H3: read live groups so a Run All chain sees prior steps' merges.
@@ -1488,6 +1521,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       return;
     }
 
+    beginCancellable();
+
     batch.start('metadata', { total: booksToProcess.length, currentBook: 'Resolving metadata via ABS + GPT...' });
     logBatchStart('resolve', booksToProcess.length);
 
@@ -1543,63 +1578,72 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       };
     });
 
-    // Listen for per-book progress events
+    // Listen for per-book progress events (counted within each chunk)
+    let metaChunkOffset = 0;
     const unlisten = subscribe('batch-progress', (d) => {
       if (d.call_type !== 'metadata') return;
       batch.update('metadata', {
-        current: d.current,
+        current: metaChunkOffset + d.current,
         currentBook: d.title,
       });
     });
 
     try {
-      const result = await callBackend('resolve_metadata_batch', { books, config });
+      // M-6: chunks of 25, each staged as it lands; Cancel stops between chunks.
+      const run = await runBatchChunks(books, {
+        stage: 'resolve',
+        onChunkStart: (chunk, offset) => {
+          metaChunkOffset = offset;
+          batch.update('metadata', { current: offset });
+        },
+        callChunk: (chunk) => callBackend('resolve_metadata_batch', { books: chunk, config }),
+        applyChunk: (result) => setGroups(prevGroups => {
+          return prevGroups.map(g => {
+            const r = result.results?.find(r => r.id === g.id);
+            if (!r) return g;
 
-      setGroups(prevGroups => {
-        return prevGroups.map(g => {
-          const r = result.results?.find(r => r.id === g.id);
-          if (!r) return g;
+            // Pick the most relevant errorDetail for this book: resolve-stage error
+            // wins over the earlier gather-stage error (resolve runs after gather;
+            // if both stages produced errors, the resolve error is newer signal).
+            const gatherDetail = gatheredDataRef.current?.get(g.id)?.errorDetail;
+            const errorSource = r.errorDetail || gatherDetail;
+            let lastError;
+            if (errorSource) {
+              const isHardFailure = r.error || r.success === false || ['network', 'http', 'parse', 'schema'].includes(errorSource.kind);
+              lastError = { ...errorSource, severity: isHardFailure ? 'error' : 'warn' };
+            }
 
-          // Pick the most relevant errorDetail for this book: resolve-stage error
-          // wins over the earlier gather-stage error (resolve runs after gather;
-          // if both stages produced errors, the resolve error is newer signal).
-          const gatherDetail = gatheredDataRef.current?.get(g.id)?.errorDetail;
-          const errorSource = r.errorDetail || gatherDetail;
-          let lastError;
-          if (errorSource) {
-            const isHardFailure = r.error || r.success === false || ['network', 'http', 'parse', 'schema'].includes(errorSource.kind);
-            lastError = { ...errorSource, severity: isHardFailure ? 'error' : 'warn' };
-          }
+            // Hard failure or no usable change: surface error, don't merge metadata.
+            if (r.error || r.success === false || !r.changed) {
+              return lastError ? { ...g, lastError } : g;
+            }
 
-          // Hard failure or no usable change: surface error, don't merge metadata.
-          if (r.error || r.success === false || !r.changed) {
-            return lastError ? { ...g, lastError } : g;
-          }
-
-          // H2/H6: stamp each resolved field that actually changed into
-          // file.changes so Write Tags writes the resolution output.
-          const changedFileFields = [];
-          if (r.title && r.title !== g.metadata.title) changedFileFields.push('title');
-          if (r.author && r.author !== g.metadata.author) changedFileFields.push('author');
-          if (r.subtitle && r.subtitle !== g.metadata.subtitle) changedFileFields.push('subtitle');
-          if (r.series !== undefined && r.series !== g.metadata.series) changedFileFields.push('series');
-          if (r.sequence !== undefined && r.sequence !== g.metadata.sequence) changedFileFields.push('sequence');
-          if (r.narrator && r.narrator !== g.metadata.narrator) changedFileFields.push('narrator');
-          const next = applyMetadataToGroup(
-            g,
-            {
-              title: r.title || g.metadata.title,
-              author: r.author || g.metadata.author,
-              subtitle: r.subtitle || g.metadata.subtitle,
-              series: r.series !== undefined ? r.series : g.metadata.series,
-              sequence: r.sequence !== undefined ? r.sequence : g.metadata.sequence,
-              narrator: r.narrator || g.metadata.narrator,
-            },
-            changedFileFields
-          );
-          return { ...next, lastError };
-        });
+            // H2/H6: stamp each resolved field that actually changed into
+            // file.changes so Write Tags writes the resolution output.
+            const changedFileFields = [];
+            if (r.title && r.title !== g.metadata.title) changedFileFields.push('title');
+            if (r.author && r.author !== g.metadata.author) changedFileFields.push('author');
+            if (r.subtitle && r.subtitle !== g.metadata.subtitle) changedFileFields.push('subtitle');
+            if (r.series !== undefined && r.series !== g.metadata.series) changedFileFields.push('series');
+            if (r.sequence !== undefined && r.sequence !== g.metadata.sequence) changedFileFields.push('sequence');
+            if (r.narrator && r.narrator !== g.metadata.narrator) changedFileFields.push('narrator');
+            const next = applyMetadataToGroup(
+              g,
+              {
+                title: r.title || g.metadata.title,
+                author: r.author || g.metadata.author,
+                subtitle: r.subtitle || g.metadata.subtitle,
+                series: r.series !== undefined ? r.series : g.metadata.series,
+                sequence: r.sequence !== undefined ? r.sequence : g.metadata.sequence,
+                narrator: r.narrator || g.metadata.narrator,
+              },
+              changedFileFields
+            );
+            return { ...next, lastError };
+          });
+        }),
       });
+      const result = { results: run.results, total_processed: run.processed, total_failed: run.failed };
 
       unlisten();
       const processed = result.total_processed || 0;
@@ -1609,8 +1653,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       const warnings = (result.results || []).filter(r =>
         r.errorDetail && !r.error && r.success !== false && severityForKind(r.errorDetail.kind) === 'warn'
       ).length;
-      batch.update('metadata', { current: booksToProcess.length, success: processed, failed, currentBook: 'Complete' });
-      const summary = summarizeBatch({ op: 'resolve', succeeded: processed, skipped, warnings, failed });
+      batch.update('metadata', { current: booksToProcess.length - run.cancelled, success: processed, failed, currentBook: 'Complete' });
+      const summary = summarizeBatch({ op: 'resolve', succeeded: processed, skipped, warnings, failed, cancelled: run.cancelled });
       if (summary) {
         const errResults = result.results || [];
         const opts = (summary.hasWarnings || summary.hasFailures)
@@ -1631,7 +1675,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       });
       logBatchEnd(
         'resolve',
-        { books: booksToProcess.length, processed, skipped, warnings, failed },
+        { books: booksToProcess.length, processed, skipped, warnings, failed, cancelled: run.cancelled },
         loggedResolveResults
       );
     } catch (e) {
@@ -1677,6 +1721,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       return;
     }
 
+    beginCancellable();
+
     batch.start('descriptionProcessing', { total: booksToProcess.length, currentBook: 'Processing descriptions...' });
     logBatchStart('description', booksToProcess.length);
 
@@ -1688,49 +1734,58 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       description: g.metadata?.description || null,
     }));
 
-    // Listen for per-book progress events
+    // Listen for per-book progress events (counted within each chunk)
+    let descProcChunkOffset = 0;
     const unlisten = subscribe('batch-progress', (d) => {
       if (d.call_type !== 'description') return;
       batch.update('descriptionProcessing', {
-        current: d.current,
+        current: descProcChunkOffset + d.current,
         currentBook: d.title,
       });
     });
 
     try {
-      const result = await callBackend('process_descriptions_batch', { books, config });
+      // M-6: chunks of 25, each staged as it lands; Cancel stops between chunks.
+      const run = await runBatchChunks(books, {
+        stage: 'description',
+        onChunkStart: (chunk, offset) => {
+          descProcChunkOffset = offset;
+          batch.update('descriptionProcessing', { current: offset });
+        },
+        callChunk: (chunk) => callBackend('process_descriptions_batch', { books: chunk, config }),
+        applyChunk: (result) => setGroups(prevGroups => {
+          return prevGroups.map(g => {
+            const r = result.results?.find(r => r.id === g.id);
+            if (!r || r.error || !r.changed) return g;
 
-      setGroups(prevGroups => {
-        return prevGroups.map(g => {
-          const r = result.results?.find(r => r.id === g.id);
-          if (!r || r.error || !r.changed) return g;
+            // Also try to extract narrator from the new description
+            const narratorMatch = r.description?.match(/(?:read|narrated|voiced|performed)\s+by\s+([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)*)/i);
 
-          // Also try to extract narrator from the new description
-          const narratorMatch = r.description?.match(/(?:read|narrated|voiced|performed)\s+by\s+([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)*)/i);
-
-          // H2/H6: stamp description (and any extracted narrator) into file.changes.
-          const addNarrator = narratorMatch && !g.metadata.narrator;
-          const changedFileFields = ['description'];
-          if (addNarrator) changedFileFields.push('narrator');
-          return applyMetadataToGroup(
-            g,
-            {
-              description: r.description,
-              ...(addNarrator ? { narrator: narratorMatch[1] } : {}),
-            },
-            changedFileFields
-          );
-        });
+            // H2/H6: stamp description (and any extracted narrator) into file.changes.
+            const addNarrator = narratorMatch && !g.metadata.narrator;
+            const changedFileFields = ['description'];
+            if (addNarrator) changedFileFields.push('narrator');
+            return applyMetadataToGroup(
+              g,
+              {
+                description: r.description,
+                ...(addNarrator ? { narrator: narratorMatch[1] } : {}),
+              },
+              changedFileFields
+            );
+          });
+        }),
       });
+      const result = { results: run.results, total_processed: run.processed, total_failed: run.failed };
 
       const processed = result.total_processed || 0;
       const failed = result.total_failed || 0;
       unlisten();
-      batch.update('descriptionProcessing', { current: booksToProcess.length, success: processed, failed, currentBook: 'Complete' });
+      batch.update('descriptionProcessing', { current: booksToProcess.length - run.cancelled, success: processed, failed, currentBook: 'Complete' });
       const descWarnings = (result.results || []).filter(r =>
         r.errorDetail && !r.error && r.success !== false && severityForKind(r.errorDetail.kind) === 'warn'
       ).length;
-      const descSummary = summarizeBatch({ op: 'description', succeeded: processed, skipped: skippedDesc, warnings: descWarnings, failed });
+      const descSummary = summarizeBatch({ op: 'description', succeeded: processed, skipped: skippedDesc, warnings: descWarnings, failed, cancelled: run.cancelled });
       if (descSummary) {
         const errResults = result.results || [];
         const opts = (descSummary.hasWarnings || descSummary.hasFailures)
@@ -1740,7 +1795,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       }
       logBatchEnd(
         'description',
-        { books: booksToProcess.length, processed, skipped: skippedDesc, warnings: descWarnings, failed },
+        { books: booksToProcess.length, processed, skipped: skippedDesc, warnings: descWarnings, failed, cancelled: run.cancelled },
         result.results || []
       );
     } catch (e) {
@@ -1764,6 +1819,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // the step handlers no-op and don't wipe the shared gather hints out from
     // under a later step. Reset in the finally no matter how we exit.
     runAllActiveRef.current = true;
+    // H-7/M-6: one cancel token for the whole chain (the steps keep it).
+    resetCancel();
 
     // Phase 1: Gather all external API data upfront
     const totalSteps = 6; // gather + 5 enrichment steps
@@ -1826,6 +1883,13 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       ];
 
       for (let i = 0; i < steps.length; i++) {
+        // M-6: a Cancel stops the chain; finished steps stay applied.
+        if (isCancelled()) {
+          const left = steps.length - i;
+          logEvent('enrichment', 'cancelled', { stepsLeft: left });
+          toast.warning('Run All cancelled', `${stepSucceeded + stepFailed} of ${totalSteps} steps ran; the remaining ${left} ${left === 1 ? 'was' : 'were'} cancelled.`);
+          break;
+        }
         const step = steps[i];
         const stepNum = i + 2; // offset by 1 for gather phase
         batch.update('enrichment', {
@@ -1875,6 +1939,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    beginCancellable();
     batch.start('tags', { total: selectedGroups.length });
     logBatchStart('tags', selectedGroups.length);
 
@@ -1892,7 +1957,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Process in batches of 25 for efficiency while still showing progress
     const batchSize = 25;
+    let tagsCancelled = 0;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
+      // M-6: Cancel stops between batches; finished batches stay applied.
+      if (isCancelled()) { tagsCancelled = selectedGroups.length - i; break; }
       const chunk = selectedGroups.slice(i, i + batchSize);
       tagChunkOffset = i;
 
@@ -1944,7 +2012,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // (snapshot age tags kept; a failed age lookup does not replace the
     // tags-step error on a book). No toast of its own; counted below.
     batch.update('tags', { currentBook: 'Looking up age ratings...' });
-    const { counts: ageCounts } = await runAction('age_tags', selectedGroups, {
+    // Age tags only for the books the tags step reached (all of them unless
+    // cancelled; a Cancel also stops the age step between its chunks).
+    const taggedGroups = tagsCancelled > 0 ? selectedGroups.slice(0, selectedGroups.length - tagsCancelled) : selectedGroups;
+    const { counts: ageCounts } = await runAction('age_tags', taggedGroups, {
       toast: null,
       onChunkStart: (chunk) => batch.update('tags', { currentBook: `Age: ${chunk.map(g => g.metadata?.title || g.group_name).join(', ')}` }),
     });
@@ -1958,8 +2029,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       ageFailed: ageFailedCount,
     });
     // M-7: failures are shown, not only logged.
-    const tagsSummary = summarizeBatch({ op: 'tags', succeeded: Math.max(0, successCount - tagsPartialCount), warnings: tagsPartialCount, failed: failedCount });
-    if (tagsSummary && (tagsSummary.hasFailures || tagsSummary.hasWarnings)) {
+    const tagsSummary = summarizeBatch({ op: 'tags', succeeded: Math.max(0, successCount - tagsPartialCount), warnings: tagsPartialCount, failed: failedCount, cancelled: tagsCancelled });
+    if (tagsCancelled > 0) {
+      toast[tagsSummary.type](tagsSummary.title, tagsSummary.message);
+    } else if (tagsSummary && (tagsSummary.hasFailures || tagsSummary.hasWarnings)) {
       toast[tagsSummary.type](tagsSummary.title, 'See the book error. Existing tags were kept.');
     }
     if (ageFailedCount > 0) {
@@ -1976,6 +2049,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    beginCancellable();
     batch.start('dna', { total: selectedGroups.length });
     logBatchStart('dna', selectedGroups.length);
 
@@ -1997,16 +2071,18 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     let dnaSuccessCount = 0;
     let dnaFailedCount = 0;
+    let dnaChunkOffset = 0;
+    let unlisten = null;
 
     try {
-      // Listen for progress events
-      const unlisten = subscribe('dna-progress', (data) => {
-        const { current, total, id, title, success, error } = data;
+      // Listen for progress events (counted within each chunk)
+      unlisten = subscribe('dna-progress', (data) => {
+        const { current, title, success, error } = data;
         if (success) dnaSuccessCount++;
         else dnaFailedCount++;
         batch.update('dna', {
-          current,
-          total,
+          current: dnaChunkOffset + current,
+          total: items.length,
           success: dnaSuccessCount,
           failed: dnaFailedCount,
           currentBook: title,
@@ -2017,40 +2093,52 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         }
       });
 
-      // Call batch API
-      const results = await callBackend('generate_book_dna_batch', {
-        request: { items },
+      // M-6: chunks of 25, each staged as it lands; Cancel stops between
+      // chunks. Merge new dna: tags into existing tags (audit C-2). A failed
+      // or empty answer leaves tags untouched and shows a per-book error.
+      const run = await runBatchChunks(items, {
+        stage: 'dna',
+        onChunkStart: (chunk, offset) => { dnaChunkOffset = offset; },
+        callChunk: async (chunk) => {
+          const chunkResults = normalizeResults(await callBackend('generate_book_dna_batch', { request: { items: chunk } }));
+          return {
+            results: chunkResults,
+            total_processed: chunkResults.filter(r => r.success).length,
+            total_failed: chunkResults.filter(r => !r.success).length,
+          };
+        },
+        applyChunk: (result) => setGroups(prevGroups => prevGroups.map(g =>
+          applyDnaResultToGroup(g, result.results.find(r => r.id === g.id)).group
+        )),
       });
-
-      // Merge new dna: tags into existing tags (audit C-2). A failed or empty
-      // answer leaves tags untouched and shows a per-book error.
-      const dnaResults = normalizeResults(results);
-      setGroups(prevGroups => prevGroups.map(g =>
-        applyDnaResultToGroup(g, dnaResults.find(r => r.id === g.id)).group
-      ));
-
-      unlisten();
+      const dnaResults = run.results;
 
       const successCount = dnaResults.filter(r => r.success).length;
       const failedCount = dnaResults.filter(r => !r.success).length;
 
       // Show toast
-      if (successCount > 0) {
+      if (run.cancelled > 0) {
+        const done = items.length - run.cancelled;
+        toast.warning('DNA Generation cancelled', `${done} of ${items.length} processed (${successCount} generated${failedCount ? `, ${failedCount} failed` : ''}); the remaining ${run.cancelled} ${run.cancelled === 1 ? 'was' : 'were'} cancelled.`);
+      } else if (successCount > 0) {
         toast.success('BookDNA Generated', `Generated DNA fingerprints for ${successCount} book${successCount > 1 ? 's' : ''}`);
       }
 
       logBatchEnd(
         'dna',
-        { books: selectedGroups.length, succeeded: successCount, failed: failedCount },
+        { books: selectedGroups.length, succeeded: successCount, failed: failedCount, cancelled: run.cancelled },
         dnaResults
       );
-      if (failedCount > 0) {
+      if (failedCount > 0 && run.cancelled === 0) {
         toast.error('Some DNA not generated', `${failedCount} book${failedCount > 1 ? 's' : ''} kept their existing tags`);
       }
     } catch (error) {
       console.error('BookDNA generation failed:', error);
       logEvent('batch', 'dna aborted', { error: String(error?.message || error) });
       toast.error('DNA Generation Failed', error.toString());
+    } finally {
+      // LOW: the progress listener is released on failure too.
+      if (unlisten) unlisten();
     }
 
     // Clear progress after a short delay
@@ -2097,6 +2185,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     // We record the ids to reset and apply the reset inside the success branch.
     const idsToForceReset = forceFresh ? new Set(booksToProcess.map(g => g.id)) : null;
 
+    beginCancellable();
+
     batch.start('classify', { total: booksToProcess.length, currentBook: 'Starting classification...' });
     logBatchStart('classify', booksToProcess.length);
 
@@ -2116,111 +2206,121 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       publisher: g.metadata?.publisher || null,
     }));
 
-    // Listen for per-book progress events
+    // Listen for per-book progress events (counted within each chunk)
+    let classifyChunkOffset = 0;
     const unlisten = subscribe('batch-progress', (d) => {
       if (d.call_type !== 'classify') return;
       batch.update('classify', {
-        current: d.current,
+        current: classifyChunkOffset + d.current,
         currentBook: d.title,
       });
     });
 
     try {
-      const result = await callBackend('classify_books_batch', {
-        books,
-        includeDescription,
-        forceFresh: forceFresh,
-        dnaEnabled,
-        config,
-      });
+      // M-6: chunks of 25, each staged as it lands; Cancel stops between
+      // chunks. Local AI still batches 5 books per prompt inside each call.
+      const run = await runBatchChunks(books, {
+        stage: 'classify',
+        onChunkStart: (chunk, offset) => {
+          classifyChunkOffset = offset;
+          batch.update('classify', { current: offset });
+        },
+        callChunk: (chunk) => callBackend('classify_books_batch', {
+          books: chunk,
+          includeDescription,
+          forceFresh: forceFresh,
+          dnaEnabled,
+          config,
+        }),
+        // Update groups with this chunk's classification results
+        applyChunk: (result) => setGroups(prevGroups => {
+          return prevGroups.map(g => {
+            const r = result.results?.find(r => r.id === g.id);
+            if (!r) return g;
+            // Hard failure: surface the error on the group and skip the metadata merge.
+            if (r.error || r.success === false) {
+              return {
+                ...g,
+                lastError: r.errorDetail
+                  ? { ...r.errorDetail, severity: 'error' }
+                  : { stage: 'classify', kind: 'network', message: r.error || 'Classification failed', severity: 'error' },
+              };
+            }
 
-      // Update groups with all classification results
-      setGroups(prevGroups => {
-        return prevGroups.map(g => {
-          const r = result.results?.find(r => r.id === g.id);
-          if (!r) return g;
-          // Hard failure: surface the error on the group and skip the metadata merge.
-          if (r.error || r.success === false) {
-            return {
-              ...g,
-              lastError: r.errorDetail
-                ? { ...r.errorDetail, severity: 'error' }
-                : { stage: 'classify', kind: 'network', message: r.error || 'Classification failed', severity: 'error' },
-            };
-          }
+            const isForceReset = idsToForceReset?.has(g.id) === true;
 
-          const isForceReset = idsToForceReset?.has(g.id) === true;
+            // Genres/tags go through the pure applyClassifyResult (audit C-1/H-1):
+            // an empty AI answer changes nothing, Force only discards an array when
+            // the AI supplied a replacement for it, genres supplement by default,
+            // and curated ABS tags survive via the import snapshot.
+            const applied = applyClassifyResult(g.metadata, r, {
+              force: isForceReset,
+              preserveGenres: config?.preserve_existing_genres !== false,
+              originalTags: g.abs_original?.tags,
+            });
+            if (applied.error === 'empty-answer') {
+              return {
+                ...g,
+                lastError: { stage: 'classify', kind: 'parse', message: 'The AI returned no genres or tags, so nothing was changed.', severity: 'error' },
+              };
+            }
+            const updatedMeta = { ...applied.metadata };
+            const genresChanged = applied.changedFields.includes('genre');
+            const tagsChanged = applied.changedFields.includes('tags');
 
-          // Genres/tags go through the pure applyClassifyResult (audit C-1/H-1):
-          // an empty AI answer changes nothing, Force only discards an array when
-          // the AI supplied a replacement for it, genres supplement by default,
-          // and curated ABS tags survive via the import snapshot.
-          const applied = applyClassifyResult(g.metadata, r, {
-            force: isForceReset,
-            preserveGenres: config?.preserve_existing_genres !== false,
-            originalTags: g.abs_original?.tags,
+            // Themes & tropes
+            if (r.themes?.length > 0) updatedMeta.themes = r.themes;
+            if (r.tropes?.length > 0) updatedMeta.tropes = r.tropes;
+
+            // Description (if changed)
+            if (r.description && r.description_changed) {
+              updatedMeta.description = r.description;
+            }
+
+            // H2/H6: stamp the writable classification output into file.changes.
+            // genres -> `genre` (comma-joined), tags, and description are what the
+            // write path can embed; themes/tropes/age/dna are ABS-only and stay in
+            // changedFields (below) for the UI + ABS push, but aren't file changes.
+            const changedFileFields = [];
+            if (genresChanged) changedFileFields.push('genre');
+            if (tagsChanged) changedFileFields.push('tags');
+            if (r.description && r.description_changed) changedFileFields.push('description');
+
+            // Sub-step warning (e.g. classification OK, DNA failed): amber pill.
+            // Clear lastError if there was a prior failure and this run succeeded cleanly.
+            const lastError = r.errorDetail
+              ? { ...r.errorDetail, severity: 'warn' }
+              : undefined;
+
+            // On a force reset, drop the prior changedFields base (matches the old
+            // `isForceReset ? [] : g.changedFields` behavior); the helper unions the
+            // writable fields (genre->genres, tags, description) on top.
+            const next = applyMetadataToGroup(
+              { ...g, changedFields: isForceReset ? [] : (g.changedFields || []) },
+              updatedMeta,
+              changedFileFields
+            );
+            const cf = new Set(next.changedFields);
+            if (r.themes?.length > 0) cf.add('themes');
+            if (r.tropes?.length > 0) cf.add('tropes');
+            if (r.age_category && r.age_category !== 'Unknown') cf.add('age');
+            if (r.dna_tags?.length > 0) cf.add('dna');
+            return { ...next, changedFields: [...cf], lastError };
           });
-          if (applied.error === 'empty-answer') {
-            return {
-              ...g,
-              lastError: { stage: 'classify', kind: 'parse', message: 'The AI returned no genres or tags, so nothing was changed.', severity: 'error' },
-            };
-          }
-          const updatedMeta = { ...applied.metadata };
-          const genresChanged = applied.changedFields.includes('genre');
-          const tagsChanged = applied.changedFields.includes('tags');
-
-          // Themes & tropes
-          if (r.themes?.length > 0) updatedMeta.themes = r.themes;
-          if (r.tropes?.length > 0) updatedMeta.tropes = r.tropes;
-
-          // Description (if changed)
-          if (r.description && r.description_changed) {
-            updatedMeta.description = r.description;
-          }
-
-          // H2/H6: stamp the writable classification output into file.changes.
-          // genres -> `genre` (comma-joined), tags, and description are what the
-          // write path can embed; themes/tropes/age/dna are ABS-only and stay in
-          // changedFields (below) for the UI + ABS push, but aren't file changes.
-          const changedFileFields = [];
-          if (genresChanged) changedFileFields.push('genre');
-          if (tagsChanged) changedFileFields.push('tags');
-          if (r.description && r.description_changed) changedFileFields.push('description');
-
-          // Sub-step warning (e.g. classification OK, DNA failed): amber pill.
-          // Clear lastError if there was a prior failure and this run succeeded cleanly.
-          const lastError = r.errorDetail
-            ? { ...r.errorDetail, severity: 'warn' }
-            : undefined;
-
-          // On a force reset, drop the prior changedFields base (matches the old
-          // `isForceReset ? [] : g.changedFields` behavior); the helper unions the
-          // writable fields (genre->genres, tags, description) on top.
-          const next = applyMetadataToGroup(
-            { ...g, changedFields: isForceReset ? [] : (g.changedFields || []) },
-            updatedMeta,
-            changedFileFields
-          );
-          const cf = new Set(next.changedFields);
-          if (r.themes?.length > 0) cf.add('themes');
-          if (r.tropes?.length > 0) cf.add('tropes');
-          if (r.age_category && r.age_category !== 'Unknown') cf.add('age');
-          if (r.dna_tags?.length > 0) cf.add('dna');
-          return { ...next, changedFields: [...cf], lastError };
-        });
+        }),
       });
+      const result = { results: run.results, total_processed: run.processed, total_failed: run.failed };
 
       unlisten();
       const successCount = result.total_processed || 0;
       const failedCount = result.total_failed || 0;
 
-      batch.update('classify', { current: booksToProcess.length, success: successCount, failed: failedCount, currentBook: 'Complete!' });
+      batch.update('classify', { current: booksToProcess.length - run.cancelled, success: successCount, failed: failedCount, currentBook: 'Complete!' });
 
       const classifyWarnings = (result.results || []).filter(r =>
         r.errorDetail && !r.error && r.success !== false && severityForKind(r.errorDetail.kind) === 'warn'
       ).length;
-      const classifySummary = summarizeBatch({ op: 'classify', succeeded: successCount, skipped: skippedClassify, warnings: classifyWarnings, failed: failedCount });
+      const classifySummary = summarizeBatch({ op: 'classify', succeeded: successCount, skipped: skippedClassify, warnings: classifyWarnings, failed: failedCount, cancelled: run.cancelled });
       if (classifySummary) {
         const errResults = result.results || [];
         const opts = (classifySummary.hasWarnings || classifySummary.hasFailures)
@@ -2237,6 +2337,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           skipped: skippedClassify,
           warnings: classifyWarnings,
           failed: failedCount,
+          cancelled: run.cancelled,
         },
         result.results || []
       );
@@ -2256,6 +2357,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     if (selectedCount === 0) return;
 
     const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
+    beginCancellable();
     batch.start('descriptions', { total: selectedGroups.length, fixed: 0, skipped: 0 });
     logBatchStart('descriptions', selectedGroups.length);
 
@@ -2273,7 +2375,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
 
     // Process in batches of 25 for efficiency while still showing progress
     const batchSize = 25;
+    let descsCancelled = 0;
     for (let i = 0; i < selectedGroups.length; i += batchSize) {
+      // M-6: Cancel stops between batches; finished batches stay applied.
+      if (isCancelled()) { descsCancelled = selectedGroups.length - i; break; }
       const chunk = selectedGroups.slice(i, i + batchSize);
       descChunkOffset = i;
 
@@ -2356,7 +2461,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       fixed: fixedCount,
       skipped: skippedCount,
       failed: failedCount,
+      cancelled: descsCancelled,
     });
+    if (descsCancelled > 0) {
+      const done = selectedGroups.length - descsCancelled;
+      toast.warning('Fix Descriptions cancelled', `${done} of ${selectedGroups.length} processed; the remaining ${descsCancelled} ${descsCancelled === 1 ? 'was' : 'were'} cancelled.`);
+    }
 
     // Clear progress after a short delay
     batch.end('descriptions', 1500);
@@ -2818,6 +2928,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
   const handleConfirmPush = async () => {
     const pushGroups = modals.data.push?.groups || [];
     if (pushGroups.length === 0) return;
+    // H-7: one push at a time; a second Confirm while one runs does nothing.
+    if (absPushingRef.current) return;
+    absPushingRef.current = true;
+    setAbsPushing(true);
 
     // #60: route by ABS item id, not by files.length - ABS-imported books
     // carry their audio files too, and the path-based branch cannot push them.
@@ -2844,6 +2958,8 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       toast.error('Push Failed', String(error?.message || error));
       logEvent('push', 'ABS push threw', { error: String(error?.message || error) });
     } finally {
+      absPushingRef.current = false;
+      setAbsPushing(false);
       modals.close('push');
     }
   };
@@ -2894,6 +3010,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         processingDescriptions={processingDescriptions}
         onClearSelection={handleClearSelection}
         onSelectAll={handleSelectAll}
+        filteredGroups={listFilteredGroups}
         onScanErrors={handleScanErrors}
         onAuthorMatch={handleAuthorAnalysis}
         onSeriesAnalysis={handleSeriesAnalysis}
@@ -2905,7 +3022,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         seriesAnalysis={seriesAnalysis}
         analyzingSeries={analyzingSeries}
         writing={writing}
-        pushing={pushing}
+        pushing={pushing || absPushing}
         scanning={scanning}
         cleaningGenres={cleaningGenres}
         assigningTags={assigningTags}
@@ -2919,7 +3036,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         lookingUpISBN={lookingUpISBN}
         runningAll={runningAll}
         generatingDna={generatingDna}
-        hasAbsConnection={!!(config?.abs_base_url && config?.abs_api_token)}
+        hasAbsConnection={hasAbsConnection(config)}
         hasOpenAiKey={!!(config?.openai_api_key || config?.anthropic_api_key || config?.use_local_ai)}
         useLocalAI={!!(config?.use_local_ai && config?.ollama_model)}
         aiModel={config?.ai_model}
@@ -2955,10 +3072,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           scanning={scanning}
           onSelectAll={handleSelectAll}
           onSelectFiltered={handleSelectFiltered}
+          onFilteredGroupsChange={setListFilteredGroups}
           onClearSelection={handleClearSelection}
           onExport={() => modals.open('export')}
           validationResults={validationResults}
-          hasAbsConnection={!!(config?.abs_base_url && config?.abs_api_token)}
+          hasAbsConnection={hasAbsConnection(config)}
           onNavigateToSettings={onNavigateToSettings}
           coverInvalidation={coverRefresh}
         />
@@ -3013,6 +3131,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="tags"
           progress={tagProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3020,6 +3139,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="descriptions"
           progress={descProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3027,6 +3147,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="titles"
           progress={titleProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3034,6 +3155,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="subtitles"
           progress={subtitleProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3041,6 +3163,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="authors"
           progress={authorProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3048,6 +3171,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="years"
           progress={yearProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3055,6 +3179,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="series"
           progress={seriesProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3062,6 +3187,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="age"
           progress={ageProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3069,6 +3195,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="isbn"
           progress={isbnProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3076,6 +3203,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="enrichment"
           progress={runAllProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3083,6 +3211,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="dna"
           progress={dnaProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3090,6 +3219,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="genres"
           progress={genreProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3097,6 +3227,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="metadata"
           progress={metadataProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3104,6 +3235,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="classify"
           progress={classifyProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3111,6 +3243,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="descriptionProcessing"
           progress={descriptionProgress}
+          onCancel={handleCancelBatch}
         />
       )}
 
@@ -3119,6 +3252,9 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           type="audio_check"
           progress={batch.getProgress('audio_check')}
           onCancel={async () => {
+            // The Rust side has its own cancel flag for the audio check; the
+            // JS token stops anything still queued behind it.
+            requestCancel();
             try {
               await callBackend('cancel_audio_extraction');
               toast.info('Cancelling audio extraction...');
@@ -3265,7 +3401,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         onClose={() => modals.close('push')}
         onConfirm={handleConfirmPush}
         groups={modals.data.push?.groups || []}
-        pushing={pushing}
+        pushing={pushing || absPushing}
       />
 
       {/* Write Tags Preview Modal (H3) */}

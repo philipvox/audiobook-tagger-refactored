@@ -150,3 +150,97 @@ describe('ScannerPage runs each action through runEnrichAction', () => {
     expect(source).toContain(`runAction('${name}'`);
   });
 });
+
+// M-6: the big steps (Resolve, Description Processing, Classify) run in chunks
+// of 25, stage each chunk as it lands, and stop between chunks on Cancel.
+describe('runBatchChunks (M-6)', () => {
+  const classifyBackend = () => vi.fn(async (cmd, { books }) => ({
+    results: books.map((b) => ({ id: b.id, success: true, genres: ['Fantasy'] })),
+    total_processed: books.length,
+    total_failed: 0,
+  }));
+
+  it('classify on 60 books calls setGroups three times (25, 25, 10)', async () => {
+    const { runBatchChunks } = await import('./enrichActions');
+    const groups = Array.from({ length: 60 }, (_, i) => book(`b${i}`));
+    const setGroups = vi.fn();
+    const callBackend = classifyBackend();
+
+    const out = await runBatchChunks(groups, {
+      callChunk: (chunk) => callBackend('classify_books_batch', { books: chunk.map((g) => ({ id: g.id })) }),
+      applyChunk: (result) => setGroups((prev) => prev.map((g) => g), result),
+      shouldStop: () => false,
+    });
+
+    expect(callBackend.mock.calls.map(([, a]) => a.books.length)).toEqual([25, 25, 10]);
+    expect(setGroups).toHaveBeenCalledTimes(3);
+    expect(setGroups.mock.calls.map(([, r]) => r.results.length)).toEqual([25, 25, 10]);
+    expect(out).toMatchObject({ processed: 60, failed: 0, cancelled: 0 });
+    expect(out.results).toHaveLength(60);
+  });
+
+  it('a cancel during the first chunk keeps that chunk and skips the rest', async () => {
+    const { runBatchChunks } = await import('./enrichActions');
+    const { requestCancel, resetCancel } = await import('./cancel');
+    resetCancel();
+    const groups = Array.from({ length: 60 }, (_, i) => book(`b${i}`));
+    const applied = [];
+    const callBackend = classifyBackend();
+
+    const out = await runBatchChunks(groups, {
+      callChunk: async (chunk) => {
+        const r = await callBackend('classify_books_batch', { books: chunk.map((g) => ({ id: g.id })) });
+        requestCancel();
+        return r;
+      },
+      applyChunk: (result) => applied.push(result.results.length),
+    });
+    resetCancel();
+
+    expect(applied).toEqual([25]);
+    expect(out).toMatchObject({ processed: 25, cancelled: 35 });
+  });
+
+  it('a chunk whose call throws counts its books as failed and the next chunk still runs', async () => {
+    const { runBatchChunks } = await import('./enrichActions');
+    const groups = Array.from({ length: 30 }, (_, i) => book(`b${i}`));
+    let call = 0;
+    const out = await runBatchChunks(groups, {
+      stage: 'classify',
+      callChunk: async (chunk) => {
+        call++;
+        if (call === 1) throw new Error('HTTP 500');
+        return { results: chunk.map((g) => ({ id: g.id, success: true })), total_processed: chunk.length, total_failed: 0 };
+      },
+      applyChunk: () => {},
+      shouldStop: () => false,
+    });
+    expect(out).toMatchObject({ processed: 5, failed: 25 });
+    expect(out.results[0]).toMatchObject({ id: 'b0', success: false, error: 'HTTP 500' });
+    expect(out.results[0].errorDetail).toMatchObject({ stage: 'classify' });
+  });
+});
+
+describe('runEnrichAction stops between chunks on Cancel (M-6)', () => {
+  it('what was applied stays applied and the toast says how many were processed', async () => {
+    const { requestCancel, resetCancel } = await import('./cancel');
+    resetCancel();
+    const groups = Array.from({ length: 30 }, (_, i) => book(`b${i}`));
+    const h = harness(groups);
+    const callBackend = vi.fn(async () => {
+      requestCancel();
+      return { success: true, result: { title: 'New Title' } };
+    });
+
+    const { counts, cancelled } = await runEnrichAction('titles', groups, { callBackend, setGroups: h.setGroups, toast: h.toast });
+    resetCancel();
+
+    expect(callBackend).toHaveBeenCalledTimes(25);
+    expect(cancelled).toBe(5);
+    expect(counts.succeeded + counts.skipped + counts.warnings + counts.failed).toBe(25);
+    const [title, message] = h.toast.warning.mock.calls[0];
+    expect(title).toBe('Fix Titles cancelled');
+    expect(message).toMatch(/25 of 30 processed/);
+    expect(message).toMatch(/the remaining 5 were cancelled/);
+  });
+});

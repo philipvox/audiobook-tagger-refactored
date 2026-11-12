@@ -4,6 +4,7 @@ import { callBackend, subscribe, pickPath } from '../api';
 import { useApp } from '../context/AppContext';
 import { getAbsId, normalizePushResult, buildPushItems, applyPushSnapshots, applyRefreshedLists, failedPushResult } from '../lib/absPush';
 import { logEvent } from '../lib/logEvent';
+import { requestCancel, resetCancel } from '../lib/cancel';
 
 // ============================================================================
 // Pure helpers, extracted so they can be unit-tested without rendering the
@@ -87,6 +88,44 @@ export function mergeAbsPull(prevGroups, newGroups) {
 
 export function mergeAbsPullGroups(prevGroups, newGroups) {
   return mergeAbsPull(prevGroups, newGroups).groups;
+}
+
+/**
+ * H-9: Import is offered only when the import can run: URL, token and
+ * library id are all set (import_from_abs throws without the library id).
+ */
+export function hasAbsConnection(config) {
+  return !!(config?.abs_base_url && config?.abs_api_token && config?.abs_library_id);
+}
+
+/**
+ * H-9/H-7: run an ABS import and tell the user how it ended. A rejected import
+ * gets an error toast with its message (the Import button is bound straight
+ * to onClick, so nothing else would catch it); a cancelled one says so; a
+ * re-import that refreshed books restored without a snapshot warns (H-4).
+ * Never rethrows.
+ */
+export async function importFromAbsWithNotice(importFn, toast, ...args) {
+  let result;
+  try {
+    result = await importFn(...args);
+  } catch (error) {
+    const message = String(error?.message || error);
+    toast.error('Import Failed', message);
+    return { success: false, error: message };
+  }
+  if (result?.cancelled) {
+    toast.info('Import cancelled', 'The workspace was not changed.');
+    return result;
+  }
+  const n = result?.refreshed || 0;
+  if (n > 0) {
+    toast.warning(
+      'Books Refreshed',
+      `${n} ${n === 1 ? 'book' : 'books'} from an older session ${n === 1 ? 'was' : 'were'} refreshed from AudiobookShelf. Their unpushed edits were discarded.`
+    );
+  }
+  return result;
 }
 
 export function useScan() {
@@ -488,6 +527,7 @@ export function useScan() {
     }
 
     let unlisten = null;
+    resetCancel();
     try {
       setScanning(true);
       const startTime = Date.now();
@@ -519,6 +559,12 @@ export function useScan() {
           : null;
         let refreshed = 0;
         const result = await callBackend('import_from_abs', { request });
+
+        // H-7: a cancelled import leaves the workspace exactly as it was.
+        if (result?.cancelled) {
+          logEvent('import', 'ABS import cancelled');
+          return { success: false, cancelled: true, count: 0, refreshed: 0 };
+        }
 
         if (result && result.groups) {
           // L1(pages): don't blow away staged local edits with a wholesale
@@ -560,6 +606,7 @@ export function useScan() {
     }
 
     let unlisten = null;
+    resetCancel();
     try {
 
       // Set up progress listener
@@ -609,7 +656,7 @@ export function useScan() {
         console.warn('Sample errors:', result.failed.slice(0, 10));
         logEvent('push', 'ABS push errors', { breakdown: errorTypes, sample: result.failed.slice(0, 5) });
       }
-      logEvent('push', 'ABS push (by id) complete', {
+      logEvent('push', raw?.cancelled ? 'ABS push (by id) cancelled' : 'ABS push (by id) complete', {
         books: groupsToPush.length,
         updated: result.updated.length,
         skipped: result.skipped.length,
@@ -908,29 +955,15 @@ export function useScan() {
     }
   }, [setGroups]);
 
+  // H-7: Cancel stops the running import or push for real: the JS token
+  // stops the page loop / push pool (books in flight finish), and the
+  // operation's own finally hides the bar once it has stopped. Hiding the bar
+  // here would only make the work invisible while it carried on.
   const cancelScan = useCallback(async () => {
+    requestCancel();
+    setScanProgress(prev => ({ ...prev, currentFile: 'Cancelling...' }));
     try {
       await callBackend('cancel_scan');
-      
-      if (progressIntervalRef.current) {
-        clearInterval(progressIntervalRef.current);
-        progressIntervalRef.current = null;
-      }
-      
-      if (resetTimeoutRef.current) {
-        clearTimeout(resetTimeoutRef.current);
-        resetTimeoutRef.current = null;
-      }
-      
-      setScanning(false);
-      setScanProgress({
-        current: 0,
-        total: 0,
-        currentFile: '',
-        startTime: null,
-        filesPerSecond: 0,
-        covers_found: 0,
-      });
     } catch (error) {
       console.error('Failed to cancel scan:', error);
     }

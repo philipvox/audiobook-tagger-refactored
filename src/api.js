@@ -10,6 +10,7 @@ import { isPlaceholderSeries } from './lib/absPayload.js';
 import { lookupHitMatch, lookupHitMatches, pickLookupHit, hasRealAuthor } from './lib/lookupMatch.js';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit } from './lib/genres';
 import { pushAbsItems } from './lib/absPush.js';
+import { isCancelled } from './lib/cancel.js';
 import { absItemsToBookGroups } from './lib/absGroup.js';
 import { isTauri } from './lib/platform.js';
 import { mapAgeCategory } from './lib/ageCategory.js';
@@ -426,9 +427,11 @@ async function pushAbsHandler(args) {
     };
   }
 
+  // H-7: Cancel stops the pool; books not started come back skipped 'cancelled'.
   return pushAbsItems(items, {
     request: (path, options) => absApi(baseUrl, token, path, options),
     cfg: config,
+    shouldStop: isCancelled,
   });
 }
 
@@ -471,8 +474,12 @@ const HANDLERS = {
     // instead: keep going while the last page was a full page, stop on an
     // empty or short page, and cap iterations so a misbehaving server can't
     // spin this forever.
+    // H-7: a cancelled import changes nothing; the caller must not replace
+    // or merge the workspace when it sees `cancelled`.
+    const cancelledResult = { cancelled: true, groups: [], total: 0 };
     while (true) {
       const data = await absApi(baseUrl, token, `/api/libraries/${libraryId}/items?limit=${limit}&page=${page}&expanded=1`);
+      if (isCancelled()) return cancelledResult;
       const items = data.results || [];
       const total = data.total || 0;
       allItems.push(...items);
@@ -484,7 +491,8 @@ const HANDLERS = {
     }
 
     // Convert ABS items to book groups (shared builder, see lib/absGroup.js).
-    const groups = await absItemsToBookGroups(baseUrl, token, allItems);
+    const groups = await absItemsToBookGroups(baseUrl, token, allItems, undefined, undefined, { shouldStop: isCancelled });
+    if (isCancelled()) return cancelledResult;
     return { groups, total: groups.length };
   },
 

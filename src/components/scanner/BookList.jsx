@@ -187,6 +187,7 @@ export function BookList({
   scanning,
   onSelectAll,
   onSelectFiltered,
+  onFilteredGroupsChange, // H-8: told the books the filters show (null when they show every book)
   onClearSelection,
   validationResults = {}, // { bookId: { issues, errorCount, warningCount } }
   hasAbsConnection = false,
@@ -463,6 +464,13 @@ export function BookList({
 
     return { filteredGroups: result, suggestions: didYouMean };
   }, [groups, searchQuery, sortBy, sortOrder, fuzzyMatch, getSuggestions, validationFilter, issueTypeFilter, editFilter, processedFilter, missingFilter, hasValidationData, validationResults]);
+
+  // H-8: the action bar's Select All selects what the list shows. When the
+  // filters hide nothing, report null so it keeps the whole-library fast path.
+  const filteredSubset = filteredGroups.length === groups.length ? null : filteredGroups;
+  useEffect(() => {
+    onFilteredGroupsChange?.(filteredSubset);
+  }, [filteredSubset, onFilteredGroupsChange]);
 
   // Hover preview handlers
   const handleChangesBadgeHover = useCallback((group, event) => {

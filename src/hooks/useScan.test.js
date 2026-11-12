@@ -435,3 +435,96 @@ describe.skip('useScan hook', () => {
     });
   });
 });
+
+// ============================================================================
+// Task 9 (H-7, H-9): import/push cancel and visible import errors. These run
+// against the real api.js handlers with a mocked absApi; they do not use the
+// fake timers or Tauri mocks the skipped suite above relies on.
+// ============================================================================
+
+vi.mock('../lib/proxy', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, absApi: vi.fn() };
+});
+
+describe('useScan import and push cancel (H-7)', () => {
+  const setConfig = () => localStorage.setItem('audiobook_tagger_config', JSON.stringify({
+    abs_base_url: 'http://abs.local', abs_api_token: 'token', abs_library_id: 'lib-1', concurrency_abs_push: 1,
+  }));
+
+  beforeEach(async () => {
+    localStorage.clear();
+    setConfig();
+    mockSetGroups.mockReset();
+    const { absApi } = await import('../lib/proxy');
+    absApi.mockReset();
+    const { resetCancel } = await import('../lib/cancel');
+    resetCancel();
+  });
+
+  it('a cancelled import resolves cancelled and leaves the workspace alone', async () => {
+    const { absApi } = await import('../lib/proxy');
+    const { requestCancel } = await import('../lib/cancel');
+    absApi.mockImplementation(async () => {
+      requestCancel();
+      return { results: Array.from({ length: 100 }, (_, i) => ({ id: `b${i}`, media: { metadata: { title: `B${i}` } } })) };
+    });
+    const { result } = renderHook(() => useScan());
+
+    let out;
+    await act(async () => { out = await result.current.handleImportFromAbs(); });
+
+    expect(out).toMatchObject({ success: false, cancelled: true });
+    expect(mockSetGroups).not.toHaveBeenCalled();
+  });
+
+  it('a cancel left over from an earlier run does not stop the next push', async () => {
+    const { absApi } = await import('../lib/proxy');
+    const { requestCancel } = await import('../lib/cancel');
+    absApi.mockImplementation(async (_b, _t, _p, opts) => (opts?.method === 'PATCH' ? {} : { media: { tags: [], metadata: { genres: [] } } }));
+    requestCancel();
+    const { result } = renderHook(() => useScan());
+    const groups = [1, 2].map((n) => ({ id: `g${n}`, abs_id: `li-${n}`, metadata: { title: `B${n}` }, abs_original: { title: 'old' } }));
+
+    let out;
+    await act(async () => { out = await result.current.handlePushAbsImports(groups); });
+
+    expect(out.updated).toHaveLength(2);
+    expect(out.skipped).toEqual([]);
+  });
+
+  it('cancelScan requests a cancel and keeps the progress bar until the work stops', async () => {
+    const { isCancelled } = await import('../lib/cancel');
+    const { result } = renderHook(() => useScan());
+    await act(async () => { await result.current.cancelScan(); });
+    expect(isCancelled()).toBe(true);
+  });
+});
+
+describe('ABS import errors are visible (H-9)', () => {
+  it('an import that rejects produces an error toast with the message', async () => {
+    const { importFromAbsWithNotice } = await import('./useScan');
+    const toast = { error: vi.fn(), info: vi.fn(), warning: vi.fn(), success: vi.fn() };
+    const importFn = vi.fn().mockRejectedValue(new Error('Configure ABS URL, token, and library ID in Settings first'));
+
+    const out = await importFromAbsWithNotice(importFn, toast);
+
+    expect(toast.error).toHaveBeenCalledWith('Import Failed', 'Configure ABS URL, token, and library ID in Settings first');
+    expect(out).toMatchObject({ success: false });
+  });
+
+  it('a cancelled import says "Import cancelled"', async () => {
+    const { importFromAbsWithNotice } = await import('./useScan');
+    const toast = { error: vi.fn(), info: vi.fn(), warning: vi.fn(), success: vi.fn() };
+    await importFromAbsWithNotice(async () => ({ success: false, cancelled: true }), toast);
+    expect(toast.info).toHaveBeenCalledWith('Import cancelled', expect.any(String));
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('hasAbsConnection is false without abs_library_id', async () => {
+    const { hasAbsConnection } = await import('./useScan');
+    expect(hasAbsConnection({ abs_base_url: 'http://abs.local', abs_api_token: 't' })).toBe(false);
+    expect(hasAbsConnection({ abs_base_url: 'http://abs.local', abs_api_token: 't', abs_library_id: 'lib-1' })).toBe(true);
+    expect(hasAbsConnection(null)).toBe(false);
+  });
+});

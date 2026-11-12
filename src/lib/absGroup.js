@@ -29,7 +29,7 @@ export function parseYearFromDateString(dateStr) {
 // GET /api/items/:id?expanded=1 for each one. Returns Map(id -> series array);
 // an id maps to null when the fetch failed or returned no series, which the
 // group builder records as series_unresolved.
-export async function fetchMultiSeries(baseUrl, token, items, { concurrency = 4, onProgress } = {}) {
+export async function fetchMultiSeries(baseUrl, token, items, { concurrency = 4, onProgress, shouldStop } = {}) {
   const wanted = items.filter((item) => {
     const meta = item?.media?.metadata || {};
     const hasArray = Array.isArray(meta.series) && meta.series.length > 0;
@@ -39,6 +39,8 @@ export async function fetchMultiSeries(baseUrl, token, items, { concurrency = 4,
   let next = 0;
   const worker = async () => {
     while (next < wanted.length) {
+      // H-7: a cancelled import starts no further item fetches.
+      if (shouldStop?.()) return;
       const item = wanted[next++];
       try {
         const full = await absApi(baseUrl, token, `/api/items/${item.id}?expanded=1`);
@@ -177,9 +179,11 @@ export function absItemToBookGroup(item, absBaseUrl, fetchedSeries) {
  * @param {function} [onItem] optional (index, total, item) callback per item
  * @param {function} [onSeriesProgress] optional (done, total) callback after
  *   each multi-series item fetch, so a long fetch phase shows progress
+ * @param {object} [options] { shouldStop } - stop starting series fetches once
+ *   it returns true (a cancelled import; the caller discards the groups)
  */
-export async function absItemsToBookGroups(baseUrl, token, items, onItem, onSeriesProgress) {
-  const fetchedSeries = await fetchMultiSeries(baseUrl, token, items, { onProgress: onSeriesProgress });
+export async function absItemsToBookGroups(baseUrl, token, items, onItem, onSeriesProgress, { shouldStop } = {}) {
+  const fetchedSeries = await fetchMultiSeries(baseUrl, token, items, { onProgress: onSeriesProgress, shouldStop });
   return items.map((item, index) => {
     onItem?.(index, items.length, item);
     return absItemToBookGroup(item, baseUrl, fetchedSeries.get(item.id));

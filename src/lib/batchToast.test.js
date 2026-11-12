@@ -111,3 +111,18 @@ describe('scrollToFirstErrorGroup (fresh results array)', () => {
     expect(aEl.scrollIntoView).toHaveBeenCalled();
   });
 });
+
+describe('summarizeBatch cancelled runs (M-6)', () => {
+  it('says how many were processed and that the rest were cancelled', () => {
+    const s = summarizeBatch({ op: 'classify', succeeded: 20, skipped: 3, failed: 2, cancelled: 35 });
+    expect(s.type).toBe('error');
+    expect(s.title).toBe('Classification cancelled');
+    expect(s.message).toBe('25 of 60 processed (20 classified, 2 failed, 3 already ok); the remaining 35 were cancelled.');
+  });
+
+  it('a cancel before anything ran still reports', () => {
+    const s = summarizeBatch({ op: 'resolve', cancelled: 10 });
+    expect(s.type).toBe('warning');
+    expect(s.message).toBe('0 of 10 processed; the remaining 10 were cancelled.');
+  });
+});
