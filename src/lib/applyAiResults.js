@@ -295,6 +295,50 @@ export function applyAudioResult(group, result, field = 'all', force = false) {
   return { group: clearStage(applyMetadataToGroup(group, updates, fields), 'audio'), outcome: 'changed' };
 }
 
+// ---- Resolve Metadata ----
+// entry: one resolve_metadata_batch result. gatherDetail: the errorDetail the
+// earlier gather step recorded for this book, if any. A resolve-stage error
+// wins over the gather-stage one (resolve runs after gather).
+export function applyResolveResult(group, entry, gatherDetail) {
+  const r = entry;
+  if (!r) return group;
+  const g = group;
+  const errorSource = r.errorDetail || gatherDetail;
+  let lastError;
+  if (errorSource) {
+    const isHardFailure = r.error || r.success === false || ['network', 'http', 'parse', 'schema'].includes(errorSource.kind);
+    lastError = { ...errorSource, severity: isHardFailure ? 'error' : 'warn' };
+  }
+
+  // Hard failure or no usable change: surface error, don't merge metadata.
+  if (r.error || r.success === false || !r.changed) {
+    return lastError ? { ...g, lastError } : g;
+  }
+
+  // H2/H6: stamp each resolved field that actually changed into file.changes
+  // so Write Tags writes the resolution output.
+  const changedFileFields = [];
+  if (r.title && r.title !== g.metadata.title) changedFileFields.push('title');
+  if (r.author && r.author !== g.metadata.author) changedFileFields.push('author');
+  if (r.subtitle && r.subtitle !== g.metadata.subtitle) changedFileFields.push('subtitle');
+  if (r.series !== undefined && r.series !== g.metadata.series) changedFileFields.push('series');
+  if (r.sequence !== undefined && r.sequence !== g.metadata.sequence) changedFileFields.push('sequence');
+  if (r.narrator && r.narrator !== g.metadata.narrator) changedFileFields.push('narrator');
+  const next = applyMetadataToGroup(
+    g,
+    {
+      title: r.title || g.metadata.title,
+      author: r.author || g.metadata.author,
+      subtitle: r.subtitle || g.metadata.subtitle,
+      series: r.series !== undefined ? r.series : g.metadata.series,
+      sequence: r.sequence !== undefined ? r.sequence : g.metadata.sequence,
+      narrator: r.narrator || g.metadata.narrator,
+    },
+    changedFileFields
+  );
+  return { ...next, lastError };
+}
+
 // ---- Descriptions ----
 // A narrator found in a description is staged only when the book has none (or
 // a placeholder); an existing narrator is never overwritten.

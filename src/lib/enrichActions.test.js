@@ -276,3 +276,37 @@ describe('runEnrichAction stops between chunks on Cancel (M-6)', () => {
     expect(message).toMatch(/the remaining 5 were cancelled/);
   });
 });
+
+// Task 10: each batch handler must apply through its own applier. A wrong
+// applier compiles and passes every other test, so check the wiring in source.
+describe('ScannerPage batch handler wiring', () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'pages', 'ScannerPage.jsx'), 'utf8');
+  // The runBatchChunks call that contains `marker`.
+  const block = (marker) => {
+    const at = source.indexOf(marker);
+    expect(at).toBeGreaterThan(-1);
+    const start = source.lastIndexOf('runBatchChunks(', at);
+    const end = source.indexOf('\n      });', at);
+    return source.slice(start, end);
+  };
+
+  it('Resolve Metadata applies through applyResolveResult', () => {
+    const b = block("'resolve_metadata_batch'");
+    expect(b).toContain('applyResolveResult(');
+    expect(b).not.toContain('applyDescriptionProcessResult');
+  });
+
+  it('Description Processing applies through applyDescriptionProcessResult', () => {
+    const b = block("'process_descriptions_batch'");
+    expect(b).toContain('applyDescriptionProcessResult(');
+    expect(b).not.toContain('applyResolveResult');
+  });
+
+  it('Fix Descriptions applies through applyFixDescriptionResult', () => {
+    expect(block("'fix_descriptions_with_gpt'")).toContain('applyFixDescriptionResult');
+  });
+
+  it('the inline narrator regex is gone', () => {
+    expect(source).not.toContain('narratorMatch');
+  });
+});

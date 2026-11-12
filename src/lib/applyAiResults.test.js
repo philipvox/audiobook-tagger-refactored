@@ -9,6 +9,10 @@ import {
   applyIsbnResult,
   applyAudioResult,
   tallyOutcomes,
+  applyResolveResult,
+  applyDescriptionProcessResult,
+  applyFixDescriptionResult,
+  applyStaticGenreCleanupResult,
 } from './applyAiResults';
 import { summarizeBatch } from './batchToast';
 
@@ -319,8 +323,7 @@ describe('M-7: total failure reads as failure', () => {
 });
 
 describe('Task 10: description appliers', () => {
-  it('Description Processing stages a valid narrator only when the book has none', async () => {
-    const { applyDescriptionProcessResult } = await import('./applyAiResults');
+  it('Description Processing stages a valid narrator only when the book has none', () => {
     const entry = { changed: true, description: 'A tale. Narrated by John Lee and featuring original music.' };
     const g = applyDescriptionProcessResult(book({ narrator: '' }), entry);
     expect(g.metadata.narrator).toBe('John Lee');
@@ -331,28 +334,24 @@ describe('Task 10: description appliers', () => {
     expect(kept.metadata.description).toBe(entry.description);
   });
 
-  it('Description Processing never stages "the author with"', async () => {
-    const { applyDescriptionProcessResult } = await import('./applyAiResults');
+  it('Description Processing never stages "the author with"', () => {
     const g = applyDescriptionProcessResult(book({ narrator: '' }), { changed: true, description: 'Read by the author with a full cast.' });
     expect(g.metadata.narrator).toBeFalsy();
     expect(g.changedFields).not.toContain('narrator');
   });
 
-  it('Description Processing treats a placeholder narrator as none', async () => {
-    const { applyDescriptionProcessResult } = await import('./applyAiResults');
+  it('Description Processing treats a placeholder narrator as none', () => {
     const g = applyDescriptionProcessResult(book({ narrator: 'Unknown' }), { changed: true, description: 'Read by Bahni Turpin.' });
     expect(g.metadata.narrator).toBe('Bahni Turpin');
   });
 
-  it('Fix Descriptions records a failure on the book', async () => {
-    const { applyFixDescriptionResult } = await import('./applyAiResults');
+  it('Fix Descriptions records a failure on the book', () => {
     const { group, outcome } = applyFixDescriptionResult(book(), { success: false, error: 'HTTP 500' });
     expect(outcome).toBe('failed');
     expect(group.lastError).toMatchObject({ stage: 'description', severity: 'error', message: 'HTTP 500' });
   });
 
-  it('Fix Descriptions applies a description and never overwrites a narrator', async () => {
-    const { applyFixDescriptionResult } = await import('./applyAiResults');
+  it('Fix Descriptions applies a description and never overwrites a narrator', () => {
     const entry = { success: true, fixed: true, new_description: 'New text.', extracted_narrator: 'John Lee' };
     const r = applyFixDescriptionResult(book({ narrator: 'Existing Person', description: 'old' }), entry);
     expect(r.outcome).toBe('changed');
@@ -366,16 +365,14 @@ describe('Task 10: description appliers', () => {
 });
 
 describe('Task 10: static genre cleanup applier', () => {
-  it('stamps changedFields and counts as changed', async () => {
-    const { applyStaticGenreCleanupResult } = await import('./applyAiResults');
+  it('stamps changedFields and counts as changed', () => {
     const { group, outcome } = applyStaticGenreCleanupResult(book({ genres: ['Sci Fi'] }), { changed: true, cleaned_genres: ['Science Fiction'] });
     expect(outcome).toBe('changed');
     expect(group.metadata.genres).toEqual(['Science Fiction']);
     expect(group.changedFields).toContain('genres');
   });
 
-  it('keeps an import-snapshot genre that has no replacement', async () => {
-    const { applyStaticGenreCleanupResult } = await import('./applyAiResults');
+  it('keeps an import-snapshot genre that has no replacement', () => {
     const g = book({ genres: ['Cozy Mystery', 'Sci-Fi'] }, { abs_original: { genres: ['Cozy Mystery', 'Sci-Fi'] } });
     const { group } = applyStaticGenreCleanupResult(g, { changed: true, cleaned_genres: ['Science Fiction'] });
     expect(group.metadata.genres).toContain('Cozy Mystery');
@@ -383,10 +380,38 @@ describe('Task 10: static genre cleanup applier', () => {
     expect(group.metadata.genres).not.toContain('Sci-Fi');
   });
 
-  it('an unchanged or missing entry changes nothing', async () => {
-    const { applyStaticGenreCleanupResult } = await import('./applyAiResults');
+  it('an unchanged or missing entry changes nothing', () => {
     const g = book({ genres: ['Fantasy'] });
     expect(applyStaticGenreCleanupResult(g, { changed: false }).outcome).toBe('unchanged');
     expect(applyStaticGenreCleanupResult(g, undefined).outcome).toBe('none');
+  });
+});
+
+describe('applyResolveResult', () => {
+  it('applies title and author and stamps them', () => {
+    const g = applyResolveResult(book({ title: 'mort', author: 'T Pratchett' }), { id: 'b1', changed: true, title: 'Mort', author: 'Terry Pratchett' });
+    expect(g.metadata.title).toBe('Mort');
+    expect(g.metadata.author).toBe('Terry Pratchett');
+    expect(g.changedFields).toEqual(expect.arrayContaining(['title', 'author']));
+    expect(g.lastError).toBeUndefined();
+  });
+
+  it('an errored result sets an error lastError and leaves metadata alone', () => {
+    const g = applyResolveResult(book(), { id: 'b1', success: false, error: 'boom', errorDetail: { stage: 'resolve', kind: 'network', message: 'boom' } });
+    expect(g.lastError).toMatchObject({ kind: 'network', severity: 'error' });
+    expect(g.metadata.title).toBe('Mort');
+  });
+
+  it('a warning-level errorDetail sets a warn lastError and still applies the change', () => {
+    const g = applyResolveResult(book(), { id: 'b1', changed: true, title: 'Mort!', errorDetail: { stage: 'resolve', kind: 'empty-content', message: 'thin' } });
+    expect(g.lastError).toMatchObject({ kind: 'empty-content', severity: 'warn' });
+    expect(g.metadata.title).toBe('Mort!');
+  });
+
+  it('falls back to the gather-stage detail, and resolve detail wins over it', () => {
+    const gather = { stage: 'gather', kind: 'http', message: 'g' };
+    expect(applyResolveResult(book(), { id: 'b1', changed: false }, gather).lastError).toMatchObject({ stage: 'gather', severity: 'error' });
+    const both = applyResolveResult(book(), { id: 'b1', changed: false, errorDetail: { stage: 'resolve', kind: 'empty-content' } }, gather);
+    expect(both.lastError.stage).toBe('resolve');
   });
 });

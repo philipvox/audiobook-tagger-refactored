@@ -33,7 +33,7 @@ import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePu
 import { userClearedPatch } from '../lib/userCleared';
 import { applyClassifyResult } from '../lib/applyClassifyResult';
 import { applyTagsResultToGroup, applyDnaResultToGroup, normalizeResults } from '../lib/applyTagResults';
-import { applyDescriptionProcessResult, applyFixDescriptionResult, tallyOutcomes } from '../lib/applyAiResults';
+import { applyResolveResult, applyDescriptionProcessResult, applyFixDescriptionResult, tallyOutcomes } from '../lib/applyAiResults';
 import { runEnrichAction, applyEntries, reportOutcomes, runBatchChunks } from '../lib/enrichActions';
 import { requestCancel, startCancellable, finishCancellable } from '../lib/cancel';
 import { syncAllSeries } from '../lib/absPayload';
@@ -1627,8 +1627,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         },
         callChunk: (chunk) => callBackend('resolve_metadata_batch', { books: chunk, config }),
         applyChunk: (result) => setGroups(prevGroups => prevGroups.map(g =>
-          // H2/H6: stamps the description; a narrator is staged only when the book has none.
-          applyDescriptionProcessResult(g, result.results?.find(r => r.id === g.id))
+          applyResolveResult(g, result.results?.find(r => r.id === g.id), gatheredDataRef.current?.get(g.id)?.errorDetail)
         )),
       });
       const result = { results: run.results, total_processed: run.processed, total_failed: run.failed };
@@ -1742,28 +1741,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           batch.update('descriptionProcessing', { current: offset });
         },
         callChunk: (chunk) => callBackend('process_descriptions_batch', { books: chunk, config }),
-        applyChunk: (result) => setGroups(prevGroups => {
-          return prevGroups.map(g => {
-            const r = result.results?.find(r => r.id === g.id);
-            if (!r || r.error || !r.changed) return g;
-
-            // Also try to extract narrator from the new description
-            const narratorMatch = r.description?.match(/(?:read|narrated|voiced|performed)\s+by\s+([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)*)/i);
-
-            // H2/H6: stamp description (and any extracted narrator) into file.changes.
-            const addNarrator = narratorMatch && !g.metadata.narrator;
-            const changedFileFields = ['description'];
-            if (addNarrator) changedFileFields.push('narrator');
-            return applyMetadataToGroup(
-              g,
-              {
-                description: r.description,
-                ...(addNarrator ? { narrator: narratorMatch[1] } : {}),
-              },
-              changedFileFields
-            );
-          });
-        }),
+        applyChunk: (result) => setGroups(prevGroups => prevGroups.map(g =>
+          // H2/H6: stamps the description; a narrator is staged only when the book has none.
+          applyDescriptionProcessResult(g, result.results?.find(r => r.id === g.id))
+        )),
       });
       const result = { results: run.results, total_processed: run.processed, total_failed: run.failed };
 

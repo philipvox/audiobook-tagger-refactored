@@ -6,7 +6,7 @@
 // pickPath landmine), extracting pure logic gives these fixes a real,
 // non-hanging test seam.
 import { describe, it, expect } from 'vitest';
-import { getParentDir, buildRescanGroups, mergeAbsPullGroups, mergeAbsPull } from './useScan.js';
+import { getParentDir, buildRescanGroups, mergeAbsPullGroups, mergeAbsPull, hasAiProvider } from './useScan.js';
 
 describe('getParentDir (L-11)', () => {
   it('returns the parent directory for a POSIX path', () => {
@@ -175,7 +175,6 @@ describe('mergeAbsPull and needs_reimport groups (H-4)', () => {
   });
 });
 
-import { hasAiProvider } from './useScan';
 describe('hasAiProvider (genre cleanup gate)', () => {
   it('is true for an OpenAI key, an Anthropic key or local AI', () => {
     expect(hasAiProvider({ openai_api_key: 'sk-x' })).toBe(true);
