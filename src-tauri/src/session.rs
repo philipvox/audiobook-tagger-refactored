@@ -72,7 +72,7 @@ fn now_secs() -> u64 {
 /// The tmp file an atomic write stages through. Kept as a sibling of the target
 /// so the final rename stays on one filesystem (a cross-device rename would
 /// fail and defeat the atomicity).
-fn tmp_path_for(path: &Path) -> PathBuf {
+pub(crate) fn tmp_path_for(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -96,6 +96,14 @@ pub fn write_session_at(path: &Path, json: &str) -> Result<(), String> {
             MAX_SESSION_BYTES
         ));
     }
+    atomic_write(path, json.as_bytes())
+}
+
+/// Write `bytes` to `path` atomically: stage them in a sibling tmp file, fsync,
+/// then rename over the target. On any failure the tmp file is removed and the
+/// previous contents of `path` are left untouched. Also used for the writer's
+/// undo journal.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -103,7 +111,7 @@ pub fn write_session_at(path: &Path, json: &str) -> Result<(), String> {
 
     let staged = (|| -> Result<(), String> {
         let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+        file.write_all(bytes).map_err(|e| e.to_string())?;
         // Flush to the OS before the rename so a crash right after the rename
         // cannot leave a renamed-but-empty file.
         file.sync_all().map_err(|e| e.to_string())?;

@@ -21,7 +21,7 @@
 // Composer/Genre/Movement/MovementNumber/year), so a write is round-trippable by
 // a later scan on both ID3v2 (mp3) and Mp4Ilst (m4b) files.
 //
-// Write-field honesty: apply_changes_to_tag embeds every field the tag format can
+// Write-field honesty: apply_changes embeds every field the tag format can
 // express and returns the fields it did NOT embed as a `skipped` list. A skipped
 // field is never a hard failure (support is asymmetric across ID3v2/MP4, and some
 // fields are ABS-only, e.g. tags/genres/dna). write_tags surfaces this per file as
@@ -51,6 +51,8 @@ pub struct WriteFile {
     // is also accepted defensively.
     #[serde(default)]
     pub changes: HashMap<String, Value>,
+    #[serde(default)]
+    pub group_size: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,7 +99,13 @@ fn leading_u32(s: &str) -> Option<u32> {
 /// description/isbn/asin on ID3v2) or the field is ABS-only (tags/genres/dna).
 /// A skipped field is reported to the caller, NEVER treated as a hard failure.
 /// A change whose value is null (nothing to write) is not counted as skipped.
-pub fn apply_changes_to_tag(tag: &mut Tag, changes: &HashMap<String, Value>) -> Vec<String> {
+///
+/// `multi_file` is true when this file is one of several files that make up a
+/// single book. The book title then lives in the album field (scanner.rs's
+/// pick_metadata reads album first), so a `title` change is written to album and
+/// the file's own track title is left alone. For a single-file book the title
+/// goes to the title field, and to album too when album held the old title.
+pub fn apply_changes(tag: &mut Tag, changes: &HashMap<String, Value>, multi_file: bool) -> Vec<String> {
     let mut skipped = Vec::new();
     // MP4/m4b (the primary AudiobookShelf format) stores series in freeform atoms
     // that scanner.rs's lookup_tag_field fallback reads; write those too so ABS
@@ -110,7 +118,25 @@ pub fn apply_changes_to_tag(tag: &mut Tag, changes: &HashMap<String, Value>) -> 
         };
         let wrote = match field.as_str() {
             "title" => {
-                tag.set_title(value);
+                // An explicit album change in the same set wins over the title rule.
+                let album_is_explicit = changes.get("album").and_then(change_value).is_some();
+                if multi_file {
+                    if !album_is_explicit {
+                        tag.set_album(value);
+                    }
+                } else {
+                    let album_held_old_title = tag.album().is_some_and(|album| {
+                        let album = album.trim();
+                        let old_change = raw.get("old").and_then(Value::as_str).map(str::trim);
+                        let old_tag_title = tag.title().map(|t| t.trim().to_string());
+                        !album.is_empty()
+                            && (old_change == Some(album) || old_tag_title.as_deref() == Some(album))
+                    });
+                    if album_held_old_title && !album_is_explicit {
+                        tag.set_album(value.clone());
+                    }
+                    tag.set_title(value);
+                }
                 true
             }
             "author" | "albumartist" => tag.insert_text(ItemKey::AlbumArtist, value),
@@ -178,6 +204,10 @@ pub fn apply_changes_to_tag(tag: &mut Tag, changes: &HashMap<String, Value>) -> 
             }
             "year" => match leading_u32(&value) {
                 Some(y) => {
+                    // lofty's set_year keeps the month and day of an existing full
+                    // date ("2015-06-01" -> "2020-06-01"). The user asked for a
+                    // year, so drop the old date first and store the year alone.
+                    tag.remove_year();
                     tag.set_year(y);
                     true
                 }
@@ -199,6 +229,19 @@ pub fn apply_changes_to_tag(tag: &mut Tag, changes: &HashMap<String, Value>) -> 
         }
     }
     skipped
+}
+
+/// Single-file form of apply_changes, kept for the tag-level unit tests.
+#[cfg(test)]
+pub fn apply_changes_to_tag(tag: &mut Tag, changes: &HashMap<String, Value>) -> Vec<String> {
+    apply_changes(tag, changes, false)
+}
+
+/// The value of the first series-number change in the set, if any.
+fn sequence_value(changes: &HashMap<String, Value>) -> Option<String> {
+    ["sequence", "series_number", "series-part"]
+        .iter()
+        .find_map(|k| changes.get(*k).and_then(change_value))
 }
 
 /// Write (replacing any stale value) an MP4 freeform atom by its exact stored key
@@ -231,7 +274,8 @@ struct FileWriteOutcome {
 
 #[cfg(test)]
 fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
-    write_one_file_recorded(file, backup, &mut |_| Ok(()))
+    let multi_file = file.group_size.unwrap_or(1) > 1;
+    write_one_file_recorded(file, backup, multi_file, &mut |_| Ok(()))
 }
 
 /// `record` persists the undo-journal entry for this file. It runs AFTER the
@@ -241,6 +285,7 @@ fn write_one_file(file: &WriteFile, backup: bool) -> FileWriteOutcome {
 fn write_one_file_recorded(
     file: &WriteFile,
     backup: bool,
+    multi_file: bool,
     record: &mut dyn FnMut(&JournalEntry) -> Result<(), String>,
 ) -> FileWriteOutcome {
     let path = PathBuf::from(&file.path);
@@ -279,7 +324,7 @@ fn write_one_file_recorded(
     }
 
     // Mutate a temp copy, then atomically swap it in (see write_tags_atomically).
-    match write_tags_atomically(&path, &file.changes) {
+    match write_tags_atomically(&path, &file.changes, multi_file) {
         Ok(skipped) => FileWriteOutcome {
             result: Ok(()),
             journal,
@@ -298,23 +343,18 @@ fn write_one_file_recorded(
 /// rename is atomic on one filesystem), the copy is fsynced, then renamed over
 /// the original. Any failure removes the temp copy and leaves the original
 /// untouched. Returns the fields that could not be embedded (see
-/// apply_changes_to_tag).
-pub fn write_tags_atomically(path: &Path, changes: &HashMap<String, Value>) -> Result<Vec<String>, String> {
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "file".to_string());
-    let dir = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    // Keep the real extension last so lofty's type detection still works.
-    let tmp = dir.join(format!(".{}.tagtmp-{}.{}", file_name, uuid::Uuid::new_v4().simple(),
-        path.extension().and_then(|e| e.to_str()).unwrap_or("tmp")));
+/// apply_changes).
+pub fn write_tags_atomically(
+    path: &Path,
+    changes: &HashMap<String, Value>,
+    multi_file: bool,
+) -> Result<Vec<String>, String> {
+    let dir = parent_dir_of(path);
+    let tmp = temp_path_for(path);
 
     let result = (|| -> Result<Vec<String>, String> {
         fs::copy(path, &tmp).map_err(|e| format!("temp copy failed: {e}"))?;
-        let skipped = write_tags_in_place(&tmp, changes)?;
+        let skipped = write_tags_in_place(&tmp, changes, multi_file)?;
         fs::File::open(&tmp)
             .and_then(|f| f.sync_all())
             .map_err(|e| format!("fsync failed: {e}"))?;
@@ -356,6 +396,47 @@ fn restore_mp4_int_widths(ilst: &mut lofty::mp4::Ilst) {
     }
 }
 
+/// The directory a file lives in ("." for a bare file name).
+fn parent_dir_of(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// Prefix of every temp copy a tag write stages through. scanner.rs skips files
+/// with this prefix and sweep_temp_files removes them.
+pub const TEMP_PREFIX: &str = ".tagtmp-";
+
+/// The sibling temp file a write of `path` stages through:
+/// `.tagtmp-<uuid>.<ext>`. Its length does not depend on the original name, so a
+/// long filename still has room for its temp copy (the old
+/// `.<name>.tagtmp-<uuid>.<ext>` form overflowed the 255-byte limit at about
+/// 210 characters). The real extension stays last so lofty's type detection
+/// still works.
+pub fn temp_path_for(path: &Path) -> PathBuf {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("tmp");
+    parent_dir_of(path).join(format!("{TEMP_PREFIX}{}.{ext}", uuid::Uuid::new_v4().simple()))
+}
+
+/// Remove temp copies a crashed write left in `dir` (not recursive). Only plain
+/// files named `.tagtmp-*` are touched. Returns how many were removed.
+pub fn sweep_temp_files(dir: &Path) -> usize {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut removed = 0;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let is_temp = entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX);
+        let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+        if is_temp && is_file && fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Read, mutate, save `path` in place (only ever called on a temp copy).
 ///
 /// MP4 and MPEG are written through lofty's FORMAT-SPECIFIC tags rather than
@@ -363,7 +444,11 @@ fn restore_mp4_int_widths(ilst: &mut lofty::mp4::Ilst) {
 /// every atom without an ItemKey - notably `stik` (media kind = Audiobook),
 /// `rtng`, `tmpo`, `gnre` - so one title edit used to turn an audiobook into
 /// "music". split_tag/merge_tag keeps those atoms in the remainder.
-fn write_tags_in_place(path: &Path, changes: &HashMap<String, Value>) -> Result<Vec<String>, String> {
+fn write_tags_in_place(
+    path: &Path,
+    changes: &HashMap<String, Value>,
+    multi_file: bool,
+) -> Result<Vec<String>, String> {
     use lofty::config::ParseOptions;
     use lofty::file::FileType;
     use lofty::tag::{MergeTag, SplitTag, TagExt};
@@ -382,7 +467,7 @@ fn write_tags_in_place(path: &Path, changes: &HashMap<String, Value>) -> Result<
             drop(f);
             let ilst = mp4.ilst().cloned().unwrap_or_default();
             let (remainder, mut tag) = ilst.split_tag();
-            let skipped = apply_changes_to_tag(&mut tag, changes);
+            let skipped = apply_changes(&mut tag, changes, multi_file);
             let mut merged = remainder.merge_tag(tag);
             restore_mp4_int_widths(&mut merged);
             merged
@@ -410,7 +495,15 @@ fn write_tags_in_place(path: &Path, changes: &HashMap<String, Value>) -> Result<
                     _ => None,
                 })
                 .collect();
+            // Same idea for lyrics: split_tag turns a USLT frame into a generic
+            // ItemKey::Lyrics item, and merge_tag writes that back as a plain text
+            // frame with the USLT id, which lofty refuses to save (BadFrame
+            // "USLT"). Keep the original USLT frames aside, untouched, and put
+            // them back after the merge.
+            let lyrics: Vec<lofty::id3::v2::Frame<'static>> =
+                (&id3).into_iter().filter(|fr| fr.id_str() == "USLT").cloned().collect();
             let (remainder, mut tag) = id3.split_tag();
+            tag.remove_key(&ItemKey::Lyrics);
             let mut user_text: Vec<(String, String)> = Vec::new();
             for desc in short_txxx {
                 let key = ItemKey::Unknown(desc.clone());
@@ -419,10 +512,19 @@ fn write_tags_in_place(path: &Path, changes: &HashMap<String, Value>) -> Result<
                     user_text.push((desc, vals.join("\0")));
                 }
             }
-            let skipped = apply_changes_to_tag(&mut tag, changes);
+            let skipped = apply_changes(&mut tag, changes, multi_file);
             let mut merged = remainder.merge_tag(tag);
             for (desc, content) in user_text {
                 let _ = merged.insert_user_text(desc, content);
+            }
+            for frame in lyrics {
+                let _ = merged.insert(frame);
+            }
+            // MVIN only holds whole numbers (lofty drops "1.5" on read), so a
+            // decimal series position would be lost. Also store the exact value
+            // in TXXX:SERIES-PART, which scanner.rs reads first.
+            if let Some(seq) = sequence_value(changes) {
+                let _ = merged.insert_user_text("SERIES-PART".to_string(), seq);
             }
             merged
                 .save_to_path(path, WriteOptions::default())
@@ -440,7 +542,7 @@ fn write_tags_in_place(path: &Path, changes: &HashMap<String, Value>) -> Result<
             let tag = tagged
                 .primary_tag_mut()
                 .ok_or_else(|| "could not create a writable tag".to_string())?;
-            let skipped = apply_changes_to_tag(tag, changes);
+            let skipped = apply_changes(tag, changes, multi_file);
             tagged
                 .save_to_path(path, WriteOptions::default())
                 .map_err(|e| format!("save failed: {e}"))?;
@@ -449,9 +551,45 @@ fn write_tags_in_place(path: &Path, changes: &HashMap<String, Value>) -> Result<
     }
 }
 
+/// Serialises the file-changing commands. They used to run one at a time on
+/// the main thread; now that they are async, two batches could otherwise
+/// interleave (one batch's temp sweep or journal reset racing another's write).
+static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run blocking file work off the async runtime's worker threads (as
+/// scan_library does) so a large batch does not freeze the window, holding
+/// WRITE_LOCK for the duration.
+async fn run_file_job<F>(job: F) -> Result<Value, String>
+where
+    F: FnOnce() -> Value + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        job()
+    })
+    .await
+    .map_err(|e| format!("File task failed: {e}"))
+}
+
 #[tauri::command]
-pub fn write_tags(request: WriteRequest) -> Value {
-    write_tags_at(request, &default_journal_path())
+pub async fn write_tags(request: WriteRequest) -> Result<Value, String> {
+    run_file_job(move || write_tags_at(request, &default_journal_path())).await
+}
+
+/// Whether a file belongs to a multi-file book. The caller's `group_size` wins;
+/// without it, files in the same request that share a directory are taken to be
+/// one book (the scanner groups by folder).
+fn is_multi_file(file: &WriteFile, request: &WriteRequest) -> bool {
+    if let Some(n) = file.group_size {
+        return n > 1;
+    }
+    let dir = parent_dir_of(Path::new(&file.path));
+    request
+        .files
+        .values()
+        .filter(|other| parent_dir_of(Path::new(&other.path)) == dir)
+        .count()
+        > 1
 }
 
 pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
@@ -484,6 +622,17 @@ pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
         return json!({ "success": 0, "failed": ordered_ids.len(), "errors": errors, "results": results });
     }
 
+    // Clear temp copies a crashed earlier write left behind in the folders this
+    // batch touches, before any new work starts.
+    let mut swept_dirs: Vec<PathBuf> = Vec::new();
+    for file in request.files.values() {
+        let dir = parent_dir_of(Path::new(&file.path));
+        if !swept_dirs.contains(&dir) {
+            sweep_temp_files(&dir);
+            swept_dirs.push(dir);
+        }
+    }
+
     for id in &ordered_ids {
         let file = match request.files.get(id) {
             Some(f) => f,
@@ -506,7 +655,7 @@ pub fn write_tags_at(request: WriteRequest, journal_path: &Path) -> Value {
             result,
             journal,
             skipped,
-        } = write_one_file_recorded(file, request.backup, &mut record);
+        } = write_one_file_recorded(file, request.backup, is_multi_file(file, &request), &mut record);
         if let Some(entry) = journal {
             journal_entries.push(entry);
         }
@@ -559,12 +708,12 @@ pub fn default_journal_path() -> PathBuf {
     base.join("com.audiobook.tagger.v2").join("undo_journal.json")
 }
 
+/// Persist the journal atomically (sibling temp file, fsync, rename; see
+/// session::atomic_write), so a crash mid-write can never leave a truncated
+/// journal that loses track of files undo must restore.
 pub fn write_journal(path: &Path, journal: &UndoJournal) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
     let data = serde_json::to_string_pretty(journal).map_err(|e| e.to_string())?;
-    fs::write(path, data).map_err(|e| e.to_string())
+    crate::session::atomic_write(path, data.as_bytes())
 }
 
 pub fn read_journal(path: &Path) -> Option<UndoJournal> {
@@ -633,8 +782,11 @@ pub fn get_undo_status() -> Value {
 }
 
 #[tauri::command]
-pub fn undo_last_write() -> Value {
-    let journal_path = default_journal_path();
+pub async fn undo_last_write() -> Result<Value, String> {
+    run_file_job(|| undo_last_write_at(&default_journal_path())).await
+}
+
+pub fn undo_last_write_at(journal_path: &Path) -> Value {
     let journal = match read_journal(&journal_path) {
         Some(j) if !j.entries.is_empty() => j,
         _ => {
@@ -728,26 +880,31 @@ fn sanitize_filename(name: &str) -> String {
     }
     // Collapse whitespace runs, trim, and strip trailing dots/spaces (Windows).
     let collapsed: String = out.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.trim_matches(|c: char| c == '.' || c == ' ').to_string()
+    let trimmed = collapsed.trim_matches(|c: char| c == '.' || c == ' ').to_string();
+    let base_len = trimmed.find('.').unwrap_or(trimmed.len());
+    if is_reserved_device_name(trimmed[..base_len].trim_end()) {
+        let mut fixed = trimmed[..base_len].trim_end().to_string();
+        fixed.push('_');
+        fixed.push_str(&trimmed[base_len..]);
+        return fixed;
+    }
+    trimmed
 }
 
-/// Remove any leftover `{...}` blocks. Runs AFTER known `{var}` tokens have been
-/// substituted, so this only strips unknown/conditional blocks (a safety net for
-/// someone pasting the default template); it never touches `{title}` etc.
-fn strip_braces(s: &str) -> String {
-    let mut out = String::new();
-    let mut depth: usize = 0;
-    for c in s.chars() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.saturating_sub(1);
-            }
-            _ if depth == 0 => out.push(c),
-            _ => {}
+/// Windows reserved device names. A file whose name (before the first dot) is
+/// one of these cannot be created on Windows, so it gets a trailing underscore
+/// on every platform and a library moved between machines stays valid.
+fn is_reserved_device_name(base: &str) -> bool {
+    let upper = base.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => {
+            let b = upper.as_bytes();
+            b.len() == 4
+                && (upper.starts_with("COM") || upper.starts_with("LPT"))
+                && (b'1'..=b'9').contains(&b[3])
         }
     }
-    out
 }
 
 /// A value is "present" when it is Some and, after trimming, non-empty. Note a
@@ -770,7 +927,10 @@ fn field_str(meta: &Value, keys: &[&str]) -> String {
 
 /// Render a rename template into a filename STEM (no extension). Known vars:
 /// {title} {author} {series} {sequence} {year} {narrator}. Missing vars render
-/// empty; leftover unknown `{...}` blocks are stripped.
+/// empty; unknown `{...}` blocks in the TEMPLATE are dropped (a safety net for
+/// someone pasting a conditional-block default). The template is read in one
+/// pass, so a substituted value is inserted literally: braces inside a title
+/// ("Weird {Unabridged} Book") are kept, and a value is never expanded again.
 pub fn render_template(template: &str, meta: &Value) -> String {
     let resolve = |var: &str| -> String {
         match var {
@@ -783,11 +943,36 @@ pub fn render_template(template: &str, meta: &Value) -> String {
             _ => String::new(),
         }
     };
-    let mut out = template.to_string();
-    for var in ["title", "author", "series", "sequence", "year", "narrator"] {
-        out = out.replace(&format!("{{{var}}}"), &resolve(var));
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => {
+                // Collect the whole (possibly nested) block up to its matching '}'.
+                let mut depth = 1usize;
+                let mut inner = String::new();
+                for c in chars.by_ref() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                    inner.push(c);
+                }
+                // A known variable renders its value; anything else (or an
+                // unterminated block) renders nothing.
+                if depth == 0 {
+                    out.push_str(&resolve(&inner));
+                }
+            }
+            '}' => {}
+            c => out.push(c),
+        }
     }
-    strip_braces(&out)
+    out
 }
 
 /// Compute the new absolute path from an old path + rendered stem, preserving the
@@ -867,10 +1052,17 @@ fn same_file(old: &Path, new: &Path) -> bool {
 pub fn rename_one(old_path: &str, new_path: &str) -> Result<(), String> {
     let old = PathBuf::from(old_path);
     let new = PathBuf::from(new_path);
-    if !old.exists() {
-        return Err("source file not found".to_string());
+    // symlink_metadata does not follow links: a symlink source is refused (the
+    // rename would move the link, not the audio file it points at), and any
+    // entry at the target, even a dangling link, counts as taken.
+    match fs::symlink_metadata(&old) {
+        Err(_) => return Err("source file not found".to_string()),
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err("source is a symbolic link; not renamed".to_string())
+        }
+        Ok(_) => {}
     }
-    if new.exists() && !same_file(&old, &new) {
+    if fs::symlink_metadata(&new).is_ok() && !same_file(&old, &new) {
         return Err("target already exists".to_string());
     }
     if let Some(parent) = new.parent() {
@@ -882,8 +1074,8 @@ pub fn rename_one(old_path: &str, new_path: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn rename_files(renames: Vec<RenamePair>) -> Value {
-    rename_files_at(renames, &default_journal_path())
+pub async fn rename_files(renames: Vec<RenamePair>) -> Result<Value, String> {
+    run_file_job(move || rename_files_at(renames, &default_journal_path())).await
 }
 
 /// Point any undo-journal entry for `old_path` at `new_path`, so undoing a
@@ -1362,7 +1554,7 @@ mod tests {
         let before = ffprobe(&m4b);
         assert!(before.contains("TAG:media_type=2"), "fixture must carry stik=2");
 
-        let wf = WriteFile { path: m4b.to_string_lossy().to_string(), changes: title_change("New Title") };
+        let wf = WriteFile { path: m4b.to_string_lossy().to_string(), changes: title_change("New Title"), group_size: None };
         let out = write_one_file(&wf, false);
         assert!(out.result.is_ok(), "write failed: {:?}", out.result);
 
@@ -1373,7 +1565,7 @@ mod tests {
         assert!(after.contains("codec_name=png"), "cover lost:\n{after}");
 
         // A second write (re-reading lofty's own output) must stay stable too.
-        let wf2 = WriteFile { path: m4b.to_string_lossy().to_string(), changes: title_change("Second") };
+        let wf2 = WriteFile { path: m4b.to_string_lossy().to_string(), changes: title_change("Second"), group_size: None };
         assert!(write_one_file(&wf2, false).result.is_ok());
         let again = ffprobe(&m4b);
         assert!(again.contains("TAG:title=Second") && again.contains("TAG:media_type=2"), "{again}");
@@ -1399,7 +1591,7 @@ mod tests {
         let mp3 = dir.path().join("book.mp3");
         assert!(ffprobe(&mp3).contains("B00TEST123"), "fixture must carry TXXX:ASIN");
 
-        let wf = WriteFile { path: mp3.to_string_lossy().to_string(), changes: title_change("New Title") };
+        let wf = WriteFile { path: mp3.to_string_lossy().to_string(), changes: title_change("New Title"), group_size: None };
         let out = write_one_file(&wf, false);
         assert!(out.result.is_ok(), "write failed: {:?}", out.result);
         let after = ffprobe(&mp3);
@@ -1414,7 +1606,7 @@ mod tests {
 
     fn one_file_request(path: &Path, backup: bool) -> WriteRequest {
         let mut files = HashMap::new();
-        files.insert("f1".to_string(), WriteFile { path: path.to_string_lossy().to_string(), changes: title_change("New") });
+        files.insert("f1".to_string(), WriteFile { path: path.to_string_lossy().to_string(), changes: title_change("New"), group_size: None });
         WriteRequest { file_ids: vec!["f1".into()], files, backup }
     }
 
@@ -1552,5 +1744,276 @@ mod tests {
         let (new_path, changed) = compute_new_path("/x/y.m4b", &render_template("", &json!({})));
         assert_eq!(new_path, "/x/y.m4b");
         assert!(!changed);
+    }
+
+    // ---- Task 12: writer correctness (audit W-2, W-3, W-5, W-6, W-7) ----
+
+    /// A temp dir the scanner will walk. tempdir()'s default ".tmpXXXX" name
+    /// starts with a dot, and collect_audio_files skips dot-directories.
+    fn scannable_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new().prefix("tagger-test-").tempdir().unwrap()
+    }
+
+    fn read_generic_tag(path: &Path) -> Tag {
+        let tagged = Probe::open(path).and_then(|p| p.read()).expect("read back");
+        tagged.primary_tag().or_else(|| tagged.first_tag()).cloned().expect("a tag")
+    }
+
+    fn change(old: &str, new: &str) -> Value {
+        json!({ "old": old, "new": new })
+    }
+
+    #[test]
+    fn multi_file_title_goes_to_album() {
+        if !have_ffmpeg() { return; }
+        let root = scannable_tempdir();
+        let book = root.path().join("Some Author").join("Old Book");
+        fs::create_dir_all(&book).unwrap();
+        let tracks: Vec<PathBuf> = ["01.mp3", "02.mp3", "03.mp3"].iter().map(|n| make_mp3(&book, n)).collect();
+        let mut files = HashMap::new();
+        let mut ids = Vec::new();
+        for (i, p) in tracks.iter().enumerate() {
+            let id = format!("f{i}");
+            let mut c = HashMap::new();
+            c.insert("title".to_string(), change("Orig", "New Book Title"));
+            files.insert(id.clone(), WriteFile { path: p.to_string_lossy().to_string(), changes: c, group_size: Some(3) });
+            ids.push(id);
+        }
+        let res = write_tags_at(WriteRequest { file_ids: ids, files, backup: false }, &root.path().join("undo.json"));
+        assert_eq!(res["success"], json!(3), "{res}");
+        for p in &tracks {
+            let tag = read_generic_tag(p);
+            assert_eq!(tag.album().as_deref(), Some("New Book Title"), "album not written on {p:?}");
+            assert_eq!(tag.title().as_deref(), Some("Orig"), "track title overwritten on {p:?}");
+        }
+        let groups = crate::scanner::group_files(crate::scanner::collect_audio_files(&[root.path().to_string_lossy().to_string()]));
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].metadata.title, "New Book Title");
+    }
+
+    #[test]
+    fn single_file_title_also_updates_matching_album() {
+        let mut tag = Tag::new(TagType::Mp4Ilst);
+        tag.set_title("Old".into());
+        tag.set_album("Old".into());
+        let mut c = HashMap::new();
+        c.insert("title".to_string(), change("Old", "New"));
+        apply_changes(&mut tag, &c, false);
+        assert_eq!(tag.title().as_deref(), Some("New"));
+        assert_eq!(tag.album().as_deref(), Some("New"));
+        // An album that is NOT the old title is a different value: leave it.
+        let mut tag = Tag::new(TagType::Mp4Ilst);
+        tag.set_title("Old".into());
+        tag.set_album("Collected Works".into());
+        apply_changes(&mut tag, &c, false);
+        assert_eq!(tag.title().as_deref(), Some("New"));
+        assert_eq!(tag.album().as_deref(), Some("Collected Works"));
+    }
+
+    #[test]
+    fn mp3_with_uslt_frame_writes() {
+        if !have_ffmpeg() { return; }
+        use lofty::config::ParseOptions;
+        use lofty::id3::v2::{Frame, FrameFlags, UnsynchronizedTextFrame};
+        use lofty::tag::TagExt;
+        let dir = tempdir().unwrap();
+        let mp3 = make_mp3(dir.path(), "lyrics.mp3");
+        // Add a USLT frame to the fixture through lofty's ID3v2 API.
+        let mut f = fs::File::open(&mp3).unwrap();
+        let mpeg = lofty::mpeg::MpegFile::read_from(&mut f, ParseOptions::new()).unwrap();
+        drop(f);
+        let mut id3 = mpeg.id3v2().cloned().unwrap_or_default();
+        id3.insert(
+            Frame::new(
+                "USLT",
+                UnsynchronizedTextFrame {
+                    encoding: lofty::TextEncoding::UTF8,
+                    language: *b"eng",
+                    description: String::new(),
+                    content: "Some sung words".into(),
+                },
+                FrameFlags::default(),
+            )
+            .unwrap(),
+        );
+        id3.save_to_path(&mp3, WriteOptions::default()).unwrap();
+        assert!(ffprobe(&mp3).contains("Some sung words"), "fixture must carry USLT");
+
+        let wf = WriteFile { path: mp3.to_string_lossy().to_string(), changes: title_change("With Lyrics"), group_size: None };
+        let out = write_one_file(&wf, false);
+        assert!(out.result.is_ok(), "write failed: {:?}", out.result);
+        let after = ffprobe(&mp3);
+        assert!(after.contains("TAG:title=With Lyrics"), "title not written:\n{after}");
+        assert!(after.contains("Some sung words"), "lyrics lost:\n{after}");
+    }
+
+    #[test]
+    fn temp_name_is_short_and_skipped() {
+        let tmp = temp_path_for(Path::new("/x/A very long name.mp3"));
+        let name = tmp.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(tmp.parent(), Some(Path::new("/x")));
+        assert!(name.starts_with(".tagtmp-") && name.ends_with(".mp3"), "{name}");
+        assert_eq!(name.len(), ".tagtmp-".len() + 32 + ".mp3".len(), "{name}");
+
+        if !have_ffmpeg() { return; }
+        let dir = scannable_tempdir();
+        let long = format!("{}.mp3", "a".repeat(226));
+        assert_eq!(long.len(), 230);
+        let mp3 = make_mp3(dir.path(), &long);
+        let wf = WriteFile { path: mp3.to_string_lossy().to_string(), changes: title_change("Long"), group_size: None };
+        let out = write_one_file(&wf, false);
+        assert!(out.result.is_ok(), "230-char filename must write: {:?}", out.result);
+        assert_eq!(read_generic_tag(&mp3).title().as_deref(), Some("Long"));
+
+        // A crash leftover is invisible to the scanner and removed by the sweep.
+        let leftover = dir.path().join(".tagtmp-0123456789abcdef0123456789abcdef.mp3");
+        fs::copy(&mp3, &leftover).unwrap();
+        let found = crate::scanner::collect_audio_files(&[dir.path().to_string_lossy().to_string()]);
+        assert_eq!(found.len(), 1, "scanner must skip .tagtmp- files");
+        assert_eq!(found[0].path, mp3.to_string_lossy());
+        assert_eq!(sweep_temp_files(dir.path()), 1);
+        assert!(!leftover.exists());
+        assert!(mp3.exists(), "sweep must only remove temp files");
+    }
+
+    #[test]
+    fn write_batch_sweeps_leftover_temp_files_first() {
+        if !have_ffmpeg() { return; }
+        let dir = tempdir().unwrap();
+        let mp3 = make_mp3(dir.path(), "a.mp3");
+        let leftover = dir.path().join(".tagtmp-ffffffffffffffffffffffffffffffff.mp3");
+        fs::copy(&mp3, &leftover).unwrap();
+        let res = write_tags_at(one_file_request(&mp3, false), &dir.path().join("undo.json"));
+        assert_eq!(res["success"], json!(1), "{res}");
+        assert!(!leftover.exists(), "leftover temp file survived the batch");
+    }
+
+    #[test]
+    fn journal_write_is_atomic() {
+        let dir = tempdir().unwrap();
+        let journal_path = dir.path().join("undo.json");
+        let good = UndoJournal {
+            timestamp: 1,
+            entries: vec![JournalEntry { original_path: "/a".into(), backup_path: "/a.bak".into() }],
+        };
+        write_journal(&journal_path, &good).unwrap();
+        // Block the sibling staging file: the write must fail WITHOUT touching the
+        // existing journal (a plain fs::write would have truncated it in place).
+        let staging = crate::session::tmp_path_for(&journal_path);
+        fs::create_dir(&staging).unwrap();
+        let newer = UndoJournal { timestamp: 2, entries: vec![] };
+        assert!(write_journal(&journal_path, &newer).is_err());
+        let kept = read_journal(&journal_path).expect("previous journal intact");
+        assert_eq!(kept.timestamp, 1);
+        assert_eq!(kept.entries.len(), 1);
+        fs::remove_dir(&staging).unwrap();
+        write_journal(&journal_path, &newer).unwrap();
+        assert_eq!(read_journal(&journal_path).unwrap().timestamp, 2);
+        assert!(!staging.exists(), "staging file left behind");
+    }
+
+    #[test]
+    fn mp3_decimal_series_roundtrip() {
+        if !have_ffmpeg() { return; }
+        let dir = scannable_tempdir();
+        let mp3 = make_mp3(dir.path(), "a.mp3");
+        let mut c = HashMap::new();
+        c.insert("series".to_string(), change("", "Discworld"));
+        c.insert("sequence".to_string(), change("", "1.5"));
+        let wf = WriteFile { path: mp3.to_string_lossy().to_string(), changes: c, group_size: None };
+        let out = write_one_file(&wf, false);
+        assert!(out.result.is_ok(), "{:?}", out.result);
+        assert!(ffprobe(&mp3).contains("SERIES-PART=1.5"), "TXXX:SERIES-PART not written:\n{}", ffprobe(&mp3));
+        let found = crate::scanner::collect_audio_files(&[dir.path().to_string_lossy().to_string()]);
+        let groups = crate::scanner::group_files(found);
+        assert_eq!(groups[0].metadata.series_number, "1.5");
+        assert_eq!(groups[0].metadata.series, "Discworld");
+
+        // A second write of another value replaces it (no stale duplicate).
+        let mut c = HashMap::new();
+        c.insert("sequence".to_string(), change("1.5", "2.25"));
+        let wf = WriteFile { path: mp3.to_string_lossy().to_string(), changes: c, group_size: None };
+        assert!(write_one_file(&wf, false).result.is_ok());
+        let groups = crate::scanner::group_files(crate::scanner::collect_audio_files(&[dir.path().to_string_lossy().to_string()]));
+        assert_eq!(groups[0].metadata.series_number, "2.25");
+    }
+
+    #[test]
+    fn m4b_year_replaces_full_date() {
+        let mut tag = Tag::new(TagType::Mp4Ilst);
+        tag.insert_text(ItemKey::RecordingDate, "2015-06-01".into());
+        let mut c = HashMap::new();
+        c.insert("year".to_string(), change("2015", "2020"));
+        apply_changes(&mut tag, &c, false);
+        assert_eq!(tag.get_string(&ItemKey::RecordingDate), Some("2020"));
+        assert_eq!(tag.year(), Some(2020));
+
+        if !have_ffmpeg() { return; }
+        let dir = tempdir().unwrap();
+        let m4b = make_m4b(dir.path());
+        // Seed a full date directly so the fixture carries month and day.
+        {
+            use lofty::config::ParseOptions;
+            use lofty::tag::TagExt;
+            let mut f = fs::File::open(&m4b).unwrap();
+            let mp4 = lofty::mp4::Mp4File::read_from(&mut f, ParseOptions::new()).unwrap();
+            drop(f);
+            let mut ilst = mp4.ilst().cloned().unwrap_or_default();
+            ilst.replace_atom(lofty::mp4::Atom::new(
+                lofty::mp4::AtomIdent::Fourcc(*b"\xa9day"),
+                lofty::mp4::AtomData::UTF8("2015-06-01".into()),
+            ));
+            ilst.save_to_path(&m4b, WriteOptions::default()).unwrap();
+        }
+        assert!(ffprobe(&m4b).contains("2015-06-01"), "fixture must carry a full date");
+        let mut c = HashMap::new();
+        c.insert("year".to_string(), change("2015", "2020"));
+        let wf = WriteFile { path: m4b.to_string_lossy().to_string(), changes: c, group_size: None };
+        assert!(write_one_file(&wf, false).result.is_ok());
+        let after = ffprobe(&m4b);
+        assert!(!after.contains("2020-06-01"), "old month/day kept:\n{after}");
+        assert!(after.contains("TAG:date=2020"), "year not written:\n{after}");
+    }
+
+    #[test]
+    fn rename_template_values_are_literal() {
+        let meta = json!({ "title": "Weird {Unabridged} Book", "author": "A" });
+        assert_eq!(render_template("{title} - {author}", &meta), "Weird {Unabridged} Book - A");
+        let p = preview_rename("/x/old.m4b".into(), meta, Some("{title} - {author}".into()), None, None);
+        assert_eq!(p["new_path"], json!("/x/Weird {Unabridged} Book - A.m4b"));
+
+        // A value that looks like a token is not expanded a second time.
+        let meta = json!({ "title": "{author}", "author": "A" });
+        assert_eq!(render_template("{title}", &meta), "{author}");
+
+        // Windows reserved device names get a trailing underscore on every platform.
+        let (con, _) = compute_new_path("/x/old.mp3", &render_template("{title}", &json!({ "title": "CON" })));
+        assert_eq!(con, "/x/CON_.mp3");
+        for (stem, want) in [("con", "con_"), ("Lpt9", "Lpt9_"), ("nul.backup", "nul_.backup"), ("COM1", "COM1_"), ("CONSOLE", "CONSOLE"), ("COM0", "COM0")] {
+            let (p, _) = compute_new_path("/x/old.mp3", stem);
+            assert_eq!(p, format!("/x/{want}.mp3"), "stem {stem}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_refuses_symlink_source() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real.mp3");
+        fs::write(&real, b"REAL").unwrap();
+        let link = dir.path().join("link.mp3");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let target = dir.path().join("renamed.mp3");
+        let err = rename_one(&link.to_string_lossy(), &target.to_string_lossy());
+        assert!(err.is_err(), "renaming a symlink must be refused");
+        assert!(link.symlink_metadata().is_ok(), "symlink must be left in place");
+        assert!(!target.exists());
+        assert_eq!(fs::read(&real).unwrap(), b"REAL");
+
+        // A dangling symlink at the target counts as an existing target.
+        let dangling = dir.path().join("dangling.mp3");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &dangling).unwrap();
+        assert!(rename_one(&real.to_string_lossy(), &dangling.to_string_lossy()).is_err());
+        assert!(real.exists());
     }
 }

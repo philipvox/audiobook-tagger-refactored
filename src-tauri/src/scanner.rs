@@ -64,8 +64,8 @@ struct EmbeddedTags {
     genre: Option<String>,
 }
 
-struct RawFile {
-    path: String,
+pub(crate) struct RawFile {
+    pub(crate) path: String,
     filename: String,
     parent_dir: String,
     /// The scan root this file was found under; folders at/above it are never
@@ -118,11 +118,16 @@ fn read_embedded_tags(path: &Path) -> EmbeddedTags {
         &["SERIES", "Series", "Series-Name", "MVNM"],
         &[ItemKey::Movement],
     );
+    // The freeform/TXXX SERIES-PART value is checked BEFORE the movement number:
+    // MVIN and the MP4 movement-number atom only hold whole numbers, so a
+    // decimal position ("1.5") survives only in SERIES-PART (writer.rs writes
+    // both).
     out.series_number = lookup_tag_field(
         tag,
         &["SERIES-PART", "Series-Part", "Series Part", "SERIES_PART", "MVIN"],
-        &[ItemKey::MovementNumber],
-    );
+        &[],
+    )
+    .or_else(|| lookup_tag_field(tag, &[], &[ItemKey::MovementNumber]));
 
     out
 }
@@ -164,7 +169,7 @@ fn lookup_tag_field(tag: &lofty::tag::Tag, names: &[&str], known: &[ItemKey]) ->
     None
 }
 
-fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
+pub(crate) fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
     let mut files = Vec::new();
     for root in paths {
         for entry in WalkDir::new(root)
@@ -183,7 +188,9 @@ fn collect_audio_files(paths: &[String]) -> Vec<RawFile> {
                     }
                 }
                 if let Some(name) = e.path().file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("._") {
+                    // "._" = macOS resource forks; ".tagtmp-" = a temp copy a
+                    // crashed tag write left behind (writer::TEMP_PREFIX).
+                    if name.starts_with("._") || name.starts_with(crate::writer::TEMP_PREFIX) {
                         return false;
                     }
                 }
@@ -792,7 +799,7 @@ fn split_folder_into_books(raw_files: Vec<RawFile>) -> Vec<(String, Vec<RawFile>
         .collect()
 }
 
-fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
+pub(crate) fn group_files(files: Vec<RawFile>) -> Vec<BookGroup> {
     // Key by the climbed book directory (past chapter/disc subfolders) so a
     // multi-disc layout (Author/Book/Disc 1 + Disc 2) merges into one group.
     let mut map: HashMap<String, Vec<RawFile>> = HashMap::new();
