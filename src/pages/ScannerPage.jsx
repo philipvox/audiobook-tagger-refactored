@@ -19,7 +19,7 @@ import { ValidationIssueModal } from '../components/ValidationIssueModal';
 import { AuthorAnalysisModal } from '../components/AuthorAnalysisModal';
 import { BatchFixModal } from '../components/BatchFixModal';
 import { useToast } from '../components/Toast';
-import { useScan, importFromAbsWithNotice, hasAbsConnection } from '../hooks/useScan';
+import { useScan, importFromAbsWithNotice, hasAbsConnection, hasAiProvider } from '../hooks/useScan';
 import { useFileSelection } from '../hooks/useFileSelection';
 import { useTagOperations } from '../hooks/useTagOperations';
 import { useBatchOperations } from '../hooks/useBatchOperations';
@@ -33,7 +33,8 @@ import { runPush, isAbsBacked, fileIdsInGroups, normalizePushResult, summarizePu
 import { userClearedPatch } from '../lib/userCleared';
 import { applyClassifyResult } from '../lib/applyClassifyResult';
 import { applyTagsResultToGroup, applyDnaResultToGroup, normalizeResults } from '../lib/applyTagResults';
-import { runEnrichAction, applyEntries, runBatchChunks } from '../lib/enrichActions';
+import { applyDescriptionProcessResult, applyFixDescriptionResult, tallyOutcomes } from '../lib/applyAiResults';
+import { runEnrichAction, applyEntries, reportOutcomes, runBatchChunks } from '../lib/enrichActions';
 import { requestCancel, resetCancel, isCancelled } from '../lib/cancel';
 import { syncAllSeries } from '../lib/absPayload';
 import { applyMetadataToGroup, readFileField, setYear } from '../lib/applyMetadata';
@@ -875,14 +876,16 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0 && !allSelected) return;
 
-    // Check if OpenAI key is configured
-    if (!config?.openai_api_key) {
-      // Fall back to static cleanup if no API key
+    // Any configured AI provider (OpenAI, Anthropic or local AI) takes the AI
+    // path; only a setup with none falls back to the static cleaner.
+    if (!hasAiProvider(config)) {
       try {
         const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
         const result = await handleCleanupGenres(selectedGroups);
+        reportOutcomes(toast, 'genres', result.pairs || []);
       } catch (error) {
         console.error('Genre cleanup failed:', error);
+        toast.error('Genre Cleanup Failed', String(error?.message || error));
       }
       return;
     }
@@ -1597,51 +1600,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           batch.update('metadata', { current: offset });
         },
         callChunk: (chunk) => callBackend('resolve_metadata_batch', { books: chunk, config }),
-        applyChunk: (result) => setGroups(prevGroups => {
-          return prevGroups.map(g => {
-            const r = result.results?.find(r => r.id === g.id);
-            if (!r) return g;
-
-            // Pick the most relevant errorDetail for this book: resolve-stage error
-            // wins over the earlier gather-stage error (resolve runs after gather;
-            // if both stages produced errors, the resolve error is newer signal).
-            const gatherDetail = gatheredDataRef.current?.get(g.id)?.errorDetail;
-            const errorSource = r.errorDetail || gatherDetail;
-            let lastError;
-            if (errorSource) {
-              const isHardFailure = r.error || r.success === false || ['network', 'http', 'parse', 'schema'].includes(errorSource.kind);
-              lastError = { ...errorSource, severity: isHardFailure ? 'error' : 'warn' };
-            }
-
-            // Hard failure or no usable change: surface error, don't merge metadata.
-            if (r.error || r.success === false || !r.changed) {
-              return lastError ? { ...g, lastError } : g;
-            }
-
-            // H2/H6: stamp each resolved field that actually changed into
-            // file.changes so Write Tags writes the resolution output.
-            const changedFileFields = [];
-            if (r.title && r.title !== g.metadata.title) changedFileFields.push('title');
-            if (r.author && r.author !== g.metadata.author) changedFileFields.push('author');
-            if (r.subtitle && r.subtitle !== g.metadata.subtitle) changedFileFields.push('subtitle');
-            if (r.series !== undefined && r.series !== g.metadata.series) changedFileFields.push('series');
-            if (r.sequence !== undefined && r.sequence !== g.metadata.sequence) changedFileFields.push('sequence');
-            if (r.narrator && r.narrator !== g.metadata.narrator) changedFileFields.push('narrator');
-            const next = applyMetadataToGroup(
-              g,
-              {
-                title: r.title || g.metadata.title,
-                author: r.author || g.metadata.author,
-                subtitle: r.subtitle || g.metadata.subtitle,
-                series: r.series !== undefined ? r.series : g.metadata.series,
-                sequence: r.sequence !== undefined ? r.sequence : g.metadata.sequence,
-                narrator: r.narrator || g.metadata.narrator,
-              },
-              changedFileFields
-            );
-            return { ...next, lastError };
-          });
-        }),
+        applyChunk: (result) => setGroups(prevGroups => prevGroups.map(g =>
+          // H2/H6: stamps the description; a narrator is staged only when the book has none.
+          applyDescriptionProcessResult(g, result.results?.find(r => r.id === g.id))
+        )),
       });
       const result = { results: run.results, total_processed: run.processed, total_failed: run.failed };
 
@@ -2362,10 +2324,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     logBatchStart('descriptions', selectedGroups.length);
 
 
-    let fixedCount = 0;
-    let skippedCount = 0;
-    let failedCount = 0;
-
     // Listen for per-book progress events within each chunk
     let descChunkOffset = 0;
     const unlistenDescs = subscribe('batch-progress', (d) => {
@@ -2373,100 +2331,43 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       batch.update('descriptions', { current: descChunkOffset + d.current, currentBook: d.title });
     });
 
-    // Process in batches of 25 for efficiency while still showing progress
-    const batchSize = 25;
-    let descsCancelled = 0;
-    for (let i = 0; i < selectedGroups.length; i += batchSize) {
-      // M-6: Cancel stops between batches; finished batches stay applied.
-      if (isCancelled()) { descsCancelled = selectedGroups.length - i; break; }
-      const chunk = selectedGroups.slice(i, i + batchSize);
-      descChunkOffset = i;
-
-      // Update progress with current batch
-      batch.update('descriptions', { current: i, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
-
-      try {
-        const books = chunk.map(g => ({
+    // Chunks of 25; each is staged as it lands and Cancel stops between them.
+    // A failed chunk puts the error on each of its books and the toast names
+    // the failure count.
+    const pairs = [];
+    const run = await runBatchChunks(selectedGroups, {
+      stage: 'description',
+      onChunkStart: (chunk, offset) => {
+        descChunkOffset = offset;
+        batch.update('descriptions', { current: offset, currentBook: chunk.map(g => g.metadata?.title).join(', ') });
+      },
+      callChunk: (chunk) => callBackend('fix_descriptions_with_gpt', {
+        books: chunk.map(g => ({
           id: g.id,
           title: g.metadata?.title || '',
           author: g.metadata?.author || '',
           genres: g.metadata?.genres || [],
           description: g.metadata?.description || null,
-        }));
-
-        const result = await callBackend('fix_descriptions_with_gpt', { books, config, force: forceFresh });
-
-        // Update groups with new descriptions AND extracted narrators
-        if (result.results && result.results.length > 0) {
-          setGroups(prevGroups => {
-            return prevGroups.map(g => {
-              const descResult = result.results.find(r => r.id === g.id);
-              if (!descResult) return g;
-
-              // Track changes
-              let changes = 0;
-              const updates = {};
-
-              // Update description if fixed
-              if (descResult.fixed && descResult.new_description) {
-                updates.description = descResult.new_description;
-                changes++;
-              }
-
-              // Always overwrite narrator if extracted from description
-              if (descResult.extracted_narrator) {
-                updates.narrator = descResult.extracted_narrator;
-                // Also update narrators array (split by semicolon for multiple)
-                updates.narrators = descResult.extracted_narrator.split(';').map(n => n.trim()).filter(Boolean);
-                changes++;
-              }
-
-              // If no updates, return unchanged
-              if (Object.keys(updates).length === 0) return g;
-
-              // H2/H6: stamp description / narrator into file.changes.
-              const changedFileFields = [];
-              if (updates.description) changedFileFields.push('description');
-              if (updates.narrator) changedFileFields.push('narrator');
-              return applyMetadataToGroup(g, updates, changedFileFields);
-            });
-          });
-
-          fixedCount += result.total_fixed;
-          skippedCount += result.total_skipped;
-          failedCount += result.total_failed;
-        }
-
-        // Update progress after batch
-        batch.update('descriptions', {
-          current: Math.min(i + batchSize, selectedGroups.length),
-          fixed: fixedCount,
-          skipped: skippedCount,
-          failed: failedCount,
-        });
-
-      } catch (error) {
-        console.error(`Batch ${i}-${i + batchSize} failed:`, error);
-        failedCount += chunk.length;
-        batch.update('descriptions', {
-          current: Math.min(i + batchSize, selectedGroups.length),
-          failed: failedCount,
-        });
-      }
-    }
-
+        })),
+        config,
+        force: forceFresh,
+      }),
+      applyChunk: (result, chunk) => {
+        const entries = new Map((result?.results || []).map(r => [r.id, r]));
+        pairs.push(...applyEntries(setGroups, chunk, g => entries.get(g.id), applyFixDescriptionResult));
+        const c = tallyOutcomes(pairs).counts;
+        batch.update('descriptions', { current: pairs.length, fixed: c.succeeded, skipped: c.skipped, failed: c.failed });
+      },
+    });
     unlistenDescs();
+    const counts = reportOutcomes(toast, 'fix_descriptions', pairs, run.cancelled);
     logBatchEnd('descriptions', {
       books: selectedGroups.length,
-      fixed: fixedCount,
-      skipped: skippedCount,
-      failed: failedCount,
-      cancelled: descsCancelled,
+      fixed: counts.succeeded,
+      skipped: counts.skipped,
+      failed: counts.failed,
+      cancelled: run.cancelled,
     });
-    if (descsCancelled > 0) {
-      const done = selectedGroups.length - descsCancelled;
-      toast.warning('Fix Descriptions cancelled', `${done} of ${selectedGroups.length} processed; the remaining ${descsCancelled} ${descsCancelled === 1 ? 'was' : 'were'} cancelled.`);
-    }
 
     // Clear progress after a short delay
     batch.end('descriptions', 1500);
@@ -2891,10 +2792,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         await handleRescanAbsImports(absImports, 'genres_only');
       }
       if (localGroups.length > 0) {
-        await handleCleanupGenres(localGroups);
+        const result = await handleCleanupGenres(localGroups);
+        reportOutcomes(toast, 'genres', result.pairs || []);
       }
     } catch (error) {
       console.error('Genre cleanup failed:', error);
+      toast.error('Genre Cleanup Failed', String(error?.message || error));
     }
   };
 
@@ -3037,7 +2940,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         runningAll={runningAll}
         generatingDna={generatingDna}
         hasAbsConnection={hasAbsConnection(config)}
-        hasOpenAiKey={!!(config?.openai_api_key || config?.anthropic_api_key || config?.use_local_ai)}
+        hasOpenAiKey={hasAiProvider(config)}
         useLocalAI={!!(config?.use_local_ai && config?.ollama_model)}
         aiModel={config?.ai_model}
         forceFresh={forceFresh}

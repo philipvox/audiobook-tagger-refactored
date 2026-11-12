@@ -5,6 +5,8 @@ import { useApp } from '../context/AppContext';
 import { getAbsId, normalizePushResult, buildPushItems, applyPushSnapshots, applyRefreshedLists, failedPushResult } from '../lib/absPush';
 import { logEvent } from '../lib/logEvent';
 import { requestCancel, resetCancel } from '../lib/cancel';
+import { applyEntries } from '../lib/enrichActions';
+import { applyStaticGenreCleanupResult } from '../lib/applyAiResults';
 
 // ============================================================================
 // Pure helpers, extracted so they can be unit-tested without rendering the
@@ -96,6 +98,14 @@ export function mergeAbsPullGroups(prevGroups, newGroups) {
  */
 export function hasAbsConnection(config) {
   return !!(config?.abs_base_url && config?.abs_api_token && config?.abs_library_id);
+}
+
+/**
+ * True when an AI provider is configured: an OpenAI key, an Anthropic key or
+ * local AI. The one definition the Scanner page uses to gate AI actions.
+ */
+export function hasAiProvider(config) {
+  return !!(config?.openai_api_key || config?.anthropic_api_key || config?.use_local_ai);
 }
 
 /**
@@ -931,23 +941,12 @@ export function useScan() {
 
       const result = await callBackend('cleanup_genres', { request });
 
-      // Update groups with cleaned genres
-      setGroups(prevGroups =>
-        prevGroups.map(group => {
-          const cleaned = result.results.find(r => r.id === group.id);
-          if (!cleaned || !cleaned.changed) return group;
+      // Apply through the shared applier so changedFields / total_changes are
+      // stamped and snapshot genres are never dropped without a replacement.
+      const entries = new Map((result.results || []).map((r) => [r.id, r]));
+      const pairs = applyEntries(setGroups, selectedGroups, (g) => entries.get(g.id), applyStaticGenreCleanupResult);
 
-          return {
-            ...group,
-            metadata: {
-              ...group.metadata,
-              genres: cleaned.cleaned_genres,
-            }
-          };
-        })
-      );
-
-      return { success: true, count: result.total_cleaned };
+      return { success: true, count: result.total_cleaned, pairs };
 
     } catch (error) {
       console.error('Genre cleanup failed:', error);

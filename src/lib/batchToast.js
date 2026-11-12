@@ -18,6 +18,7 @@ const OPS = Object.freeze({
   titles:      { v1Title: 'Fix Titles Complete',          v2v3Title: 'Fix Titles',          verb: 'fixed' },
   series:      { v1Title: 'Fix Series Complete',          v2v3Title: 'Fix Series',          verb: 'fixed', skippedLabel: 'unchanged or skipped' },
   subtitles:   { v1Title: 'Fix Subtitles Complete',       v2v3Title: 'Fix Subtitles',       verb: 'fixed' },
+  fix_descriptions: { v1Title: 'Fix Descriptions Complete', v2v3Title: 'Fix Descriptions', verb: 'fixed' },
   genres:      { v1Title: 'Genre Cleanup Complete',       v2v3Title: 'Genre Cleanup',       verb: 'cleaned' },
   age:         { v1Title: 'Age Lookup Complete',          v2v3Title: 'Age Lookup',          verb: 'rated' },
   audio_check: { v1Title: 'Audio Check Complete',         v2v3Title: 'Audio Check',         verb: 'updated', skippedLabel: 'nothing new' },

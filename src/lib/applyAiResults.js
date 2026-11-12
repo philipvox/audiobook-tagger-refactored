@@ -24,6 +24,7 @@ import { isPlaceholderAuthor, isPlaceholderTitle } from './normalize.js';
 import { enforceGenrePolicyWithSplit } from './genres.js';
 import { mapAgeCategory } from './ageCategory.js';
 import { severityForKind } from './errorDetail.js';
+import { extractNarrator } from './extractNarrator.js';
 
 const has = (v) => v !== undefined && v !== null && String(v).trim() !== '';
 const same = (a, b) => (a == null ? '' : String(a)) === (b == null ? '' : String(b));
@@ -149,6 +150,15 @@ export function applyGenreCleanupResult(group, entry) {
     return { group: clearStage(group, 'genres'), outcome: 'unchanged' };
   }
   return { group: clearStage(applyMetadataToGroup(group, { genres }, ['genre']), 'genres'), outcome: 'changed' };
+}
+
+// The static (no AI) cleanup answers { id, changed, cleaned_genres } with no
+// success flag. It goes through the same merge, so it stamps changedFields and
+// never drops a genre that was in the import snapshot without a replacement.
+export function applyStaticGenreCleanupResult(group, entry) {
+  if (!entry) return { group, outcome: 'none' };
+  if (!entry.changed) return { group, outcome: 'unchanged' };
+  return applyGenreCleanupResult(group, { success: true, cleaned_genres: entry.cleaned_genres });
 }
 
 // ---- Lookup Age ----
@@ -283,6 +293,51 @@ export function applyAudioResult(group, result, field = 'all', force = false) {
   const fields = Object.keys(updates).filter((k) => k !== 'narrators');
   if (fields.length === 0) return { group: clearStage(group, 'audio'), outcome: 'unchanged' };
   return { group: clearStage(applyMetadataToGroup(group, updates, fields), 'audio'), outcome: 'changed' };
+}
+
+// ---- Descriptions ----
+// A narrator found in a description is staged only when the book has none (or
+// a placeholder); an existing narrator is never overwritten.
+export function hasNoNarrator(metadata) {
+  const m = metadata || {};
+  const list = Array.isArray(m.narrators) ? m.narrators : [];
+  return isPlaceholderAuthor(m.narrator) && list.every(isPlaceholderAuthor);
+}
+
+// Description Processing: entry is one process_descriptions_batch result.
+// Returns the group (unchanged when the entry changed nothing).
+export function applyDescriptionProcessResult(group, entry) {
+  if (!entry || entry.error || !entry.changed) return group;
+  const narrator = hasNoNarrator(group.metadata) ? extractNarrator(entry.description) : null;
+  return applyMetadataToGroup(
+    group,
+    { description: entry.description, ...(narrator ? { narrator } : {}) },
+    narrator ? ['description', 'narrator'] : ['description']
+  );
+}
+
+// Fix Descriptions: entry is one fix_descriptions_with_gpt result, or a
+// { success: false, error } the caller built from a rejected chunk.
+export function applyFixDescriptionResult(group, entry) {
+  if (!entry) return { group, outcome: 'none' };
+  if (isFailure(entry)) return failed(group, 'description', entry, 'Fix Descriptions failed.');
+  const updates = {};
+  const fields = [];
+  if (entry.fixed && has(entry.new_description) && entry.new_description !== group.metadata?.description) {
+    updates.description = entry.new_description;
+    fields.push('description');
+  }
+  if (has(entry.extracted_narrator) && hasNoNarrator(group.metadata)) {
+    const names = String(entry.extracted_narrator).split(';')
+      .map((n) => extractNarrator(`Narrated by ${n.trim()}`)).filter(Boolean);
+    if (names.length > 0) {
+      updates.narrator = names.join(', ');
+      updates.narrators = names;
+      fields.push('narrator');
+    }
+  }
+  if (fields.length === 0) return { group: clearStage(group, 'description'), outcome: 'unchanged' };
+  return { group: clearStage(applyMetadataToGroup(group, updates, fields), 'description'), outcome: 'changed' };
 }
 
 // ---- Counting ----

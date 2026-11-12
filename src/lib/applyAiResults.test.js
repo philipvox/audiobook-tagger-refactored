@@ -317,3 +317,76 @@ describe('M-7: total failure reads as failure', () => {
     expect(summary.title).toBe('ISBN Lookup: 1 found, 1 not found');
   });
 });
+
+describe('Task 10: description appliers', () => {
+  it('Description Processing stages a valid narrator only when the book has none', async () => {
+    const { applyDescriptionProcessResult } = await import('./applyAiResults');
+    const entry = { changed: true, description: 'A tale. Narrated by John Lee and featuring original music.' };
+    const g = applyDescriptionProcessResult(book({ narrator: '' }), entry);
+    expect(g.metadata.narrator).toBe('John Lee');
+    expect(g.changedFields).toContain('narrator');
+    expect(g.changedFields).toContain('description');
+    const kept = applyDescriptionProcessResult(book({ narrator: 'Existing Person' }), entry);
+    expect(kept.metadata.narrator).toBe('Existing Person');
+    expect(kept.metadata.description).toBe(entry.description);
+  });
+
+  it('Description Processing never stages "the author with"', async () => {
+    const { applyDescriptionProcessResult } = await import('./applyAiResults');
+    const g = applyDescriptionProcessResult(book({ narrator: '' }), { changed: true, description: 'Read by the author with a full cast.' });
+    expect(g.metadata.narrator).toBeFalsy();
+    expect(g.changedFields).not.toContain('narrator');
+  });
+
+  it('Description Processing treats a placeholder narrator as none', async () => {
+    const { applyDescriptionProcessResult } = await import('./applyAiResults');
+    const g = applyDescriptionProcessResult(book({ narrator: 'Unknown' }), { changed: true, description: 'Read by Bahni Turpin.' });
+    expect(g.metadata.narrator).toBe('Bahni Turpin');
+  });
+
+  it('Fix Descriptions records a failure on the book', async () => {
+    const { applyFixDescriptionResult } = await import('./applyAiResults');
+    const { group, outcome } = applyFixDescriptionResult(book(), { success: false, error: 'HTTP 500' });
+    expect(outcome).toBe('failed');
+    expect(group.lastError).toMatchObject({ stage: 'description', severity: 'error', message: 'HTTP 500' });
+  });
+
+  it('Fix Descriptions applies a description and never overwrites a narrator', async () => {
+    const { applyFixDescriptionResult } = await import('./applyAiResults');
+    const entry = { success: true, fixed: true, new_description: 'New text.', extracted_narrator: 'John Lee' };
+    const r = applyFixDescriptionResult(book({ narrator: 'Existing Person', description: 'old' }), entry);
+    expect(r.outcome).toBe('changed');
+    expect(r.group.metadata.description).toBe('New text.');
+    expect(r.group.metadata.narrator).toBe('Existing Person');
+    const r2 = applyFixDescriptionResult(book({ narrator: '' }), entry);
+    expect(r2.group.metadata.narrator).toBe('John Lee');
+    const r3 = applyFixDescriptionResult(book({ narrator: '' }), { ...entry, extracted_narrator: 'the author with' });
+    expect(r3.group.metadata.narrator).toBeFalsy();
+  });
+});
+
+describe('Task 10: static genre cleanup applier', () => {
+  it('stamps changedFields and counts as changed', async () => {
+    const { applyStaticGenreCleanupResult } = await import('./applyAiResults');
+    const { group, outcome } = applyStaticGenreCleanupResult(book({ genres: ['Sci Fi'] }), { changed: true, cleaned_genres: ['Science Fiction'] });
+    expect(outcome).toBe('changed');
+    expect(group.metadata.genres).toEqual(['Science Fiction']);
+    expect(group.changedFields).toContain('genres');
+  });
+
+  it('keeps an import-snapshot genre that has no replacement', async () => {
+    const { applyStaticGenreCleanupResult } = await import('./applyAiResults');
+    const g = book({ genres: ['Cozy Mystery', 'Sci-Fi'] }, { abs_original: { genres: ['Cozy Mystery', 'Sci-Fi'] } });
+    const { group } = applyStaticGenreCleanupResult(g, { changed: true, cleaned_genres: ['Science Fiction'] });
+    expect(group.metadata.genres).toContain('Cozy Mystery');
+    expect(group.metadata.genres).toContain('Science Fiction');
+    expect(group.metadata.genres).not.toContain('Sci-Fi');
+  });
+
+  it('an unchanged or missing entry changes nothing', async () => {
+    const { applyStaticGenreCleanupResult } = await import('./applyAiResults');
+    const g = book({ genres: ['Fantasy'] });
+    expect(applyStaticGenreCleanupResult(g, { changed: false }).outcome).toBe('unchanged');
+    expect(applyStaticGenreCleanupResult(g, undefined).outcome).toBe('none');
+  });
+});

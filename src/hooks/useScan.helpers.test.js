@@ -174,3 +174,16 @@ describe('mergeAbsPull and needs_reimport groups (H-4)', () => {
     expect(mergeAbsPullGroups([a, b, gone], news)).toEqual(groups);
   });
 });
+
+import { hasAiProvider } from './useScan';
+describe('hasAiProvider (genre cleanup gate)', () => {
+  it('is true for an OpenAI key, an Anthropic key or local AI', () => {
+    expect(hasAiProvider({ openai_api_key: 'sk-x' })).toBe(true);
+    expect(hasAiProvider({ anthropic_api_key: 'sk-ant' })).toBe(true);
+    expect(hasAiProvider({ use_local_ai: true })).toBe(true);
+  });
+  it('is false with none of them', () => {
+    expect(hasAiProvider({})).toBe(false);
+    expect(hasAiProvider(null)).toBe(false);
+  });
+});
