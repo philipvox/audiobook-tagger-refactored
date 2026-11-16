@@ -349,7 +349,7 @@ export async function callAI(config, systemPrompt, userPrompt, maxTokens = 2000)
     });
   }
 
-  const model = config.ai_model || 'gpt-5-nano';
+  const model = config.ai_model || 'gpt-6-luna';
   const isAnthropic = model.startsWith('claude');
 
   if (isAnthropic) {
