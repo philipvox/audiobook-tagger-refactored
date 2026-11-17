@@ -50,11 +50,8 @@ const TOKENS_PER_BOOK_OUTPUT = 1000;
 
 const AI_MODELS = [
   // OpenAI
-  { id: 'gpt-5-nano',          label: 'GPT-5 Nano (Recommended)',      inputPrice: 0.05,  outputPrice: 0.40,  desc: 'Cheapest option with great quality. Knowledge cutoff Apr 2025.', provider: 'openai' },
-  { id: 'gpt-5.4-nano',        label: 'GPT-5.4 Nano',                inputPrice: 0.20,  outputPrice: 1.25,  desc: 'Newer knowledge (Aug 2025). 4x more expensive than GPT-5 Nano.', provider: 'openai' },
+  { id: 'gpt-6-luna',          label: 'GPT-6 Luna (Recommended)',     inputPrice: 0.10,  outputPrice: 0.50,  desc: 'Cheap and current. Knowledge cutoff May 2026. Replaces GPT-5 Nano, which OpenAI retires on Dec 11, 2026.', provider: 'openai' },
   { id: 'gpt-5.4-mini',        label: 'GPT-5.4 Mini',                 inputPrice: 0.75,  outputPrice: 4.50,  desc: 'Higher quality. Use for difficult or ambiguous metadata.', provider: 'openai' },
-  { id: 'gpt-4o-mini',         label: 'GPT-4o Mini (Legacy)',          inputPrice: 0.15,  outputPrice: 0.60,  desc: 'Older model (Oct 2023 knowledge). Being phased out.', provider: 'openai' },
-  { id: 'gpt-4o',              label: 'GPT-4o',                       inputPrice: 2.50,  outputPrice: 10.00, desc: 'Premium quality but expensive. For edge cases only.', provider: 'openai' },
   // Anthropic Claude
   { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 (Fast & Cheap)', inputPrice: 0.80, outputPrice: 4.00, desc: 'Fast and affordable. Great for structured extraction.', provider: 'anthropic' },
   { id: 'claude-sonnet-4-6',   label: 'Claude Sonnet 4.6',            inputPrice: 3.00,  outputPrice: 15.00, desc: 'Best quality Claude model. Excellent at nuanced metadata.', provider: 'anthropic' },

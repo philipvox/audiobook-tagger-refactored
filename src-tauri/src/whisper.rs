@@ -1130,19 +1130,20 @@ Transcript: "{}""#,
             .ok_or("No content in Ollama response")?
             .to_string()
     } else {
-        // OpenAI Responses API (gpt-5-nano)
+        // OpenAI Responses API. gpt-6-luna replaced gpt-5-nano, which OpenAI
+        // shuts down on 2026-12-11; gpt-6 starts reasoning effort at "none".
         let api_key = request.openai_api_key.as_deref()
             .ok_or("No OpenAI API key")?;
 
         let body = serde_json::json!({
-            "model": "gpt-5-nano",
+            "model": "gpt-6-luna",
             "input": [
                 { "role": "developer", "content": system_prompt },
                 { "role": "user", "content": user_prompt }
             ],
             "text": { "format": { "type": "json_object" } },
             "max_output_tokens": 200,
-            "reasoning": { "effort": "minimal" }
+            "reasoning": { "effort": "none" }
         });
 
         let response = client

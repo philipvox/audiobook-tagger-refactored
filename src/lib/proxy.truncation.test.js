@@ -59,7 +59,8 @@ describe('AI provider truncation signals (M-1)', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({
       choices: [{ finish_reason: 'length', message: { content: '{"genres":["Fan' } }],
     }));
-    await expect(callOpenAI('sk', 'gpt-4o-mini', 's', 'u', 100)).rejects.toThrow(/truncated/);
+    // A custom OpenAI-compatible server: the official API no longer serves a Chat-only model.
+    await expect(callOpenAI('sk', 'gpt-4o-mini', 's', 'u', 100, 'https://llm.example')).rejects.toThrow(/truncated/);
   });
 
   it('rejects an Anthropic answer with stop_reason max_tokens', async () => {

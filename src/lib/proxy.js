@@ -181,18 +181,50 @@ export async function absApi(absBaseUrl, absToken, path, options = {}) {
   return res.json();
 }
 
+// OpenAI is shutting these models down and names gpt-6-luna as the
+// replacement for every one of them (developers.openai.com/api/docs/deprecations:
+// gpt-5-nano on 2026-12-11, GPT-4o / 4o mini / 4.1 / 4.1 mini on 2027-01-14,
+// gpt-5.4-nano on 2027-04-01). Saved configs still name them, so callOpenAI
+// swaps them at call time. Only for api.openai.com: a custom base URL may
+// serve its own model under the same name.
+export const OPENAI_REPLACEMENT_MODEL = 'gpt-6-luna';
+export const RETIRED_OPENAI_MODELS = new Set([
+  'gpt-5-nano', 'gpt-5-nano-2025-08-07',
+  'gpt-4o', 'gpt-4o-2024-08-06', 'gpt-4o-2024-11-20',
+  'gpt-4o-mini', 'gpt-4o-mini-2024-07-18',
+  'gpt-4.1', 'gpt-4.1-2025-04-14',
+  'gpt-4.1-mini', 'gpt-4.1-mini-2025-04-14',
+  'gpt-5.4-nano', 'gpt-5.4-nano-2026-03-17',
+]);
+
+export function resolveOpenAIModel(model, baseUrl = 'https://api.openai.com') {
+  const official = !baseUrl || /^https:\/\/api\.openai\.com\/?$/.test(baseUrl);
+  return official && RETIRED_OPENAI_MODELS.has(model) ? OPENAI_REPLACEMENT_MODEL : model;
+}
+
+// gpt-5 and later are reasoning models and go through the Responses API.
+export function usesResponsesApi(model) {
+  return /^gpt-([5-9]|\d{2,})/.test(model);
+}
+
+// The lowest reasoning effort each family accepts: gpt-5.x takes 'minimal';
+// gpt-6 dropped it and starts at 'none'.
+export function lowestReasoningEffort(model) {
+  return model.startsWith('gpt-5') ? 'minimal' : 'none';
+}
+
 /**
  * Call OpenAI API through the proxy.
  * @param {string} apiKey - OpenAI API key
- * @param {string} model - e.g., 'gpt-5.4-nano'
+ * @param {string} model - e.g., 'gpt-6-luna'
  * @param {string} systemPrompt - System message
  * @param {string} userPrompt - User message
  * @param {number} maxTokens - Max output tokens
  * @param {string} baseUrl - API base URL (default: https://api.openai.com)
  */
 export async function callOpenAI(apiKey, model, systemPrompt, userPrompt, maxTokens = 2000, baseUrl = 'https://api.openai.com') {
-  const isGpt5 = model.startsWith('gpt-5');
-  const useResponsesApi = isGpt5;
+  model = resolveOpenAIModel(model, baseUrl);
+  const useResponsesApi = usesResponsesApi(model);
 
   // Browser + official API: the same-origin /api/openai reverse proxy. Any
   // other case goes direct; AI calls never use the CORS proxy.
@@ -211,7 +243,7 @@ export async function callOpenAI(apiKey, model, systemPrompt, userPrompt, maxTok
       ],
       max_output_tokens: maxTokens,
       text: { format: { type: 'json_object' } },
-      reasoning: { effort: 'minimal' },
+      reasoning: { effort: lowestReasoningEffort(model) },
     };
   } else {
     endpoint = `${apiBase}/v1/chat/completions`;

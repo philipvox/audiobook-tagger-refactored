@@ -122,8 +122,7 @@ export function WelcomeModal({ onDismiss, onStartWizard, onLocalOnly }) {
 // ============================================================================
 
 const AI_MODELS = [
-  { id: 'gpt-5.4-nano', label: 'GPT-5.4 Nano (Recommended)', provider: 'openai', cost: '~$0.01/book' },
-  { id: 'gpt-5-nano', label: 'GPT-5 Nano (Cheapest)', provider: 'openai', cost: '~$0.003/book' },
+  { id: 'gpt-6-luna', label: 'GPT-6 Luna (Recommended)', provider: 'openai', cost: '~$0.004/book' },
   { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', provider: 'anthropic', cost: '~$0.01/book' },
   { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'anthropic', cost: '~$0.05/book' },
 ];

@@ -3,20 +3,18 @@ import { Download, Upload, Tag, CheckCircle, Sparkles, FileText, Type, Library, 
 import { isTauri } from '../../lib/platform';
 import { isLocalGroup } from '../../lib/applyMetadata';
 import { LOCAL_PUSH_REASON } from '../../lib/absPush';
+import { resolveOpenAIModel } from '../../lib/proxy';
 
 // Per-book cost estimate (input ~2000 tokens, output ~1000 tokens)
 const MODEL_PRICES = {
-  'gpt-5.4-nano':              { input: 0.20, output: 1.25 },
-  'gpt-5-nano':                { input: 0.05, output: 0.40 },
+  'gpt-6-luna':                { input: 0.10, output: 0.50 },
   'gpt-5.4-mini':              { input: 0.75, output: 4.50 },
-  'gpt-4o-mini':               { input: 0.15, output: 0.60 },
-  'gpt-4o':                    { input: 2.50, output: 10.00 },
   'claude-haiku-4-5-20251001': { input: 0.80, output: 4.00 },
   'claude-sonnet-4-6':         { input: 3.00, output: 15.00 },
 };
 
 function estimateCost(modelId, bookCount, callsPerBook = 1) {
-  const p = MODEL_PRICES[modelId];
+  const p = MODEL_PRICES[resolveOpenAIModel(modelId)];
   if (!p || !bookCount) return null;
   const inputCost = (2000 * bookCount * callsPerBook / 1_000_000) * p.input;
   const outputCost = (1000 * bookCount * callsPerBook / 1_000_000) * p.output;
@@ -112,7 +110,7 @@ export function ActionBar({
   onSeriesAnalysis,
   analyzingSeries = false,
   seriesAnalysis = null,
-  aiModel = 'gpt-5-nano',
+  aiModel = 'gpt-6-luna',
 }) {
   const [showEnrichMenu, setShowEnrichMenu] = useState(false);
   const [showValidateMenu, setShowValidateMenu] = useState(false);

@@ -5,7 +5,7 @@
 
 // The default model for each cloud provider. DEFAULT_OPENAI_MODEL is also the
 // app-wide default (DEFAULT_CONFIG.ai_model in api.js and callAI's fallback).
-export const DEFAULT_OPENAI_MODEL = 'gpt-5-nano';
+export const DEFAULT_OPENAI_MODEL = 'gpt-6-luna';
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001';
 
 const OPENAI_BASE_URL = 'https://api.openai.com';

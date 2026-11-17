@@ -3,7 +3,7 @@
 // All API calls go through the Cloudflare Worker CORS proxy.
 // Config lives in browser localStorage.
 
-import { absApi, callAI, parseAIJson, proxyFetch, retryOn429, usesLocalAi } from './lib/proxy';
+import { absApi, callAI, parseAIJson, proxyFetch, retryOn429, usesLocalAi, resolveOpenAIModel } from './lib/proxy';
 import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName, isPlaceholderAuthor, isPlaceholderTitle } from './lib/normalize';
 import { isPlaceholderSeries } from './lib/absPayload.js';
@@ -79,6 +79,9 @@ export function getLocalConfig() {
     const stored = localStorage.getItem(CONFIG_KEY);
     if (stored) {
       const cfg = { ...DEFAULT_CONFIG, ...JSON.parse(stored) };
+      // A model OpenAI has retired shows (and runs) as its replacement. Not
+      // written back: the stored config only changes on an explicit save.
+      if (cfg.ai_model) cfg.ai_model = resolveOpenAIModel(cfg.ai_model, cfg.ai_base_url || undefined);
       // One-time migration: older saves persisted preserve_existing_genres:false
       // (the old default). Flip it once, then the marker protects later choices.
       const raw = JSON.parse(stored);
