@@ -188,7 +188,7 @@ export function restoreToast(groups) {
 function flagUnresolvedSeries(g) {
   if (!g || typeof g !== 'object') return g;
   if (g.source !== 'abs' && !g.abs_id) return g;
-  if (!needsSeriesUnresolvedFlag(g.metadata)) return g;
+  if (!needsSeriesUnresolvedFlag(g.metadata, g.abs_original)) return g;
   return {
     ...g,
     metadata: { ...g.metadata, series_unresolved: true },

@@ -115,15 +115,24 @@ export function parseSeriesName(str) {
 export const UNRESOLVED_SERIES_IMPORT_MESSAGE =
   "Could not read this book's series from AudiobookShelf. Series will not be pushed until you re-import.";
 
+const isUnparsedMultiSeries = (x) => {
+  if (!x || typeof x !== 'object') return false;
+  const list = Array.isArray(x.all_series) ? x.all_series : [];
+  return isMultiSeriesName(x.series) && list.length <= 1;
+};
+
 /**
- * D-1: true for a book saved by v2.2.3 that still carries the old builder's
- * unparsed multi-series string ("A #6, B #1") with no series list and no
- * series_unresolved flag. Such a book must be treated as series_unresolved.
+ * D-1: true for a book saved by v2.2.3 that was imported by the old builder,
+ * which kept an unparsed multi-series string ("A #6, B #1") with no series
+ * list and no series_unresolved flag. Such a book must be treated as
+ * series_unresolved. The string is looked for in the current metadata and in
+ * the import snapshot: a series edit made before the upgrade leaves the
+ * current series looking clean while the snapshot still shows that the
+ * book's real series list was never read.
  */
-export function needsSeriesUnresolvedFlag(m) {
+export function needsSeriesUnresolvedFlag(m, original = null) {
   if (!m || typeof m !== 'object' || 'series_unresolved' in m) return false;
-  const list = Array.isArray(m.all_series) ? m.all_series : [];
-  return isMultiSeriesName(m.series) && list.length <= 1;
+  return isUnparsedMultiSeries(m) || isUnparsedMultiSeries(original);
 }
 
 const PLACEHOLDER_SERIES = new Set(['n/a', 'none', 'standalone', 'unknown', 'null']);

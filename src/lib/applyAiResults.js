@@ -77,6 +77,68 @@ export function applyTitleResult(group, entry) {
   return { group: clearStage(applyMetadataToGroup(group, updates, fields), 'resolve'), outcome: 'changed' };
 }
 
+// ---- AI series answers on a book that is in more than one series ----
+// An AI series answer may rename a single-series book's series freely: that is
+// what Fix Series is for. On a book with two or more series a rename can drop
+// one of them from AudiobookShelf, so the answer must be recognisably one of
+// the book's own series:
+//   - the primary (same name, or a spelling variant of it): applied as given;
+//   - one of the others (same name or a variant): that series is promoted
+//     under the name it already has, and the old primary is kept;
+//   - anything else: refused, the book's series are left alone.
+const seriesKey = (name) => String(name ?? '').toLowerCase()
+  .replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+  .replace(/^the\s+/, '')
+  .replace(/\s+(series|saga|novels?|books?|trilogy|cycle)$/, '')
+  .trim();
+
+// Same key, or one key contains the other on word boundaries.
+const seriesRelated = (a, b) => {
+  const ka = seriesKey(a);
+  const kb = seriesKey(b);
+  if (!ka || !kb) return false;
+  if (ka === kb) return true;
+  const [short, long] = ka.length <= kb.length ? [ka, kb] : [kb, ka];
+  return short.length >= 3 && ` ${long} `.includes(` ${short} `);
+};
+
+const entryName = (x) => String((typeof x === 'string' ? x : x?.name) ?? '').trim();
+const entrySequence = (x) => (typeof x === 'string' ? null : x?.sequence ?? null);
+
+/**
+ * Decide what an AI series answer does to a book.
+ * Returns { action: 'apply' | 'refuse', series, sequence }. `sequence` is the
+ * AI's sequence when it gave one; for a promoted series with no AI sequence it
+ * is that series' own sequence; otherwise undefined (caller keeps its default).
+ */
+export function planAiSeries(metadata, aiSeries, aiSequence) {
+  const m = metadata || {};
+  const name = String(aiSeries ?? '').trim();
+  const sequence = has(aiSequence) ? String(aiSequence).trim() : undefined;
+  const list = Array.isArray(m.all_series) ? m.all_series : [];
+  if (list.length < 2) return { action: 'apply', series: name, sequence };
+
+  const primary = entryName(list[0]) || String(m.series ?? '').trim();
+  const others = list.slice(1);
+  const promote = (x) => ({
+    action: 'apply',
+    series: entryName(x),
+    sequence: sequence !== undefined ? sequence : entrySequence(x),
+  });
+
+  const key = seriesKey(name);
+  if (key && key === seriesKey(primary)) return { action: 'apply', series: name, sequence };
+  const exact = others.find((x) => key && seriesKey(entryName(x)) === key);
+  if (exact) return promote(exact);
+  if (seriesRelated(name, primary)) return { action: 'apply', series: name, sequence };
+  const near = others.find((x) => seriesRelated(name, entryName(x)));
+  if (near) return promote(near);
+  return { action: 'refuse', series: name, sequence };
+}
+
+export const multiSeriesRefusedMessage = (name) =>
+  `Left this book's series alone: it is in more than one series and "${name}" is not one of them.`;
+
 // ---- Fix Series: replace the primary series (M-5) ----
 export const UNRESOLVED_SERIES_MESSAGE =
   "Fix Series skipped this book: its series could not be read from AudiobookShelf. Re-import it first.";
@@ -99,8 +161,15 @@ export function applySeriesResult(group, entry) {
     return { group: clearStage(group, 'series'), outcome: 'unchanged' };
   }
   const stripped = stripEmbeddedSequence(String(r.series).trim());
-  const series = stripped.name;
-  const sequence = has(r.sequence) ? String(r.sequence).trim() : (stripped.sequence ?? m.sequence ?? null);
+  const plan = planAiSeries(m, stripped.name, has(r.sequence) ? r.sequence : stripped.sequence);
+  if (plan.action === 'refuse') {
+    return {
+      group: { ...group, lastError: { stage: 'series', kind: 'series', message: multiSeriesRefusedMessage(plan.series), severity: 'warn' } },
+      outcome: 'skipped',
+    };
+  }
+  const series = plan.series;
+  const sequence = plan.sequence !== undefined ? plan.sequence : (m.sequence ?? null);
 
   const fields = [];
   if (series !== m.series) fields.push('series');
@@ -340,15 +409,21 @@ export function applyResolveResult(group, entry, gatherDetail) {
   // a series. A series the book is already in as a secondary is promoted by
   // syncAllSeries, keeping the old primary (D-2).
   const m = g.metadata || {};
-  const takeSeries = r.series !== undefined
+  const seriesOffered = r.series !== undefined
     && m.series_unresolved !== true
     && !isPlaceholderSeries(r.series);
+  // On a book in more than one series the answer must be one of its own
+  // series; otherwise the series are left alone and the rest still applies.
+  const plan = seriesOffered ? planAiSeries(m, r.series, r.sequence) : null;
+  const takeSeries = !!plan && plan.action === 'apply';
+  const newSeries = takeSeries ? plan.series : m.series;
+  const newSequence = takeSeries && plan.sequence !== undefined ? plan.sequence : m.sequence;
   const changedFileFields = [];
   if (r.title && r.title !== m.title) changedFileFields.push('title');
   if (r.author && r.author !== m.author) changedFileFields.push('author');
   if (r.subtitle && r.subtitle !== m.subtitle) changedFileFields.push('subtitle');
-  if (takeSeries && r.series !== m.series) changedFileFields.push('series');
-  if (takeSeries && r.sequence !== undefined && r.sequence !== m.sequence) changedFileFields.push('sequence');
+  if (takeSeries && newSeries !== m.series) changedFileFields.push('series');
+  if (takeSeries && !same(newSequence, m.sequence)) changedFileFields.push('sequence');
   if (r.narrator && r.narrator !== m.narrator) changedFileFields.push('narrator');
   const next = applyMetadataToGroup(
     g,
@@ -356,8 +431,8 @@ export function applyResolveResult(group, entry, gatherDetail) {
       title: r.title || m.title,
       author: r.author || m.author,
       subtitle: r.subtitle || m.subtitle,
-      series: takeSeries ? r.series : m.series,
-      sequence: takeSeries && r.sequence !== undefined ? r.sequence : m.sequence,
+      series: newSeries,
+      sequence: newSequence,
       narrator: r.narrator || m.narrator,
     },
     changedFileFields

@@ -119,6 +119,68 @@ describe('applySeriesResult (M-5)', () => {
   });
 });
 
+describe('AI series answers on a book with more than one series', () => {
+  const PT = 'The Plantagenet and Tudor';
+  const multi = () => book({
+    series: PT, sequence: '6',
+    all_series: [{ name: PT, sequence: '6' }, { name: 'Tudor Court', sequence: '1' }],
+  });
+  const names = (g) => g.metadata.all_series.map((x) => x.name);
+
+  it('Fix Series: a near match of a secondary series promotes that series under its own name and keeps the primary', () => {
+    for (const answer of ['The Tudor Court', 'Tudor Court Series', 'tudor court']) {
+      const { group, outcome } = applySeriesResult(multi(), ok({ series: answer, sequence: null }));
+      expect(outcome).toBe('changed');
+      expect(names(group)).toEqual(['Tudor Court', PT]);
+      expect(group.metadata.series).toBe('Tudor Court');
+      expect(group.metadata.sequence).toBe('1');
+    }
+  });
+
+  it('Fix Series: an unrelated series is refused, nothing changes and the book says why', () => {
+    const start = multi();
+    const { group, outcome } = applySeriesResult(start, ok({ series: 'Cousins War', sequence: '2' }));
+    expect(outcome).toBe('skipped');
+    expect(group.metadata).toEqual(start.metadata);
+    expect(group.changedFields).toEqual([]);
+    expect(group.lastError).toMatchObject({ stage: 'series', severity: 'warn' });
+    expect(group.lastError.message).toContain('Cousins War');
+  });
+
+  it('Fix Series: a variant of the primary still renames it in place and keeps the others', () => {
+    const { group } = applySeriesResult(multi(), ok({ series: 'Plantagenet and Tudor Novels', sequence: '6' }));
+    expect(names(group)).toEqual(['Plantagenet and Tudor Novels', 'Tudor Court']);
+  });
+
+  it('Fix Series: the same primary with a new sequence only changes the sequence', () => {
+    const { group, outcome } = applySeriesResult(multi(), ok({ series: PT, sequence: '7' }));
+    expect(outcome).toBe('changed');
+    expect(group.metadata.all_series).toEqual([{ name: PT, sequence: '7' }, { name: 'Tudor Court', sequence: '1' }]);
+  });
+
+  it('Resolve: a near match of a secondary promotes it and keeps the primary', () => {
+    const g = applyResolveResult(multi(), { id: 'b1', changed: true, title: 'Mort', series: 'The Tudor Court', sequence: '1' });
+    expect(names(g)).toEqual(['Tudor Court', PT]);
+  });
+
+  it('Resolve: an unrelated series is not taken, other fields still apply', () => {
+    const start = multi();
+    const g = applyResolveResult(start, { id: 'b1', changed: true, title: 'New Title', series: 'Cousins War', sequence: '2' });
+    expect(g.metadata.title).toBe('New Title');
+    expect(g.metadata.series).toBe(PT);
+    expect(g.metadata.sequence).toBe('6');
+    expect(g.metadata.all_series).toEqual(start.metadata.all_series);
+    expect(g.changedFields).not.toContain('series');
+    expect(g.changedFields).not.toContain('sequence');
+  });
+
+  it('a single-series book is still renamed by an unrelated answer (Fix Series exists to do that)', () => {
+    const start = book({ series: 'Stormlight', sequence: '1', all_series: [{ name: 'Stormlight', sequence: '1' }] });
+    const { group } = applySeriesResult(start, ok({ series: 'Cosmere Saga', sequence: '1' }));
+    expect(names(group)).toEqual(['Cosmere Saga']);
+  });
+});
+
 describe('applySubtitleResult', () => {
   it('applies a fixed subtitle', () => {
     const { group, outcome } = applySubtitleResult(book(), { id: 'b1', success: true, fixed: true, subtitle: 'A Discworld Novel' });

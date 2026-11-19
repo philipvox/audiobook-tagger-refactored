@@ -174,3 +174,48 @@ describe('D-6: Resolve on a series_unresolved book', () => {
     expect(standingWarnings(unresolved())).toEqual([]);
   });
 });
+
+describe('D-1: a v2.2.3 session whose series was already edited before the upgrade', () => {
+  // The snapshot still holds the old builder's unparsed string, but the book's
+  // current series was changed to a single name (Resolve, or a hand edit) and
+  // the session was saved. The current metadata looks clean; the snapshot does not.
+  const combined = 'The Plantagenet and Tudor #6, Tudor Court #1';
+  const imported = { title: 'T', author: 'A B', series: combined, sequence: null, all_series: [], genres: [], tags: [] };
+  const savedGroup = () => ({
+    id: 'g1', abs_id: 'g1', source: 'abs', files: [],
+    metadata: { ...imported, series: 'Tudor Court', sequence: '1', all_series: [{ name: 'Tudor Court', sequence: '1' }] },
+    abs_original: snapshotAbsMetadata(imported),
+    changedFields: ['series', 'sequence'], total_changes: 2,
+  });
+  const restore = (g) => parseSession(JSON.stringify({ version: 1, savedAt: 1, groups: [g] })).groups[0];
+
+  it('is flagged series_unresolved on restore, from the snapshot', () => {
+    const r = restore(savedGroup());
+    expect(r.metadata.series_unresolved).toBe(true);
+    // Shown on the book itself; the standing badge does not repeat it.
+    expect(r.lastError?.message).toBe(UNRESOLVED_SERIES_IMPORT_MESSAGE);
+    expect(standingWarnings({ ...r, lastError: undefined }).map((w) => w.message)).toContain(UNRESOLVED_SERIES_IMPORT_MESSAGE);
+  });
+
+  it('pushes no series, so the series ABS holds is not dropped', () => {
+    const r = restore(savedGroup());
+    const payload = buildAbsPayload(r.metadata, r.abs_original, {});
+    expect(payload.metadata.series).toBeUndefined();
+    expect(payload).toEqual({ metadata: {} });
+  });
+
+  it('still pushes its other staged edits', () => {
+    const g = savedGroup();
+    g.metadata.title = 'New T';
+    const r = restore(g);
+    expect(buildAbsPayload(r.metadata, r.abs_original, {})).toEqual({ metadata: { title: 'New T' } });
+  });
+
+  it('a snapshot with a real series list is not flagged', () => {
+    const good = { ...imported, series: 'The Plantagenet and Tudor', sequence: '6',
+      all_series: [{ name: 'The Plantagenet and Tudor', sequence: '6' }, { name: 'Tudor Court', sequence: '1' }] };
+    const g = { id: 'g1', abs_id: 'g1', source: 'abs', files: [], abs_original: snapshotAbsMetadata(good),
+      metadata: { ...good, series: 'Tudor Court', sequence: '1', all_series: [{ name: 'Tudor Court', sequence: '1' }, { name: 'The Plantagenet and Tudor', sequence: '6' }] } };
+    expect(restore(g).metadata.series_unresolved).toBeUndefined();
+  });
+});
