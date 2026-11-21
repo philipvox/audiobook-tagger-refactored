@@ -73,6 +73,8 @@ const DEFAULT_CONFIG = {
   cloud_concurrency: 5,
   local_skip_dna: true,
   custom_providers: [],
+  // Claude Code provider: '' = find the `claude` program automatically.
+  claude_cli_path: '',
 };
 
 export function getLocalConfig() {
@@ -185,6 +187,8 @@ const TAURI_COMMANDS = new Set([
   'whisper_local_delete_model',
   'whisper_local_get_disk_usage',
   'whisper_local_uninstall',
+  'claude_cli_status',
+  'claude_cli_call',
 ]);
 
 // ============================================================================

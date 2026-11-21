@@ -1,3 +1,4 @@
+mod claude_cli;
 mod download;
 mod scanner;
 mod session;
@@ -45,6 +46,8 @@ pub fn run() {
             whisper_local::whisper_local_delete_model,
             whisper_local::whisper_local_get_disk_usage,
             whisper_local::whisper_local_uninstall,
+            claude_cli::claude_cli_status,
+            claude_cli::claude_cli_call,
         ])
         .setup(|_app| {
             // An Ollama this app started before a crash is still running: take it

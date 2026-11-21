@@ -16,6 +16,7 @@ import { ChevronDown, Check, X, Plus, Trash2, AlertCircle, Library, Settings, Sp
 import { useApp, shouldAutoEnableLocalAI } from '../context/AppContext';
 import { useToast } from '../components/Toast';
 import { ConfirmModal } from '../components/ConfirmModal';
+import { ClaudeCliPanel } from '../components/ClaudeCliPanel';
 
 /**
  * Shallow-equality check for two config objects. Used to detect whether the
@@ -837,7 +838,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
             {/* AI Provider */}
             <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
               <h3 className="text-lg font-semibold text-white mb-3">AI Provider</h3>
-              <p className="text-sm text-gray-400">Enter your API key for OpenAI or Anthropic Claude. {isTauri() ? 'Keys are stored by this app on this computer only.' : 'Keys are stored in your browser only.'}</p>
+              <p className="text-sm text-gray-400">Enter your API key for OpenAI or Anthropic Claude{isTauri() ? ', or pick Claude Code below to use your Claude subscription' : ''}. {isTauri() ? 'Keys are stored by this app on this computer only.' : 'Keys are stored in your browser only.'}</p>
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
                       <label className="text-sm text-gray-400">OpenAI API Key</label>
@@ -873,6 +874,12 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                       onChange={(e) => {
                           const model = AI_MODELS.find(m => m.id === e.target.value);
                           const isAnthropic = model?.provider === 'anthropic';
+                          if (e.target.value.startsWith('cli:')) {
+                            // Claude Code needs no base URL. use_local_ai is left to its
+                            // switch (H-12); ClaudeCliPanel warns while it is on.
+                            setLocalConfig({ ...localConfig, ai_model: e.target.value });
+                            return;
+                          }
                           setLocalConfig({
                             ...localConfig,
                             ai_model: e.target.value,
@@ -895,8 +902,17 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                           return <option key={m.id} value={m.id}>{m.label}{costStr}</option>;
                         })}
                       </optgroup>
+                      {isTauri() && (
+                        <optgroup label="Claude Code (your subscription, no API key)">
+                          <option value="cli:haiku">Claude Code: Haiku (fast)</option>
+                          <option value="cli:sonnet">Claude Code: Sonnet (best quality, slower)</option>
+                        </optgroup>
+                      )}
                     </select>
                   </div>
+                  {isTauri() && (localConfig.ai_model || '').startsWith('cli:') && (
+                    <ClaudeCliPanel localConfig={localConfig} setLocalConfig={setLocalConfig} />
+                  )}
             </div>
 
             {/* Performance Controls */}

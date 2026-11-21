@@ -30,6 +30,7 @@ export function shouldAutoEnableLocalAI(config, ollamaStatus) {
   if (!config) return false;
   if (config.use_local_ai !== undefined) return false; // explicit user choice
   if (config.openai_api_key || config.anthropic_api_key) return false;
+  if (config.ai_model?.startsWith?.('cli:')) return false; // Claude Code chosen
   return !!(ollamaStatus?.running && ollamaStatus?.models?.length > 0);
 }
 
@@ -250,6 +251,7 @@ export function AppProvider({ children }) {
     // Skip the Ollama probe entirely if the user has an explicit choice or a cloud key.
     if (config.use_local_ai !== undefined) return;
     if (config.openai_api_key || config.anthropic_api_key) return;
+    if (config.ai_model?.startsWith?.('cli:')) return;
 
     (async () => {
       try {

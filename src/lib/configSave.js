@@ -22,6 +22,8 @@ const hasKey = (v) => typeof v === 'string' && v.trim() !== '';
  */
 export function matchAiModelToKeys(config) {
   if (!config) return config;
+  // Claude Code (the CLI) needs no key: never switch it away.
+  if (typeof config.ai_model === 'string' && config.ai_model.startsWith('cli:')) return config;
   const openai = hasKey(config.openai_api_key);
   const anthropic = hasKey(config.anthropic_api_key);
   const model = config.ai_model || DEFAULT_OPENAI_MODEL;

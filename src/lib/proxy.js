@@ -470,6 +470,33 @@ export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b',
  * @param {string} userPrompt
  * @param {number} maxTokens
  */
+/**
+ * "Claude Code" provider: the user's installed `claude` CLI, logged in with
+ * their Claude subscription (desktop app only). Model ids carry a `cli:`
+ * prefix so they never match the Anthropic-API `claude*` check.
+ */
+export const CLAUDE_CLI_PREFIX = 'cli:';
+export const CLAUDE_CLI_MODELS = { 'cli:haiku': 'haiku', 'cli:sonnet': 'sonnet' };
+export const DEFAULT_CLAUDE_CLI_MODEL = 'cli:haiku';
+
+/** True when AI calls go to the Claude Code CLI. */
+export function usesClaudeCli(config) {
+  return isTauri() && typeof config?.ai_model === 'string' && config.ai_model.startsWith(CLAUDE_CLI_PREFIX);
+}
+
+/** Run one prompt through the Claude Code CLI (Rust: claude_cli_call). */
+export async function callClaudeCli(config, systemPrompt, userPrompt) {
+  const alias = CLAUDE_CLI_MODELS[config.ai_model];
+  if (!alias) throw new Error(`Unknown Claude Code model: ${config.ai_model}`);
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke('claude_cli_call', {
+    systemPrompt,
+    userPrompt,
+    model: alias,
+    path: config.claude_cli_path || null,
+  });
+}
+
 /** True when AI calls go to the local Ollama model: the switch and a model. */
 export function usesLocalAi(config) {
   return !!(config?.use_local_ai && config?.ollama_model);
@@ -477,10 +504,10 @@ export function usesLocalAi(config) {
 
 /**
  * The one definition of "an AI provider is configured", matching what callAI
- * needs: local AI with a model, or an OpenAI or Anthropic key.
+ * needs: local AI with a model, Claude Code, or an OpenAI or Anthropic key.
  */
 export function isAiConfigured(config) {
-  return usesLocalAi(config) || !!(config?.openai_api_key || config?.anthropic_api_key);
+  return usesLocalAi(config) || usesClaudeCli(config) || !!(config?.openai_api_key || config?.anthropic_api_key);
 }
 
 export async function callAI(config, systemPrompt, userPrompt, maxTokens = 2000) {
@@ -490,6 +517,10 @@ export async function callAI(config, systemPrompt, userPrompt, maxTokens = 2000)
       model: config.ollama_model,
       maxTokens,
     });
+  }
+
+  if (usesClaudeCli(config)) {
+    return callClaudeCli(config, systemPrompt, userPrompt);
   }
 
   const model = config.ai_model || DEFAULT_OPENAI_MODEL;
