@@ -50,6 +50,7 @@ import { listFingerprint } from '../lib/selectionFingerprint';
 import { isPlaceholderAuthor, isPlaceholderTitle } from '../lib/normalize';
 import { WritePreviewModal } from '../components/WritePreviewModal';
 import { ConfirmModal } from '../components/ConfirmModal';
+import { groupDurationSeconds } from '../lib/bookLength';
 
 export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoSvg }) {
   const {
@@ -1995,7 +1996,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           author: g.metadata?.author || '',
           genres: g.metadata?.genres || [],
           description: g.metadata?.description || null,
-          duration_minutes: g.metadata?.runtime_minutes || null,
+          duration: groupDurationSeconds(g),
         }));
 
         const result = await callBackend('assign_tags_with_gpt', { books, config, dnaEnabled });
@@ -2085,7 +2086,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       genres: g.metadata?.genres || [],
       tags: g.metadata?.tags || [],
       narrator: g.metadata?.narrator || null,
-      duration_minutes: g.metadata?.runtime_minutes || null,
+      duration: groupDurationSeconds(g),
       series_name: g.metadata?.series || null,
       series_sequence: g.metadata?.sequence || null,
       year: g.metadata?.year || null,
@@ -2224,7 +2225,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
       description: g.metadata?.description || null,
       genres: g.metadata?.genres || [],
       tags: g.metadata?.tags || [],
-      duration_minutes: g.metadata?.runtime_minutes || null,
+      duration: groupDurationSeconds(g),
       narrator: g.metadata?.narrator || null,
       series_name: g.metadata?.series || null,
       series_sequence: g.metadata?.sequence || null,

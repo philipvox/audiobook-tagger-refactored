@@ -6,6 +6,8 @@
 /**
  * Safely serialize a value for inclusion in AI prompts.
  */
+import { bookDurationSeconds, formatDurationForPrompt } from './bookLength';
+
 function safe(value) {
   if (value === null || value === undefined) return 'null';
   return JSON.stringify(String(value));
@@ -259,6 +261,8 @@ export function buildClassificationPrompt(book, externalData = null, customInstr
   if (book.narrator) context += `\nNarrator: ${safe(book.narrator)}`;
   if (book.published_year || book.year) context += `\nYear: ${book.published_year || book.year}`;
   if (book.publisher) context += `\nPublisher: ${safe(book.publisher)}`;
+  const durationSec = bookDurationSeconds(book);
+  if (durationSec) context += `\nDuration: ${formatDurationForPrompt(durationSec)}`;
 
   if (externalData) {
     if (externalData.genres?.length > 0) {
@@ -301,6 +305,8 @@ export function buildBatchClassificationPrompt(books, customInstructions = null)
     if (book.narrator) booksContext += `\nNarrator: ${safe(book.narrator)}`;
     if (book.series) booksContext += `\nSeries: ${safe(book.series)}`;
     if (book.published_year || book.year) booksContext += `\nYear: ${book.published_year || book.year}`;
+    const durationSec = bookDurationSeconds(book);
+    if (durationSec) booksContext += `\nDuration: ${formatDurationForPrompt(durationSec)}`;
     booksContext += '\n';
   });
 
@@ -512,10 +518,9 @@ export function buildDnaPrompt(book) {
   if (book.narrator) {
     prompt += `Narrator: ${safe(book.narrator)}\n`;
   }
-  if (book.duration) {
-    const hours = Math.floor(book.duration / 3600);
-    const mins = Math.floor((book.duration % 3600) / 60);
-    prompt += `Duration: ${hours}h ${mins}m\n`;
+  const durationSec = bookDurationSeconds(book);
+  if (durationSec) {
+    prompt += `Duration: ${formatDurationForPrompt(durationSec)}\n`;
   }
   if (book.series) {
     prompt += `Series: ${safe(book.series)}`;

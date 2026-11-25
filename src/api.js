@@ -16,6 +16,7 @@ import { isTauri } from './lib/platform.js';
 import { DEFAULT_OPENAI_MODEL } from './lib/configSave.js';
 import { mapAgeCategory } from './lib/ageCategory.js';
 import { makeErrorDetail, errorDetailFromException } from './lib/errorDetail.js';
+import { bookDurationSeconds, formatDurationForPrompt, withLengthTags } from './lib/bookLength.js';
 
 /** Safely serialize a value for AI prompts (escapes quotes/newlines). */
 function safe(value) {
@@ -979,8 +980,14 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const results = [];
 
     // Helper: build result from parsed classification
-    const buildResult = (book, parsed, dna_tags = []) => {
+    const buildResult = (book, parsed, rawDnaTags = []) => {
       const age_tags = ageTagsFromRating(parsed.age_rating);
+      // Length comes from the real duration, never the AI's guess.
+      const durationSec = bookDurationSeconds(book);
+      const dna_tags = withLengthTags(rawDnaTags, durationSec, { dna: true });
+      if (durationSec && (parsed.genres?.length || parsed.tags?.length || dna_tags.length || age_tags.length)) {
+        parsed = { ...parsed, tags: withLengthTags(parsed.tags, durationSec) };
+      }
       // Empty AI answer (no genres, tags, dna or age tags): report a failure
       // rather than a success the applier could mistake for "clear everything".
       if (!(parsed.genres || []).length && !(parsed.tags || []).length && !dna_tags.length && !age_tags.length) {
@@ -1342,8 +1349,8 @@ Return JSON: {"genres":["Genre1","Genre2"]}`;
       try {
         emitEvent('batch-progress', { call_type: 'tags', current: completed, total: books.length, title: `Tagging: ${book.title}` });
         // Accept duration in seconds (book.duration) or minutes (book.duration_minutes)
-        const durationSec = book.duration || (book.duration_minutes ? book.duration_minutes * 60 : null);
-        const durationStr = durationSec ? `${Math.floor(durationSec / 3600)}h ${Math.floor((durationSec % 3600) / 60)}m` : null;
+        const durationSec = bookDurationSeconds(book);
+        const durationStr = durationSec ? formatDurationForPrompt(durationSec) : null;
 
         // --- STEP 1: Standard tags ---
         const tagInstructions = config.custom_tag_instructions || DEFAULT_TAG_INSTRUCTIONS;
@@ -1363,7 +1370,7 @@ Return ONLY valid JSON:
 {"tags":["tag-1","tag-2","tag-3"]}`;
         const response = await callAI(config, getSystemPrompt(config), prompt, 1000);
         const parsed = parseAIJson(response);
-        let standardTags = parsed.tags || [];
+        let standardTags = withLengthTags(parsed.tags || [], durationSec);
 
         // --- STEP 2: Generate DNA tags (skip if disabled) ---
         let dnaTags = [];
@@ -1374,7 +1381,7 @@ Return ONLY valid JSON:
             const dnaPrompt = buildDnaPrompt(book);
             const dnaResponse = await callAI(config, getDnaSystemPrompt(config), dnaPrompt, 1500);
             const dna = parseAIJson(dnaResponse);
-            dnaTags = convertDnaToTags(dna);
+            dnaTags = withLengthTags(convertDnaToTags(dna), durationSec, { dna: true });
             if (dnaTags.length === 0) dnaError = 'The AI returned no DNA tags.';
           } catch (dnaErr) {
             console.warn(`DNA generation failed for ${book.title}:`, dnaErr.message);
@@ -1654,7 +1661,7 @@ Return JSON: {"year":"2005"}`;
         const prompt = buildDnaPrompt(item);
         const response = await callAI(config, getDnaSystemPrompt(config), prompt, 1500);
         const parsed = parseAIJson(response);
-        const dnaTags = convertDnaToTags(parsed);
+        const dnaTags = withLengthTags(convertDnaToTags(parsed), bookDurationSeconds(item), { dna: true });
         if (dnaTags.length === 0) throw new Error('The AI returned no DNA tags, so existing DNA tags were kept.');
 
         // Merge with existing tags (preserve non-DNA tags, replace DNA ones only
