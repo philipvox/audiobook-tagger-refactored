@@ -187,6 +187,43 @@ fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n).collect::<String>()) }
 }
 
+/// Temp file holding one call's system prompt; deleted when dropped.
+struct SystemPromptFile(PathBuf);
+
+impl SystemPromptFile {
+    fn create(text: &str) -> Result<Self, String> {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = std::env::temp_dir().join(format!(
+            "audiobook-tagger-prompt-{}-{}-{}.txt",
+            std::process::id(),
+            nanos,
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&p).map_err(|e| format!("Couldn't write the prompt file: {e}"))?;
+        f.write_all(text.as_bytes()).map_err(|e| format!("Couldn't write the prompt file: {e}"))?;
+        Ok(Self(p))
+    }
+}
+
+impl Drop for SystemPromptFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 #[tauri::command]
 pub async fn claude_cli_call(
     system_prompt: String,
@@ -198,11 +235,14 @@ pub async fn claude_cli_call(
         return Err(format!("Unknown Claude Code model: {model}"));
     }
     let bin = resolve_binary(path.as_deref()).await?;
+    // The system prompt goes in a private temp file, not on the command line:
+    // Windows caps a command line at ~32K characters, and a `claude.cmd`
+    // (npm install) can't take multi-line arguments at all.
+    let sp_file = SystemPromptFile::create(&system_prompt)?;
     let mut cmd = base_command(&bin);
-    cmd.args([
-        "-p",
-        "--model", &model,
-        "--system-prompt", &system_prompt,
+    cmd.args(["-p", "--model", &model, "--system-prompt-file"])
+    .arg(&sp_file.0)
+    .args([
         "--tools", "",
         "--strict-mcp-config",
         "--setting-sources", "",
@@ -263,6 +303,15 @@ mod tests {
     fn rejects_garbage_and_empty() {
         assert!(parse_print_output("not json").is_err());
         assert!(parse_print_output(r#"{"type":"result","subtype":"success","result":""}"#).is_err());
+    }
+
+    #[test]
+    fn prompt_file_is_written_then_removed() {
+        let f = SystemPromptFile::create("line one\nline \"two\" %PATH%").unwrap();
+        let p = f.0.clone();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "line one\nline \"two\" %PATH%");
+        drop(f);
+        assert!(!p.exists());
     }
 
     #[tokio::test]
